@@ -17,7 +17,7 @@ rigscan only reads until you press a button. Every change explains itself first,
 - **Crashes:** blue screens and app crashes, with what each stop code usually means.
 - **What's running:** live processor, memory and drive use, grouped by app.
 - **Changes and History:** what changed between checks, every change rigscan made with an Undo button, and charts of free space, suggestions, startup apps and battery health over time.
-- **Regular check-ups (optional):** after the first check, rigscan offers to check again daily, weekly or monthly. A check-up runs quietly at noon, or as soon as the PC is on after that, and shows a notification only when something new needs a look. It keeps up to 100 saved checks.
+- **Regular check-ups (optional):** after the first check, rigscan offers to check again daily, weekly or monthly. A check-up runs quietly at the hour you pick (noon unless you change it), or as soon as the PC is on after that, and shows a notification only when something new needs a look. It keeps up to 100 saved checks.
 - **Save a report:** HTML or PDF, with personal details hidden unless you choose to show them.
 
 Some details (Windows Security's skip list, crash files, some drive health data) need administrator rights. The app offers to restart as administrator and works without it.

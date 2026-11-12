@@ -35,12 +35,20 @@ impl Every {
     }
 }
 
+/// When check-ups run unless the person picks another hour.
+pub const NOON: u8 = 12;
+
+/// "09:00" for a whole hour. A saved hour outside 0-23 counts as noon.
+pub fn hour_label(hour: u8) -> String {
+    format!("{:02}:00", if hour < 24 { hour } else { NOON })
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
-/// The task definition. Runs at noon, or as soon as the PC is on after a missed time, on battery too.
-pub fn task_xml(every: Every, exe: &str, user: &str, today: chrono::NaiveDate) -> String {
+/// The task definition. Runs at the chosen hour, or as soon as the PC is on after a missed time, on battery too.
+pub fn task_xml(every: Every, hour: u8, exe: &str, user: &str, today: chrono::NaiveDate) -> String {
     const DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
     const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     let schedule = match every {
@@ -59,7 +67,7 @@ pub fn task_xml(every: Every, exe: &str, user: &str, today: chrono::NaiveDate) -
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Runs a rigscan check-up and lets you know if something new needs a look. Nothing is changed on its own.</Description></RegistrationInfo>
-  <Triggers><CalendarTrigger><StartBoundary>{date}T12:00:00</StartBoundary><Enabled>true</Enabled>{schedule}</CalendarTrigger></Triggers>
+  <Triggers><CalendarTrigger><StartBoundary>{date}T{time}:00</StartBoundary><Enabled>true</Enabled>{schedule}</CalendarTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
@@ -72,14 +80,15 @@ pub fn task_xml(every: Every, exe: &str, user: &str, today: chrono::NaiveDate) -
   <Actions Context="Author"><Exec><Command>{exe}</Command><Arguments>--scheduled</Arguments></Exec></Actions>
 </Task>"#,
         date = today.format("%Y-%m-%d"),
+        time = hour_label(hour),
         user = xml_escape(user),
         exe = xml_escape(exe),
     )
 }
 
-/// Turns regular check-ups on at the chosen pace, or off. Also registers how Windows shows
+/// Turns regular check-ups on at the chosen pace and hour, or off. Also registers how Windows shows
 /// rigscan's notifications and opens rigscan when one is clicked.
-pub fn set(every: Every) -> Result<()> {
+pub fn set(every: Every, hour: u8) -> Result<()> {
     let exe = std::env::current_exe()?.to_string_lossy().to_string();
     let script = if every == Every::Off {
         format!(
@@ -90,7 +99,7 @@ pub fn set(every: Every) -> Result<()> {
         )
     } else {
         let user = format!("{}\\{}", std::env::var("USERDOMAIN").unwrap_or_default(), std::env::var("USERNAME").unwrap_or_default());
-        let xml = task_xml(every, &exe, &user, Local::now().date_naive());
+        let xml = task_xml(every, hour, &exe, &user, Local::now().date_naive());
         format!(
             "$ErrorActionPreference = 'Stop'\n\
              $k = New-Item -Path 'HKCU:\\Software\\Classes\\AppUserModelId\\{AUMID}' -Force\n\
@@ -194,11 +203,13 @@ mod tests {
             .trim()
             .to_string()
         };
-        set(Every::Weekly).unwrap();
+        set(Every::Weekly, 9).unwrap();
         assert_eq!(exists(), "yes");
+        let start = powershell(&format!("(Get-ScheduledTask -TaskName {}).Triggers[0].StartBoundary", ps_quote(TASK)), Duration::from_secs(30)).unwrap();
+        assert!(start.stdout.contains("T09:00:00"), "{}", start.stdout);
         let a = f("test", Level::DoFirst);
         notify(&toast_xml(&[&a])).unwrap();
-        set(Every::Off).unwrap();
+        set(Every::Off, NOON).unwrap();
         assert_eq!(exists(), "no");
     }
 
@@ -224,11 +235,14 @@ mod tests {
     #[test]
     fn task_runs_at_the_chosen_pace() {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 11, 30).unwrap();
-        let w = task_xml(Every::Weekly, r"C:\Apps\rig & scan\rigscan.exe", r"PC\me", d);
+        let w = task_xml(Every::Weekly, NOON, r"C:\Apps\rig & scan\rigscan.exe", r"PC\me", d);
         assert!(w.contains("<Monday/>") && w.contains("rig &amp; scan") && w.contains("<StartWhenAvailable>true"), "{w}");
         assert!(w.contains("2026-11-30T12:00:00"));
-        let m = task_xml(Every::Monthly, "r.exe", "u", d);
+        let m = task_xml(Every::Monthly, NOON, "r.exe", "u", d);
         assert!(m.contains("<Day>28</Day>") && m.contains("<December/>"), "{m}");
-        assert!(task_xml(Every::Daily, "r.exe", "u", d).contains("<DaysInterval>1</DaysInterval>"));
+        let e = task_xml(Every::Daily, 9, "r.exe", "u", d);
+        assert!(e.contains("<DaysInterval>1</DaysInterval>") && e.contains("2026-11-30T09:00:00"), "{e}");
+        assert_eq!(hour_label(9), "09:00");
+        assert_eq!(hour_label(30), "12:00", "a bad saved hour falls back to noon");
     }
 }

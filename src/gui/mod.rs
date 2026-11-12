@@ -153,18 +153,26 @@ pub enum Job {
     Cleaned(Vec<(&'static str, Result<crate::cleanup::Cleaned, String>)>),
     RecycleEmptied(Result<(), String>),
     NetChecked(crate::nettest::NetCheck),
-    Scheduled(crate::schedule::Every, Result<(), String>),
+    Scheduled(crate::schedule::Every, u8, Result<(), String>),
     Trends(Vec<crate::trends::Trend>),
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     privacy_ack: bool,
     /// How often check-ups run in the background.
     schedule: crate::schedule::Every,
+    /// The hour check-ups start, 0-23.
+    schedule_hour: u8,
     /// The check-up offer was answered (or the person chose a pace).
     schedule_asked: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { privacy_ack: false, schedule: Default::default(), schedule_hour: crate::schedule::NOON, schedule_asked: false }
+    }
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -687,7 +695,7 @@ impl App {
                 Job::CleanupFound(r) => self.cleanup_found(r),
                 Job::Cleaned(r) => self.cleaned(r),
                 Job::RecycleEmptied(r) => self.recycle_emptied(r),
-                Job::Scheduled(every, r) => self.scheduled(every, r),
+                Job::Scheduled(every, hour, r) => self.scheduled(every, hour, r),
                 Job::Trends(t) => {
                     self.busy.remove("trends");
                     self.trends = t;

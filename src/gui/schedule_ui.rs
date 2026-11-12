@@ -15,24 +15,29 @@ impl App {
         !self.settings.schedule_asked && self.settings.schedule == Every::Off && (!fixable || !self.history.is_empty())
     }
 
-    pub(super) fn set_schedule(&mut self, ctx: &egui::Context, every: Every) {
+    pub(super) fn set_schedule(&mut self, ctx: &egui::Context, every: Every, hour: u8) {
         self.settings.schedule_asked = true;
         self.save_settings();
         self.busy.insert("schedule".into());
-        self.spawn(ctx, move || Job::Scheduled(every, schedule::set(every).map_err(|e| format!("{e:#}"))));
+        self.spawn(ctx, move || Job::Scheduled(every, hour, schedule::set(every, hour).map_err(|e| format!("{e:#}"))));
     }
 
-    pub(super) fn scheduled(&mut self, every: Every, r: Result<(), String>) {
+    pub(super) fn scheduled(&mut self, every: Every, hour: u8, r: Result<(), String>) {
         self.busy.remove("schedule");
         match r {
             Ok(()) => {
                 self.settings.schedule = every;
+                self.settings.schedule_hour = hour;
                 self.save_settings();
                 if every == Every::Off {
                     self.toast("Regular check-ups are off.", true);
                 } else {
                     self.toast(
-                        format!("Check-ups are on: {}. rigscan lets you know only when something new needs a look.", every.label().to_lowercase()),
+                        format!(
+                            "Check-ups are on: {} at {}. rigscan lets you know only when something new needs a look.",
+                            every.label().to_lowercase(),
+                            schedule::hour_label(hour)
+                        ),
                         true,
                     );
                 }
@@ -67,14 +72,20 @@ impl App {
                 }
             });
             ui.add_space(S1);
-            small(ui, "You can change this later on the History & undo page.");
+            small(
+                ui,
+                format!(
+                    "Check-ups start at {}. You can change the time and pace later on the History & undo page.",
+                    schedule::hour_label(self.settings.schedule_hour)
+                ),
+            );
         });
         match pick {
             Some(Every::Off) => {
                 self.settings.schedule_asked = true;
                 self.save_settings();
             }
-            Some(e) => self.set_schedule(&ui.ctx().clone(), e),
+            Some(e) => self.set_schedule(&ui.ctx().clone(), e, self.settings.schedule_hour),
             None => {}
         }
     }
@@ -87,8 +98,15 @@ impl App {
         section(ui, "Regular check-ups");
         let busy = self.busy.contains("schedule");
         let mut pick = None;
+        let mut hour = self.settings.schedule_hour;
         card(ui, |ui| {
-            muted(ui, "rigscan checks quietly at noon, or as soon as the PC is on after that, and shows a notification only when something new needs a look.");
+            muted(
+                ui,
+                format!(
+                    "rigscan checks quietly at {}, or as soon as the PC is on after that, and shows a notification only when something new needs a look.",
+                    schedule::hour_label(hour)
+                ),
+            );
             ui.add_space(S2);
             ui.horizontal(|ui| {
                 for e in [Every::Off, Every::Daily, Every::Weekly, Every::Monthly] {
@@ -103,6 +121,17 @@ impl App {
             });
             if self.settings.schedule != Every::Off {
                 ui.add_space(S2);
+                ui.horizontal(|ui| {
+                    ui.label("Time");
+                    ui.add_enabled_ui(!busy, |ui| {
+                        egui::ComboBox::from_id_salt("checkup-hour").selected_text(schedule::hour_label(hour)).show_ui(ui, |ui| {
+                            for h in 0..24 {
+                                ui.selectable_value(&mut hour, h, schedule::hour_label(h));
+                            }
+                        });
+                    });
+                });
+                ui.add_space(S2);
                 small(
                     ui,
                     format!(
@@ -113,7 +142,9 @@ impl App {
             }
         });
         if let Some(e) = pick {
-            self.set_schedule(&ui.ctx().clone(), e);
+            self.set_schedule(&ui.ctx().clone(), e, hour);
+        } else if hour != self.settings.schedule_hour {
+            self.set_schedule(&ui.ctx().clone(), self.settings.schedule, hour);
         }
     }
 
