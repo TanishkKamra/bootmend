@@ -1,0 +1,7 @@
+/target
+*.pdb
+# Generated reports and snapshots contain device identifiers: never commit them
+/reports
+*.pdf
+*.html.report
+/snapshots
