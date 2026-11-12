@@ -61,6 +61,7 @@ impl App {
             Page::Software => "Installed apps and browser extensions.".into(),
             Page::Startup => "What runs when Windows starts, and in the background.".into(),
             Page::Crashes => "Blue screens, sudden shutdowns and hardware errors from the last 90 days.".into(),
+            Page::Cleanup => "See what's taking up space before anything is removed.".into(),
             Page::Changes => match &self.prev_taken {
                 Some(t) => format!("Compared with the check on {t}."),
                 None => "What's different since the last check.".into(),
@@ -77,7 +78,14 @@ impl App {
             Page::Overview => self.overview(ui, &snap),
             Page::Suggestions => self.suggestions(ui),
             Page::ThisPc => this_pc(ui, &snap),
-            Page::Storage => storage(ui, &snap),
+            Page::Storage => {
+                if widgets::icon_button(ui, icon::CLEAN, "Free up space", true).clicked() {
+                    self.go(Page::Cleanup);
+                }
+                ui.add_space(S2);
+                storage(ui, &snap)
+            }
+            Page::Cleanup => self.cleanup_page(ui),
             Page::Network => network(ui, &snap),
             Page::Security => self.security(ui, &snap),
             Page::Software => self.software(ui, &snap),

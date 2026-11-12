@@ -87,9 +87,9 @@ fn storage(s: &Snapshot, f: &mut Vec<Finding>) {
                 .why(format!(
                     "{free:.1} GB of {size:.0} GB is free ({pct:.0}%). Windows needs room for updates and temporary files, and slows down when it runs short."
                 ))
-                .step("Storage Sense can clear temporary files and the Recycle Bin safely. Then look at Downloads and large apps you no longer use.")
-                .open("Open storage settings", "ms-settings:storagesense")
-                .act(Action::Goto(Page::Storage)),
+                .step("Free up space shows which caches and leftovers can go, and how big each is, before anything is removed.")
+                .step("Then look at Downloads and large apps you no longer use.")
+                .act(Action::Goto(Page::Cleanup)),
         );
     }
     let hdd_system = s.storage.a("disks").into_iter().find(|d| d.b("IsSystem") == Some(true) && d.s("Media").as_deref() == Some("HDD"));

@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod cleanup;
 mod collect;
 mod diff;
 mod elevate;

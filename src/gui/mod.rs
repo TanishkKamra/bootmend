@@ -1,5 +1,6 @@
 //! The desktop window: navigation, background jobs and confirmations.
 
+mod cleanup_page;
 mod pages;
 mod screens;
 pub mod theme;
@@ -34,6 +35,7 @@ pub enum Page {
     Software,
     Startup,
     Crashes,
+    Cleanup,
     Changes,
     Scan,
     History,
@@ -43,7 +45,7 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 15] = [
+    pub const ALL: [Page; 16] = [
         Page::Overview,
         Page::Suggestions,
         Page::ThisPc,
@@ -53,6 +55,7 @@ impl Page {
         Page::Software,
         Page::Startup,
         Page::Crashes,
+        Page::Cleanup,
         Page::Changes,
         Page::Scan,
         Page::History,
@@ -71,6 +74,7 @@ impl Page {
             Page::Software => "Apps & extensions",
             Page::Startup => "Startup & background",
             Page::Crashes => "Crashes",
+            Page::Cleanup => "Free up space",
             Page::Changes => "Changes",
             Page::Scan => "Virus check",
             Page::History => "History & undo",
@@ -90,6 +94,7 @@ impl Page {
             Page::Software => icon::APPS,
             Page::Startup => icon::POWER,
             Page::Crashes => icon::CRASH,
+            Page::Cleanup => icon::CLEAN,
             Page::Changes => icon::CHANGES,
             Page::Scan => icon::SCAN,
             Page::History => icon::UNDO,
@@ -115,6 +120,8 @@ pub enum Pending {
     Elevate,
     DeleteData,
     RestorePoint,
+    Clean(Vec<&'static str>),
+    EmptyRecycleBin,
 }
 
 pub struct Confirm {
@@ -135,6 +142,9 @@ pub enum Job {
     Dumps(Vec<DumpAnalysis>, Vec<String>),
     Saved(Result<PathBuf, String>),
     Deleted(Result<(), String>),
+    CleanupFound(Result<cleanup_page::Found, String>),
+    Cleaned(Vec<(&'static str, Result<crate::cleanup::Cleaned, String>)>),
+    RecycleEmptied(Result<(), String>),
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -203,6 +213,7 @@ pub struct App {
     restore_saved: bool,
     force_welcome: bool,
     snap_mode: Option<SnapMode>,
+    cleanup: Option<cleanup_page::CleanupView>,
 }
 
 impl App {
@@ -230,6 +241,7 @@ impl App {
             restore_saved: false,
             force_welcome: false,
             snap_mode: None,
+            cleanup: None,
         };
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
@@ -373,6 +385,52 @@ impl App {
                 yes: "Save".into(),
                 action,
             },
+            Pending::Clean(ids) => {
+                let (items, bytes, unknown) = match &self.cleanup {
+                    Some(v) => {
+                        let sel: Vec<&crate::cleanup::Item> = v.found.items.iter().filter(|i| ids.contains(&i.id)).collect();
+                        let (b, u) = cleanup_page::total(&sel);
+                        (sel.into_iter().cloned().collect::<Vec<_>>(), b, u)
+                    }
+                    None => (vec![], 0, false),
+                };
+                let size = crate::cleanup::size_text(bytes);
+                let mut body = vec![format!(
+                    "{} will be cleared: about {size}{}.",
+                    rules::plural(items.len(), "item", "items"),
+                    if unknown { ", plus what Windows' own clean-up finds" } else { "" }
+                )];
+                for i in items.iter().filter(|i| i.tradeoff.is_some()) {
+                    body.push(format!("{}: {}", i.title, i.tradeoff.unwrap_or_default()));
+                }
+                let open: Vec<String> = items
+                    .iter()
+                    .filter_map(|i| i.close_first.as_ref())
+                    .filter(|(_, procs)| !crate::cleanup::running(procs).is_empty())
+                    .map(|(name, _)| name.to_string())
+                    .collect();
+                if !open.is_empty() {
+                    body.push(format!("Close {} first. Anything still open is skipped.", open.join(", ")));
+                }
+                if items.iter().any(|i| i.id == "installers") {
+                    body.push("Old installers go to the Recycle Bin. Everything else is deleted for good, and the apps rebuild what they need.".into());
+                } else {
+                    body.push("These are deleted for good, and the apps rebuild what they need.".into());
+                }
+                Confirm { title: format!("Free up {size}?"), body, yes: "Free up space".into(), action }
+            }
+            Pending::EmptyRecycleBin => {
+                let (b, n) = self.cleanup.as_ref().and_then(|v| v.found.recycle).unwrap_or((0, 0));
+                Confirm {
+                    title: "Empty the Recycle Bin?".into(),
+                    body: vec![
+                        format!("{} ({}) will be deleted for good.", rules::plural(n as usize, "item", "items"), crate::cleanup::size_text(b)),
+                        "This can't be undone. To check what's in it first, use Look inside first.".into(),
+                    ],
+                    yes: "Empty it".into(),
+                    action,
+                }
+            }
             Pending::DeleteData => Confirm {
                 title: "Delete everything rigscan saved?".into(),
                 body: vec![
@@ -445,6 +503,11 @@ impl App {
                 Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 Err(e) => self.toast(format!("{e:#}"), false),
             },
+            Pending::Clean(ids) => self.start_cleaning(ctx, ids),
+            Pending::EmptyRecycleBin => {
+                self.busy.insert("recycle".into());
+                self.spawn(ctx, || Job::RecycleEmptied(crate::cleanup::empty_recycle_bin().map_err(|e| format!("{e:#}"))));
+            }
             Pending::RestorePoint => {
                 self.busy.insert("restore".into());
                 self.spawn(ctx, || Job::RestorePoint(fixes::restore_point("Saved with rigscan").map_err(|e| format!("{e:#}"))));
@@ -582,6 +645,9 @@ impl App {
                         Err(e) => self.toast(format!("Couldn't save the report: {e}"), false),
                     }
                 }
+                Job::CleanupFound(r) => self.cleanup_found(r),
+                Job::Cleaned(r) => self.cleaned(r),
+                Job::RecycleEmptied(r) => self.recycle_emptied(r),
                 Job::Deleted(r) => {
                     self.busy.remove("delete");
                     match r {
@@ -617,7 +683,7 @@ impl App {
         let groups: [(&str, &[Page]); 4] = [
             ("", &[Page::Overview, Page::Suggestions]),
             ("Details", &[Page::ThisPc, Page::Storage, Page::Network, Page::Security, Page::Software, Page::Startup, Page::Crashes]),
-            ("Tools", &[Page::Changes, Page::Scan, Page::History, Page::Report]),
+            ("Tools", &[Page::Cleanup, Page::Changes, Page::Scan, Page::History, Page::Report]),
             ("This app", &[Page::Privacy, Page::About]),
         ];
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -777,7 +843,10 @@ impl App {
                         self.ui.scroll_top = true;
                     }
                 }
-                m.frames += 1;
+                // Wait for background work the page started (such as measuring for cleanup) before capturing.
+                if self.busy.is_empty() {
+                    m.frames += 1;
+                }
                 if m.frames > 6 && !m.asked {
                     m.asked = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));

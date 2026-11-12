@@ -27,6 +27,7 @@ pub mod icon {
     pub const OPEN: &str = "\u{E8A7}";
     pub const FOLDER: &str = "\u{E8B7}";
     pub const ADMIN: &str = "\u{E7EF}";
+    pub const CLEAN: &str = "\u{E74D}";
 }
 
 pub fn ico(ch: &str, size: f32) -> RichText {

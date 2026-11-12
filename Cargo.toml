@@ -16,6 +16,7 @@ anyhow = "1"
 regex = "1"
 png = "0.17"
 rfd = "0.15"
+sysinfo = { version = "0.35", default-features = false, features = ["system"] }
 
 [dependencies.windows]
 version = "0.61"
