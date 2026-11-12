@@ -6,6 +6,8 @@ mod diff;
 mod elevate;
 mod fixes;
 mod gui;
+mod live;
+mod nettest;
 mod report;
 mod rules;
 mod scan;

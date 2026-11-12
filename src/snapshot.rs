@@ -67,6 +67,8 @@ pub struct SmartAttr {
 pub struct Extension {
     pub browser: String,
     pub profile: String,
+    /// The profile's folder name ("Default", "Profile 1"), used to open the right browser window.
+    pub profile_dir: String,
     pub id: String,
     pub name: String,
     pub version: String,

@@ -174,6 +174,19 @@ pub fn ps_quote(s: &str) -> String {
 }
 
 /// Open a URL, settings URI or folder with the shell (no console window).
+/// Starts a program by name with arguments. Windows finds installed apps such as chrome.exe on its own.
+pub fn shell_run(program: &str, params: &str) -> Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let r = unsafe { ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(program), &HSTRING::from(params), None, SW_SHOWNORMAL) };
+    if r.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(anyhow!("Windows could not start {program}"))
+    }
+}
+
 pub fn shell_open(target: &str) -> Result<()> {
     use windows::core::HSTRING;
     use windows::Win32::UI::Shell::ShellExecuteW;

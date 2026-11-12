@@ -1,6 +1,7 @@
 //! The desktop window: navigation, background jobs and confirmations.
 
 mod cleanup_page;
+mod live_page;
 mod pages;
 mod screens;
 pub mod theme;
@@ -36,6 +37,7 @@ pub enum Page {
     Startup,
     Crashes,
     Cleanup,
+    Live,
     Changes,
     Scan,
     History,
@@ -45,7 +47,7 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 16] = [
+    pub const ALL: [Page; 17] = [
         Page::Overview,
         Page::Suggestions,
         Page::ThisPc,
@@ -56,6 +58,7 @@ impl Page {
         Page::Startup,
         Page::Crashes,
         Page::Cleanup,
+        Page::Live,
         Page::Changes,
         Page::Scan,
         Page::History,
@@ -75,6 +78,7 @@ impl Page {
             Page::Startup => "Startup & background",
             Page::Crashes => "Crashes",
             Page::Cleanup => "Free up space",
+            Page::Live => "What's running",
             Page::Changes => "Changes",
             Page::Scan => "Virus check",
             Page::History => "History & undo",
@@ -95,6 +99,7 @@ impl Page {
             Page::Startup => icon::POWER,
             Page::Crashes => icon::CRASH,
             Page::Cleanup => icon::CLEAN,
+            Page::Live => icon::ACTIVITY,
             Page::Changes => icon::CHANGES,
             Page::Scan => icon::SCAN,
             Page::History => icon::UNDO,
@@ -104,7 +109,7 @@ impl Page {
         }
     }
     fn slug(self) -> String {
-        self.title().to_lowercase().replace(['&', ' '], "-").replace("--", "-").replace("--", "-")
+        self.title().to_lowercase().replace('\'', "").replace(['&', ' '], "-").replace("--", "-").replace("--", "-")
     }
 }
 
@@ -122,6 +127,7 @@ pub enum Pending {
     RestorePoint,
     Clean(Vec<&'static str>),
     EmptyRecycleBin,
+    NetCheck,
 }
 
 pub struct Confirm {
@@ -145,6 +151,7 @@ pub enum Job {
     CleanupFound(Result<cleanup_page::Found, String>),
     Cleaned(Vec<(&'static str, Result<crate::cleanup::Cleaned, String>)>),
     RecycleEmptied(Result<(), String>),
+    NetChecked(crate::nettest::NetCheck),
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -180,6 +187,8 @@ pub struct UiState {
     pub last_report: Option<PathBuf>,
     pub show_reads: bool,
     pub scroll_top: bool,
+    /// What sorts the What's running table: 0 processor, 1 memory, 2 drive.
+    pub live_sort: usize,
 }
 
 struct SnapMode {
@@ -214,6 +223,8 @@ pub struct App {
     force_welcome: bool,
     snap_mode: Option<SnapMode>,
     cleanup: Option<cleanup_page::CleanupView>,
+    net: Option<crate::nettest::NetCheck>,
+    live: Option<crate::live::Monitor>,
 }
 
 impl App {
@@ -242,6 +253,8 @@ impl App {
             force_welcome: false,
             snap_mode: None,
             cleanup: None,
+            net: None,
+            live: None,
         };
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
@@ -419,6 +432,15 @@ impl App {
                 }
                 Confirm { title: format!("Free up {size}?"), body, yes: "Free up space".into(), action }
             }
+            Pending::NetCheck => Confirm {
+                title: "Test your connection?".into(),
+                body: vec![
+                    "rigscan pings your router, times a few website name lookups, then downloads and uploads test data with Cloudflare's public speed test (speed.cloudflare.com).".into(),
+                    "It uses up to about 135 MB of data and takes under a minute. Like any website, Cloudflare sees this connection's internet address. Nothing about the PC is sent.".into(),
+                ],
+                yes: "Test now".into(),
+                action,
+            },
             Pending::EmptyRecycleBin => {
                 let (b, n) = self.cleanup.as_ref().and_then(|v| v.found.recycle).unwrap_or((0, 0));
                 Confirm {
@@ -504,6 +526,7 @@ impl App {
                 Err(e) => self.toast(format!("{e:#}"), false),
             },
             Pending::Clean(ids) => self.start_cleaning(ctx, ids),
+            Pending::NetCheck => self.start_net_check(ctx),
             Pending::EmptyRecycleBin => {
                 self.busy.insert("recycle".into());
                 self.spawn(ctx, || Job::RecycleEmptied(crate::cleanup::empty_recycle_bin().map_err(|e| format!("{e:#}"))));
@@ -648,6 +671,14 @@ impl App {
                 Job::CleanupFound(r) => self.cleanup_found(r),
                 Job::Cleaned(r) => self.cleaned(r),
                 Job::RecycleEmptied(r) => self.recycle_emptied(r),
+                Job::NetChecked(c) => {
+                    self.busy.remove("net");
+                    self.toast(
+                        if c.down_mbps.is_some() { "Connection check finished." } else { "The connection check couldn't finish. The Network page says why." },
+                        c.down_mbps.is_some(),
+                    );
+                    self.net = Some(c);
+                }
                 Job::Deleted(r) => {
                     self.busy.remove("delete");
                     match r {
@@ -683,7 +714,7 @@ impl App {
         let groups: [(&str, &[Page]); 4] = [
             ("", &[Page::Overview, Page::Suggestions]),
             ("Details", &[Page::ThisPc, Page::Storage, Page::Network, Page::Security, Page::Software, Page::Startup, Page::Crashes]),
-            ("Tools", &[Page::Cleanup, Page::Changes, Page::Scan, Page::History, Page::Report]),
+            ("Tools", &[Page::Cleanup, Page::Live, Page::Changes, Page::Scan, Page::History, Page::Report]),
             ("This app", &[Page::Privacy, Page::About]),
         ];
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -813,6 +844,7 @@ impl App {
                 _ => None,
             })
         });
+        let live_pending = self.page == Page::Live && self.live_data().is_none();
         let Some(m) = &mut self.snap_mode else { return };
         if let Some(img) = shot {
             let name = match m.queue.first().copied().flatten() {
@@ -844,7 +876,8 @@ impl App {
                     }
                 }
                 // Wait for background work the page started (such as measuring for cleanup) before capturing.
-                if self.busy.is_empty() {
+                let waiting = !self.busy.is_empty() || live_pending;
+                if !waiting {
                     m.frames += 1;
                 }
                 if m.frames > 6 && !m.asked {

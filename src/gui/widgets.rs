@@ -28,6 +28,7 @@ pub mod icon {
     pub const FOLDER: &str = "\u{E8B7}";
     pub const ADMIN: &str = "\u{E7EF}";
     pub const CLEAN: &str = "\u{E74D}";
+    pub const ACTIVITY: &str = "\u{E9D9}";
 }
 
 pub fn ico(ch: &str, size: f32) -> RichText {
@@ -152,20 +153,33 @@ pub fn kv(ui: &mut Ui, id: &str, rows: &[(&str, Option<String>)]) {
 
 /// A plain list table. Long cells are shortened with "…" and show in full on hover.
 pub fn table(ui: &mut Ui, id: &str, head: &[&str], rows: &[Vec<String>]) {
+    table_action(ui, id, head, rows, None);
+}
+
+/// A table with a small button at the end of each row. Returns the row whose button was pressed.
+pub fn table_action(ui: &mut Ui, id: &str, head: &[&str], rows: &[Vec<String>], button: Option<&str>) -> Option<usize> {
     if rows.is_empty() {
         muted(ui, "Nothing to show here.");
-        return;
+        return None;
     }
     let p = pal(ui.ctx());
+    let mut pressed = None;
     ui.push_id(id, |ui| {
         let n = head.len();
+        // With a button column, the text columns share what's left so the table never runs past the card.
+        let avail = ui.available_width() - ui.spacing().item_spacing.x * (n + 1) as f32 - if button.is_some() { 72.0 } else { 0.0 };
+        let first = (avail * 0.32).min(240.0);
+        let rest = ((avail - first) / (n.max(2) - 1) as f32).min(130.0);
         let mut tb = TableBuilder::new(ui).striped(true).vscroll(false).cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         for i in 0..n {
-            tb = tb.column(if i + 1 == n {
+            tb = tb.column(if i + 1 == n && button.is_none() {
                 Column::remainder().at_least(80.0).clip(true)
             } else {
-                Column::initial(if i == 0 { 240.0 } else { 130.0 }).at_least(60.0).resizable(true).clip(true)
+                Column::initial(if i == 0 { first } else { rest }).at_least(60.0).resizable(true).clip(true)
             });
+        }
+        if button.is_some() {
+            tb = tb.column(Column::exact(64.0));
         }
         tb.header(26.0, |mut h| {
             for t in head {
@@ -173,19 +187,31 @@ pub fn table(ui: &mut Ui, id: &str, head: &[&str], rows: &[Vec<String>]) {
                     ui.label(RichText::new(*t).color(p.muted).family(theme::semibold()));
                 });
             }
+            if button.is_some() {
+                h.col(|_| {});
+            }
         })
         .body(|body| {
             body.rows(26.0, rows.len(), |mut row| {
                 let r = &rows[row.index()];
+                let i = row.index();
                 for c in r {
                     row.col(|ui| {
                         // A truncated label shows its full text on hover by itself.
                         ui.add(egui::Label::new(c.as_str()).truncate());
                     });
                 }
+                if let Some(label) = button {
+                    row.col(|ui| {
+                        if ui.small_button(label).clicked() {
+                            pressed = Some(i);
+                        }
+                    });
+                }
             });
         });
     });
+    pressed
 }
 
 pub fn empty(ui: &mut Ui, ic: &str, title: &str, body: &str) {
@@ -205,7 +231,7 @@ pub fn empty(ui: &mut Ui, ic: &str, title: &str, body: &str) {
 /// A horizontal usage bar, for free space and battery health.
 pub fn bar(ui: &mut Ui, fraction: f32, fill: Color32) {
     let p = pal(ui.ctx());
-    let w = ui.available_width().min(420.0);
+    let w = ui.available_width();
     let (r, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), Sense::hover());
     ui.painter().rect_filled(r, CornerRadius::same(4), p.surface2);
     let mut f = r;

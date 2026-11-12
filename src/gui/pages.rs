@@ -49,6 +49,7 @@ fn fix_target(f: &Fix) -> String {
 
 impl App {
     pub(super) fn page_ui(&mut self, ui: &mut Ui) {
+        self.keep_monitor(&ui.ctx().clone());
         let Some(snap) = self.snap.clone() else { return };
         let page = self.page;
         let subtitle = match page {
@@ -62,6 +63,7 @@ impl App {
             Page::Startup => "What runs when Windows starts, and in the background.".into(),
             Page::Crashes => "Blue screens, sudden shutdowns and hardware errors from the last 90 days.".into(),
             Page::Cleanup => "See what's taking up space before anything is removed.".into(),
+            Page::Live => "Which apps are using the processor, memory and drive at this moment.".into(),
             Page::Changes => match &self.prev_taken {
                 Some(t) => format!("Compared with the check on {t}."),
                 None => "What's different since the last check.".into(),
@@ -86,7 +88,11 @@ impl App {
                 storage(ui, &snap)
             }
             Page::Cleanup => self.cleanup_page(ui),
-            Page::Network => network(ui, &snap),
+            Page::Live => self.live_page(ui),
+            Page::Network => {
+                self.net_check(ui);
+                network(ui, &snap)
+            }
             Page::Security => self.security(ui, &snap),
             Page::Software => self.software(ui, &snap),
             Page::Startup => self.startup(ui, &snap),
@@ -753,7 +759,13 @@ impl App {
                     ]
                 })
                 .collect();
-            table(ui, "ext", &["Extension", "Browser", "From the store", "Reads all sites", "Status"], &rows);
+            ui.add_space(S1);
+            muted(ui, "Open takes you to the extension's page in its browser, where you can switch it off or remove it.");
+            if let Some(i) = widgets::table_action(ui, "ext", &["Extension", "Browser", "From the store", "Reads all sites", "Status"], &rows, Some("Open")) {
+                if let Err(e) = crate::collect::extensions::open_manage(&snap.extensions[i]) {
+                    self.toast(format!("{e:#}"), false);
+                }
+            }
         });
 
         let apps = snap.software.a("apps");
@@ -1272,6 +1284,7 @@ impl App {
             para(ui, "• Check for app updates: winget, Windows' own app installer, compares your apps with Microsoft's public app catalog.");
             para(ui, "• Read crash files: Microsoft's debugger downloads matching debugging files from Microsoft. The crash files stay here.");
             para(ui, "• Update an app: winget downloads it from the app's publisher.");
+            para(ui, "• Test my connection: test data is downloaded from and uploaded to Cloudflare's public speed test. Cloudflare sees this connection's internet address, as with any website.");
             para(ui, "Saving a PDF uses Microsoft Edge to print the report, and virus checks are run by Windows Security. Both follow their own settings, as they always do.");
         });
         section(ui, "What it keeps, and where");

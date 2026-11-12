@@ -46,8 +46,33 @@ fn chromium(browser: &str, user_data: &Path, out: &mut Vec<Extension>) {
             continue;
         }
         let shown = names.as_ref().and_then(|n| n.g("profile").g("info_cache").g(&dir_name).s("name")).unwrap_or_else(|| dir_name.clone());
+        let start = out.len();
         chromium_profile(browser, &shown, &e.path(), out);
+        for x in &mut out[start..] {
+            x.profile_dir = dir_name.clone();
+        }
     }
+}
+
+/// The browser's program and the address of an extension's own page in it.
+pub fn manage_target(e: &Extension) -> Option<(&'static str, String)> {
+    let id = &e.id;
+    Some(match e.browser.as_str() {
+        "Chrome" => ("chrome.exe", format!("chrome://extensions/?id={id}")),
+        "Edge" => ("msedge.exe", format!("edge://extensions/?id={id}")),
+        "Brave" => ("brave.exe", format!("brave://extensions/?id={id}")),
+        "Vivaldi" => ("vivaldi.exe", format!("vivaldi://extensions/?id={id}")),
+        "Opera" => ("opera.exe", "opera://extensions".to_string()),
+        "Firefox" => ("firefox.exe", "about:addons".to_string()),
+        _ => return None,
+    })
+}
+
+/// Opens the extension's page in its browser and profile, where it can be switched off or removed.
+pub fn open_manage(e: &Extension) -> anyhow::Result<()> {
+    let (exe, url) = manage_target(e).ok_or_else(|| anyhow::anyhow!("rigscan doesn't know how to open {}", e.browser))?;
+    let params = if e.profile_dir.is_empty() { url } else { format!("--profile-directory=\"{}\" {url}", e.profile_dir) };
+    crate::util::shell_run(exe, &params).map_err(|_| anyhow::anyhow!("Windows couldn't open {}. Open it yourself and look under Extensions.", e.browser))
 }
 
 /// Extension settings live in both Preferences and Secure Preferences; merge them.
@@ -133,6 +158,7 @@ fn from_manifest(browser: &str, profile: &str, id: &str, dir: &Path, settings: O
     Some(Extension {
         browser: browser.into(),
         profile: profile.into(),
+        profile_dir: String::new(),
         id: id.into(),
         name,
         version: manifest.s("version").unwrap_or_default(),
@@ -192,6 +218,7 @@ fn firefox(profiles: &Path, out: &mut Vec<Extension>) {
             out.push(Extension {
                 browser: "Firefox".into(),
                 profile: profile.clone(),
+                profile_dir: String::new(),
                 id: a.s("id").unwrap_or_default(),
                 name: a.g("defaultLocale").s("name").unwrap_or_else(|| a.s("id").unwrap_or_default()),
                 version: a.s("version").unwrap_or_default(),
@@ -208,6 +235,15 @@ fn firefox(profiles: &Path, out: &mut Vec<Extension>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn each_browser_opens_its_own_extension_page() {
+        let e = |browser: &str| Extension { browser: browser.into(), id: "abc".into(), ..Default::default() };
+        assert_eq!(manage_target(&e("Chrome")), Some(("chrome.exe", "chrome://extensions/?id=abc".to_string())));
+        assert_eq!(manage_target(&e("Edge")).unwrap().1, "edge://extensions/?id=abc");
+        assert_eq!(manage_target(&e("Firefox")).unwrap().1, "about:addons");
+        assert_eq!(manage_target(&e("Netscape")), None);
+    }
 
     #[test]
     fn permissions_include_hosts_and_content_scripts() {
