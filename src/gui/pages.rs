@@ -1324,12 +1324,42 @@ fn win11_text(snap: &Snapshot) -> String {
     }
 }
 
+fn upgrade_advisor(ui: &mut Ui, snap: &Snapshot) {
+    let p = pal(ui.ctx());
+    let list = crate::rules::upgrades::upgrades(snap);
+    section(ui, "Upgrades that would help most");
+    card(ui, |ui| {
+        if list.is_empty() {
+            muted(ui, "No part stands out as holding this PC back, so there's nothing worth buying right now.");
+            return;
+        }
+        for (i, u) in list.iter().enumerate() {
+            if i > 0 {
+                ui.add_space(S4);
+            }
+            ui.label(RichText::new(format!("{}. {}", i + 1, u.title)).family(theme::semibold()).size(16.0));
+            ui.add_space(S1);
+            ui.add(egui::Label::new(&u.why).wrap());
+            ui.add_space(S2);
+            for g in &u.get {
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new("•").color(p.muted));
+                    ui.add(egui::Label::new(RichText::new(g).color(p.muted)).wrap());
+                });
+            }
+        }
+        ui.add_space(S3);
+        small(ui, "Biggest difference first, based on this check. rigscan doesn't sell anything or recommend brands.");
+    });
+}
+
 fn this_pc(ui: &mut Ui, snap: &Snapshot) {
     let sys = &snap.system;
     let dev = sys.g("device");
     let os = sys.g("os");
     let cpu = sys.g("cpu");
     let mem = sys.g("memory");
+    upgrade_advisor(ui, snap);
     section(ui, "Device");
     card(ui, |ui| {
         kv(

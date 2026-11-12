@@ -5,6 +5,7 @@ mod hardware;
 pub mod security;
 mod speed;
 mod stability;
+pub mod upgrades;
 mod windows;
 pub use stability::bugcheck_code;
 pub use windows::{update_name, win11_readiness};
