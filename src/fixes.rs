@@ -59,8 +59,8 @@ impl Fix {
     /// One sentence for the confirmation dialog: what changes, and that it can be undone.
     pub fn describe(&self) -> String {
         match self {
-            Fix::DisableStartup { name, .. } => format!("{name} will no longer open when you sign in. You can still open it yourself, and you can undo this from History."),
-            Fix::EnableStartup { name, .. } => format!("{name} will open again when you sign in."),
+            Fix::DisableStartup { name, .. } => format!("{} will no longer open when you sign in. You can still open it yourself, and you can undo this from History.", name.trim_end_matches(".lnk")),
+            Fix::EnableStartup { name, .. } => format!("{} will open again when you sign in.", name.trim_end_matches(".lnk")),
             Fix::RemoveExclusion { value, .. } => format!("Windows Security will check {value} again. If an app you trust stops working afterwards, undo this from History."),
             Fix::EnablePua => "Windows Security will block apps that are not viruses but bundle adware, toolbars or crypto miners. You can undo this from History.".into(),
             Fix::DisableRemoteAssistance => "Nobody will be able to send this PC a Remote Assistance invitation. You can turn it back on from History.".into(),

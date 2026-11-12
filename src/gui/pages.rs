@@ -21,6 +21,20 @@ fn num(v: Option<f64>, unit: &str) -> Option<String> {
     v.map(|x| if (x - x.round()).abs() < 0.05 { format!("{x:.0}{unit}") } else { format!("{x:.1}{unit}") })
 }
 
+/// A list row: controls laid out from the right edge, then the text in whatever width is left.
+fn row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 40.0), egui::Layout::right_to_left(egui::Align::Center), add).inner
+}
+
+/// A name with one muted, shortened detail line under it; the full detail shows on hover.
+fn two_lines(ui: &mut Ui, title: &str, detail: &str, hover: &str) {
+    let muted = pal(ui.ctx()).muted;
+    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.add(egui::Label::new(RichText::new(title).family(theme::semibold())).truncate());
+        ui.add(egui::Label::new(RichText::new(detail).small().color(muted)).truncate()).on_hover_text(hover);
+    });
+}
+
 fn yes_no(v: Option<bool>) -> Option<String> {
     v.map(|b| if b { "Yes" } else { "No" }.to_string())
 }
@@ -180,7 +194,7 @@ impl App {
                     small(ui, f.area.name());
                 });
                 ui.add_space(S1);
-                ui.label(RichText::new(&f.title).size(16.0).family(theme::semibold()));
+                ui.label(RichText::new(&f.title).text_style(theme::title()));
                 ui.add(egui::Label::new(&f.summary).wrap());
                 ui.add_space(S1);
                 open = widgets::secondary(ui, "Show me how").clicked();
@@ -288,7 +302,7 @@ impl App {
                 });
             });
             ui.add_space(S1);
-            ui.label(RichText::new(&f.title).size(16.5).family(theme::semibold()));
+            ui.label(RichText::new(&f.title).text_style(theme::title()));
             ui.add(egui::Label::new(&f.summary).wrap());
             if open && has_more {
                 if !f.steps.is_empty() {
@@ -375,6 +389,11 @@ impl App {
     }
 
     fn fix_button(&mut self, ui: &mut Ui, fx: &Fix, title: &str) {
+        self.fix_button_as(ui, fx, title, true);
+    }
+
+    /// `primary: false` for long lists, where a filled button on every row would shout.
+    fn fix_button_as(&mut self, ui: &mut Ui, fx: &Fix, title: &str, primary: bool) {
         let p = pal(ui.ctx());
         if self.history.iter().any(|h| h.fix == *fx && h.undone.is_none()) {
             ui.label(ico(icon::CHECK, 14.0).color(p.green));
@@ -387,7 +406,7 @@ impl App {
             return;
         }
         let blocked = fx.needs_admin() && !self.elevated;
-        let r = widgets::primary_enabled(ui, fx.label(), !blocked);
+        let r = if primary { widgets::primary_enabled(ui, fx.label(), !blocked) } else { widgets::secondary_enabled(ui, fx.label(), !blocked) };
         let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart rigscan as administrator first.") } else { r };
         if r.clicked() {
             self.ask(Pending::Fix(fx.clone(), title.to_string()));
@@ -806,36 +825,58 @@ impl App {
         section(ui, "Opens when you sign in");
         card(ui, |ui| {
             muted(ui, "Switching an app off here only stops it opening by itself. It stays installed, and you can switch it back on.");
-            ui.add_space(S2);
             let items = snap.software.a("startup");
+            if !self.elevated && items.iter().any(|it| s(it, "ApprovedKey").starts_with("HKLM")) {
+                ui.add_space(S1);
+                small(ui, "Greyed-out switches apply to everyone who uses this PC, so changing them needs administrator rights.");
+            }
+            ui.add_space(S2);
             if items.is_empty() {
                 muted(ui, "Nothing starts with Windows.");
             }
-            for it in items {
+            for (i, it) in items.iter().enumerate() {
                 let (name, key) = (s(it, "Name"), s(it, "ApprovedKey"));
-                let on = it.b("Enabled") != Some(false);
-                ui.horizontal(|ui| {
-                    let fx = if on {
-                        Fix::DisableStartup { name: name.clone(), approved_key: key.clone() }
+                let shown = name.trim_end_matches(".lnk").to_string();
+                // A switch flipped since this check shows its new state until the next check.
+                let on = self
+                    .history
+                    .iter()
+                    .rev()
+                    .filter(|h| h.undone.is_none() && h.when >= snap.taken)
+                    .find_map(|h| match &h.fix {
+                        Fix::DisableStartup { name: n, approved_key: k } if *n == name && *k == key => Some(false),
+                        Fix::EnableStartup { name: n, approved_key: k } if *n == name && *k == key => Some(true),
+                        _ => None,
+                    })
+                    .unwrap_or(it.b("Enabled") != Some(false));
+                let fx = if on {
+                    Fix::DisableStartup { name: name.clone(), approved_key: key.clone() }
+                } else {
+                    Fix::EnableStartup { name: name.clone(), approved_key: key.clone() }
+                };
+                let busy = self.busy.contains(&format!("fix:{fx:?}"));
+                let blocked = fx.needs_admin() && !self.elevated;
+                if i > 0 {
+                    ui.separator();
+                }
+                let clicked = row(ui, |ui| {
+                    let mut clicked = false;
+                    if busy {
+                        ui.add(egui::Spinner::new().color(p.accent));
                     } else {
-                        Fix::EnableStartup { name: name.clone(), approved_key: key.clone() }
-                    };
-                    ui.allocate_ui(egui::vec2(200.0, 30.0), |ui| self.fix_button(ui, &fx, &name));
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&name).family(theme::semibold()));
-                            if !on {
-                                widgets::pill(ui, "Off", p.muted, p.surface2);
-                            }
-                        });
-                        ui.add(egui::Label::new(RichText::new(s(it, "Command")).small().color(p.muted)).truncate()).on_hover_text(format!(
-                            "{}\n{}",
-                            s(it, "Scope"),
-                            s(it, "Command")
-                        ));
-                    });
+                        let r = widgets::switch(ui, on, !blocked, &shown);
+                        let r =
+                            if blocked { r.on_hover_text("Changing this one needs administrator rights. Restart rigscan as administrator first.") } else { r };
+                        clicked = r.clicked();
+                    }
+                    ui.label(if on { "On" } else { "Off" });
+                    ui.add_space(S3);
+                    two_lines(ui, &shown, &s(it, "Command"), &format!("{}\n{}", s(it, "Scope"), s(it, "Command")));
+                    clicked
                 });
-                ui.add_space(S1);
+                if clicked {
+                    self.ask(Pending::Fix(fx, shown));
+                }
             }
         });
         section(ui, "Background services from other makers");
@@ -845,23 +886,20 @@ impl App {
                 "Services run without a window. These aren't part of Windows. Setting one to start only when needed is safe for most updaters and helpers.",
             );
             ui.add_space(S2);
-            for sv in snap.software.a("services") {
+            for (i, sv) in snap.software.a("services").iter().enumerate() {
                 let (name, disp) = (s(sv, "Name"), s(sv, "Display"));
-                ui.horizontal(|ui| {
-                    ui.allocate_ui(egui::vec2(200.0, 30.0), |ui| {
-                        if s(sv, "StartMode") == "Auto" {
-                            self.fix_button(ui, &Fix::ServiceManual { name: name.clone(), display: disp.clone() }, &disp);
-                        } else {
-                            small(ui, "Starts when needed");
-                        }
-                    });
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&disp).family(theme::semibold()));
-                        ui.add(egui::Label::new(RichText::new(format!("{} · {}", s(sv, "State"), s(sv, "Signer"))).small().color(p.muted)).truncate())
-                            .on_hover_text(s(sv, "Path"));
-                    });
+                if i > 0 {
+                    ui.separator();
+                }
+                row(ui, |ui| {
+                    if s(sv, "StartMode") == "Auto" {
+                        self.fix_button_as(ui, &Fix::ServiceManual { name: name.clone(), display: disp.clone() }, &disp, false);
+                    } else {
+                        small(ui, "Starts when needed");
+                    }
+                    ui.add_space(S3);
+                    two_lines(ui, &disp, &format!("{} · {}", s(sv, "State"), s(sv, "Signer")), &s(sv, "Path"));
                 });
-                ui.add_space(S1);
             }
         });
         let tasks: Vec<Vec<String>> = snap.software.a("tasks").iter().map(|t| vec![s(t, "Name"), s(t, "Action"), s(t, "Author"), s(t, "Path")]).collect();
@@ -1361,7 +1399,7 @@ fn upgrade_advisor(ui: &mut Ui, snap: &Snapshot) {
             if i > 0 {
                 ui.add_space(S4);
             }
-            ui.label(RichText::new(format!("{}. {}", i + 1, u.title)).family(theme::semibold()).size(16.0));
+            ui.label(RichText::new(format!("{}. {}", i + 1, u.title)).text_style(theme::title()));
             ui.add_space(S1);
             ui.add(egui::Label::new(&u.why).wrap());
             ui.add_space(S2);

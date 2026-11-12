@@ -100,6 +100,10 @@ pub fn icons() -> FontFamily {
 pub fn h2() -> TextStyle {
     TextStyle::Name("h2".into())
 }
+/// Card titles: one step below section headings.
+pub fn title() -> TextStyle {
+    TextStyle::Name("title".into())
+}
 pub fn big() -> TextStyle {
     TextStyle::Name("big".into())
 }
@@ -185,7 +189,8 @@ pub fn apply(ctx: &egui::Context) {
             st.visuals = visuals(p, dark);
             st.text_styles = [
                 (TextStyle::Heading, FontId::new(26.0, semibold())),
-                (h2(), FontId::new(17.0, semibold())),
+                (h2(), FontId::new(18.0, semibold())),
+                (title(), FontId::new(16.0, semibold())),
                 (big(), FontId::new(30.0, semibold())),
                 (TextStyle::Body, FontId::new(14.5, FontFamily::Proportional)),
                 (TextStyle::Button, FontId::new(14.5, FontFamily::Proportional)),

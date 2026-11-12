@@ -773,12 +773,13 @@ impl App {
                     self.start_check();
                 }
                 if let Some(s) = &self.snap {
-                    widgets::small(ui, format!("Checked {}", s.taken));
+                    widgets::small(ui, format!("Checked {}", crate::util::when_words(&s.taken, chrono::Local::now().date_naive())));
                 }
             });
         });
         ui.add_space(S4);
-        if !self.elevated && !self.ui.banner_closed && !matches!(self.page, Page::Privacy | Page::About) {
+        // Only where the missing details would show up; elsewhere the note is noise.
+        if !self.elevated && !self.ui.banner_closed && matches!(self.page, Page::Overview | Page::Security | Page::Crashes | Page::Storage) {
             let mut close = false;
             let mut elevate = false;
             widgets::note(ui, p.blue, p.blue_bg, icon::ADMIN, |ui| {

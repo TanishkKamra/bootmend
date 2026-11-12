@@ -120,6 +120,41 @@ pub fn icon_button(ui: &mut Ui, ic: &str, text: &str, enabled: bool) -> Response
     ui.add_enabled(enabled, egui::Button::new(job).min_size(egui::vec2(0.0, 32.0)))
 }
 
+/// An on/off switch, like the ones in Windows Settings. The caller shows "On"/"Off" beside it,
+/// so the state never rests on colour alone.
+pub fn switch(ui: &mut Ui, on: bool, enabled: bool, name: &str) -> Response {
+    let p = pal(ui.ctx());
+    let size = egui::vec2(40.0, 20.0);
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, r) = ui.allocate_exact_size(size, sense);
+    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, name));
+    if ui.is_rect_visible(rect) {
+        let radius = CornerRadius::same(10);
+        let (track, edge, knob) = match (enabled, on) {
+            (false, true) => (p.accent_soft, p.accent_soft, p.control),
+            (false, false) => (p.surface2, p.line, p.control),
+            (true, true) => (p.accent, p.accent, p.on_accent),
+            (true, false) => (p.surface, p.control, p.muted),
+        };
+        let painter = ui.painter();
+        painter.rect(rect, radius, track, Stroke::new(1.0_f32, edge), egui::StrokeKind::Inside);
+        let x = if on { rect.right() - 10.0 } else { rect.left() + 10.0 };
+        // The knob grows a little under the pointer, the way Windows' own switches respond.
+        let grow = if r.is_pointer_button_down_on() {
+            1.5
+        } else if r.hovered() {
+            1.0
+        } else {
+            0.0
+        };
+        painter.circle_filled(egui::pos2(x, rect.center().y), 6.0 + grow, knob);
+        if r.has_focus() {
+            painter.rect_stroke(rect.expand(3.0), CornerRadius::same(13), Stroke::new(2.0_f32, p.accent), egui::StrokeKind::Outside);
+        }
+    }
+    r
+}
+
 pub fn section(ui: &mut Ui, title: &str) {
     ui.add_space(S3);
     ui.label(RichText::new(title).text_style(theme::h2()));

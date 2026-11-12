@@ -204,6 +204,17 @@ pub fn now_stamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
 }
 
+/// A saved "2026-11-12 20:15" stamp as people say it: "today at 20:15", "yesterday at …", or "3 Oct 2026 at …".
+pub fn when_words(stamp: &str, today: chrono::NaiveDate) -> String {
+    let Ok(t) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M") else { return stamp.to_string() };
+    let day = match (today - t.date()).num_days() {
+        0 => "today".to_string(),
+        1 => "yesterday".to_string(),
+        _ => t.format("%-d %b %Y").to_string(),
+    };
+    format!("{day} at {}", t.format("%H:%M"))
+}
+
 /// Compare dotted version strings numerically ("7.12" < "7.13", "24.08" < "24.9").
 pub fn version_lt(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> { s.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse().unwrap_or(0)).collect() };
@@ -232,6 +243,15 @@ mod tests {
         assert_eq!(v.a("e").len(), 2);
         assert_eq!(v.a("f").len(), 1, "a lone value is a one-item list");
         assert!(v.a("missing").is_empty());
+    }
+
+    #[test]
+    fn stamps_read_as_today_or_yesterday() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        assert_eq!(when_words("2026-11-12 20:15", today), "today at 20:15");
+        assert_eq!(when_words("2026-11-11 08:05", today), "yesterday at 08:05");
+        assert_eq!(when_words("2026-10-03 09:00", today), "3 Oct 2026 at 09:00");
+        assert_eq!(when_words("not a date", today), "not a date");
     }
 
     #[test]
