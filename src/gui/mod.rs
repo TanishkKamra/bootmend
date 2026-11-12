@@ -114,6 +114,7 @@ pub enum Pending {
     AnalyzeDumps,
     Elevate,
     DeleteData,
+    RestorePoint,
 }
 
 pub struct Confirm {
@@ -124,7 +125,9 @@ pub struct Confirm {
 }
 
 pub enum Job {
-    Fixed(String, Result<(), String>),
+    /// Title, result, and a note about the restore point saved first (if one was tried).
+    Fixed(String, Result<(), String>, Option<String>),
+    RestorePoint(Result<(), String>),
     Undone(Result<(), String>),
     Scanned(Result<ScanResult, String>),
     Upgrades(Result<Vec<AppUpgrade>, String>),
@@ -174,6 +177,9 @@ struct SnapMode {
     queue: Vec<Option<Page>>,
     frames: u32,
     asked: bool,
+    /// Long pages are captured in screen-sized parts: which part this is, and whether more follows.
+    part: u32,
+    more: bool,
 }
 
 pub struct App {
@@ -193,6 +199,8 @@ pub struct App {
     settings: Settings,
     ui: UiState,
     elevated: bool,
+    /// A restore point is saved before the first fix of each session, when Windows allows it.
+    restore_saved: bool,
     force_welcome: bool,
     snap_mode: Option<SnapMode>,
 }
@@ -219,6 +227,7 @@ impl App {
             settings: load_settings(),
             ui: UiState { hide_personal: true, ..Default::default() },
             elevated: crate::elevate::is_elevated(),
+            restore_saved: false,
             force_welcome: false,
             snap_mode: None,
         };
@@ -228,9 +237,15 @@ impl App {
         if let Some(dir) = snap_dir {
             let mut queue: Vec<Option<Page>> = vec![None];
             queue.extend(Page::ALL.iter().map(|p| Some(*p)));
-            app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false });
+            app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         }
         app
+    }
+
+    /// True when the next fix should be preceded by a restore point: once per session, with admin rights and System Restore on.
+    fn restore_point_first(&self) -> bool {
+        use crate::util::J;
+        !self.restore_saved && self.elevated && self.snap.as_ref().is_some_and(|s| s.security.g("restore").b("COn") == Some(true))
     }
 
     fn set_snapshot(&mut self, s: Snapshot) {
@@ -296,12 +311,13 @@ impl App {
     /// Ask before doing anything that changes the PC or goes online.
     pub fn ask(&mut self, action: Pending) {
         let c = match &action {
-            Pending::Fix(f, title) => Confirm {
-                title: f.label().to_string(),
-                body: vec![f.describe(), format!("This is for: {title}.")],
-                yes: f.label().to_string(),
-                action,
-            },
+            Pending::Fix(f, title) => {
+                let mut body = vec![f.describe(), format!("This is for: {title}.")];
+                if self.restore_point_first() {
+                    body.push("rigscan saves a restore point first, so the whole PC can be rolled back if anything goes wrong.".into());
+                }
+                Confirm { title: f.label().to_string(), body, yes: f.label().to_string(), action }
+            }
             Pending::Undo(_, title) => Confirm { title: "Undo this change?".into(), body: vec![format!("rigscan will put back how things were before \"{title}\".")], yes: "Undo".into(), action },
             Pending::Upgrade(_, name) => Confirm {
                 title: format!("Update {name}?"),
@@ -348,6 +364,15 @@ impl App {
                 yes: "Restart".into(),
                 action,
             },
+            Pending::RestorePoint => Confirm {
+                title: "Save a restore point?".into(),
+                body: vec![
+                    "Windows saves a snapshot of its settings, drivers and installed apps. Your own files aren't part of it and aren't touched.".into(),
+                    "If a later change causes trouble, you can roll the PC back from System Restore. Saving takes a minute or two.".into(),
+                ],
+                yes: "Save".into(),
+                action,
+            },
             Pending::DeleteData => Confirm {
                 title: "Delete everything rigscan saved?".into(),
                 body: vec![
@@ -365,7 +390,15 @@ impl App {
         match action {
             Pending::Fix(fix, title) => {
                 self.busy.insert(format!("fix:{fix:?}"));
-                self.spawn(ctx, move || Job::Fixed(title.clone(), fixes::apply(&fix, &title).map_err(|e| format!("{e:#}"))));
+                let first = self.restore_point_first();
+                self.restore_saved |= first;
+                self.spawn(ctx, move || {
+                    let note = first.then(|| match fixes::restore_point("Before changes made with rigscan") {
+                        Ok(()) => "A restore point was saved first.".to_string(),
+                        Err(e) => format!("No restore point was saved first: {e:#}."),
+                    });
+                    Job::Fixed(title.clone(), fixes::apply(&fix, &title).map_err(|e| format!("{e:#}")), note)
+                });
             }
             Pending::Undo(i, _) => {
                 self.busy.insert(format!("undo:{i}"));
@@ -412,6 +445,10 @@ impl App {
                 Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 Err(e) => self.toast(format!("{e:#}"), false),
             },
+            Pending::RestorePoint => {
+                self.busy.insert("restore".into());
+                self.spawn(ctx, || Job::RestorePoint(fixes::restore_point("Saved with rigscan").map_err(|e| format!("{e:#}"))));
+            }
             Pending::DeleteData => {
                 self.busy.insert("delete".into());
                 self.spawn(ctx, || {
@@ -449,12 +486,28 @@ impl App {
         }
         while let Ok(j) = self.rx.try_recv() {
             match j {
-                Job::Fixed(title, r) => {
+                Job::Fixed(title, r, note) => {
                     self.busy.retain(|b| !b.starts_with("fix:"));
                     self.history = fixes::history();
+                    let note = note.map(|n| format!(" {n}")).unwrap_or_default();
                     match r {
-                        Ok(()) => self.toast(format!("Done: {title}. You can undo it from History."), true),
-                        Err(e) => self.toast(format!("That didn't work: {e}"), false),
+                        Ok(()) => self.toast(format!("Done: {title}.{note} You can undo it from History."), true),
+                        Err(e) => self.toast(format!("That didn't work: {e}{note}"), false),
+                    }
+                }
+                Job::RestorePoint(r) => {
+                    self.busy.remove("restore");
+                    match r {
+                        Ok(()) => {
+                            self.toast("Restore point saved.", true);
+                            self.restore_saved = true;
+                            self.update_snapshot(|s| {
+                                if let Some(r) = s.security.get_mut("restore").and_then(|r| r.as_object_mut()) {
+                                    r.insert("Latest".into(), serde_json::json!({"When": crate::util::now_stamp(), "What": "Saved with rigscan"}));
+                                }
+                            });
+                        }
+                        Err(e) => self.toast(format!("Couldn't save a restore point: {e}"), false),
                     }
                 }
                 Job::Undone(r) => {
@@ -700,11 +753,17 @@ impl App {
                 None => "welcome".to_string(),
                 Some(p) => p.slug(),
             };
-            let file = m.dir.join(format!("{name}.png"));
+            let file = m.dir.join(if m.part == 0 { format!("{name}.png") } else { format!("{name}-{}.png", m.part + 1) });
             if let Err(e) = save_png(&img, &file) {
                 eprintln!("screenshot {}: {e}", file.display());
             }
-            m.queue.remove(0);
+            if m.more && m.part < 8 {
+                m.part += 1;
+            } else {
+                m.queue.remove(0);
+                m.part = 0;
+            }
+            m.more = false;
             m.frames = 0;
             m.asked = false;
         }
@@ -765,7 +824,11 @@ impl eframe::App for App {
                 if std::mem::take(&mut self.ui.scroll_top) {
                     sa = sa.vertical_scroll_offset(0.0);
                 }
-                sa.show(ui, |ui| {
+                let view = ui.available_height();
+                if let Some(m) = &self.snap_mode {
+                    sa = sa.vertical_scroll_offset(m.part as f32 * (view - 48.0));
+                }
+                let out = sa.show(ui, |ui| {
                     // Fix the content width so wide rows never push past the window edge.
                     let w = (ui.available_width() - 2.0 * S6).clamp(320.0, 1040.0);
                     egui::Frame::new().inner_margin(egui::Margin { left: S6 as i8, right: S6 as i8, top: S5 as i8, bottom: S6 as i8 }).show(ui, |ui| {
@@ -773,6 +836,9 @@ impl eframe::App for App {
                         self.page_ui(ui);
                     });
                 });
+                if let Some(m) = &mut self.snap_mode {
+                    m.more = out.content_size.y > (m.part + 1) as f32 * (view - 48.0) + 48.0;
+                }
             });
         }
         self.confirm_dialog(ctx);

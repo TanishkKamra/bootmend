@@ -14,6 +14,87 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
     extensions(s, f);
     apps(s, f);
     system(s, f);
+    device_access(s, f);
+}
+
+/// One app's most recent use of the camera, microphone or location, as Windows records it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceUse {
+    pub what: &'static str,
+    pub app: String,
+    pub path: Option<String>,
+    pub last_used: String,
+    pub in_use: bool,
+    /// Part of Windows itself, such as the location service.
+    pub windows: bool,
+}
+
+/// A readable name for a program from Windows' camera and microphone records:
+/// Store app ids and game build suffixes become the names people know.
+pub fn friendly_app(raw: &str) -> String {
+    let known = [
+        ("immersivecontrolpanel", "Windows Settings"),
+        ("WindowsCamera", "Camera app"),
+        ("WindowsSoundRecorder", "Sound Recorder"),
+        ("WhatsAppDesktop", "WhatsApp"),
+        ("slackdesktop", "Slack"),
+        ("CBS", "Windows search and Start"),
+        ("Win32WebViewHost", "Windows web view"),
+    ];
+    if let Some((_, nice)) = known.iter().find(|(k, _)| k.eq_ignore_ascii_case(raw)) {
+        return nice.to_string();
+    }
+    let mut name = raw;
+    for suffix in ["-Win64-Shipping", "_x64_rwdi", "x64vk", "_dx12", "_dx11", "-Win64", "_x64"] {
+        name = name.strip_suffix(suffix).unwrap_or(name);
+    }
+    name.to_string()
+}
+
+/// Camera, microphone and location use, newest first, one row per app and device.
+pub fn device_use(s: &Snapshot) -> Vec<DeviceUse> {
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()).to_lowercase();
+    let mut out: Vec<DeviceUse> = vec![];
+    for d in s.security.a("deviceAccess") {
+        let what = match d.s("Kind").as_deref() {
+            Some("webcam") => "Camera",
+            Some("microphone") => "Microphone",
+            Some("location") => "Location",
+            _ => continue,
+        };
+        let Some(app) = d.s("App").filter(|a| !a.is_empty()).map(|a| friendly_app(&a)) else { continue };
+        let path = d.s("Path");
+        let windows = path.as_deref().is_some_and(|p| p.to_lowercase().starts_with(&windir));
+        let row = DeviceUse { what, app, path, last_used: d.s("LastUsed").unwrap_or_default(), in_use: d.b("InUse") == Some(true), windows };
+        match out.iter_mut().find(|x| x.what == row.what && x.app.eq_ignore_ascii_case(&row.app)) {
+            Some(x) if row.last_used > x.last_used => *x = row,
+            Some(_) => {}
+            None => out.push(row),
+        }
+    }
+    out.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    out
+}
+
+/// Programs run from Downloads or a temporary folder rarely have a good reason to use the camera or microphone.
+fn device_access(s: &Snapshot, f: &mut Vec<Finding>) {
+    let odd: Vec<DeviceUse> = device_use(s)
+        .into_iter()
+        .filter(|d| d.what != "Location")
+        .filter(|d| d.path.as_deref().is_some_and(|p| ["\\downloads\\", "\\temp\\", "\\tmp\\"].iter().any(|w| p.to_lowercase().contains(w))))
+        .collect();
+    if odd.is_empty() {
+        return;
+    }
+    f.push(
+        Finding::new("device-odd-app", SEC, Level::WorthDoing, format!("{} from an unusual folder used your camera or microphone", plural(odd.len(), "program", "programs")))
+            .why("Apps you install normally live in Program Files. A program run straight from Downloads or a temporary folder that turns on the camera or microphone deserves a second look.")
+            .step("If you don't recognise it, turn off its access in Settings, then delete the file and run a quick virus check.")
+            .details(odd.iter().map(|d| format!("{} used the {} on {}: {}", d.app, d.what.to_lowercase(), d.last_used, d.path.clone().unwrap_or_default())))
+            .open("Open camera settings", "ms-settings:privacy-webcam")
+            .open("Open microphone settings", "ms-settings:privacy-microphone")
+            .act(Action::Goto(Page::Scan)),
+    );
 }
 
 fn defender(s: &Snapshot, f: &mut Vec<Finding>) {
@@ -366,21 +447,6 @@ fn system(s: &Snapshot, f: &mut Vec<Finding>) {
                     .step("Open Settings, Privacy & security, Device encryption. If you don't see it, your Windows edition may only offer BitLocker.")
                     .open("Open device encryption", "ms-settings:deviceencryption"),
             );
-        }
-    }
-    if let Some(last) = s.system.a("updates").first().and_then(|u| u.s("Installed")) {
-        if let Ok(d) = chrono::NaiveDate::parse_from_str(&last, "%Y-%m-%d") {
-            let days = (chrono::Local::now().date_naive() - d).num_days();
-            if days > 60 {
-                f.push(
-                    Finding::new("updates-old", SEC, Level::WorthDoing, format!("No Windows update installed in {days} days"))
-                        .why("Microsoft fixes security holes every month. A PC that hasn't updated in two months is missing at least two rounds of fixes.")
-                        .step("Open Windows Update and choose Check for updates. Restart when it asks.")
-                        .detail(format!("Last update installed: {last}"))
-                        .conf(Confidence::BestGuess)
-                        .open("Open Windows Update", "ms-settings:windowsupdate"),
-                );
-            }
         }
     }
 }

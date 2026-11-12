@@ -45,4 +45,44 @@ Try-Section 'drivers' {
       $path = $_.PathName -replace '^\\\?\?\\', '' -replace '^\\SystemRoot', $env:WINDIR -replace '^system32', "$env:WINDIR\system32"
       $sg = Sig $path; if ($sg -notmatch 'Microsoft') { [ordered]@{ Name = $_.Name; Display = $_.DisplayName; Signer = $sg; Path = $path } } })
 }
+Try-Section 'deviceAccess' {
+  # Windows records when each app last used the camera, microphone or location. Only times and app names are read.
+  $list = New-Object System.Collections.Generic.List[object]
+  foreach ($hive in 'HKCU', 'HKLM') {
+    foreach ($cap in 'webcam', 'microphone', 'location') {
+      $base = "${hive}:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\$cap"
+      Get-ChildItem -Path $base -Recurse | ForEach-Object {
+        $p = Get-ItemProperty -Path $_.PSPath
+        if ($p.LastUsedTimeStart) {
+          $raw = $_.PSChildName
+          $desktop = $raw -like '*#*'
+          $path = $(if ($desktop) { $raw -replace '#', '\' } else { $null })
+          $name = $(if ($desktop) { [IO.Path]::GetFileNameWithoutExtension($path) } else { (($raw -split '_')[0] -split '\.')[-1] })
+          # A program's own description ("Google Chrome") reads better than its file name; Windows' own files keep the file name.
+          if ($desktop -and $path -notlike "$env:WINDIR\*" -and (Test-Path -LiteralPath $path)) {
+            $vi = (Get-Item -LiteralPath $path).VersionInfo
+            $nice = "$($vi.FileDescription)".Trim(); if (-not $nice) { $nice = "$($vi.ProductName)".Trim() }
+            if ($nice) { $name = $nice }
+          }
+          $list.Add([ordered]@{ Kind = $cap; App = $name; Path = $path; Store = -not $desktop; LastUsed = [datetime]::FromFileTime($p.LastUsedTimeStart).ToString('yyyy-MM-dd HH:mm'); InUse = ($p.LastUsedTimeStop -eq 0); Allowed = "$($p.Value)" })
+        }
+      }
+    }
+  }
+  $R.deviceAccess = $list.ToArray()
+  $R.deviceAccessSwitch = [ordered]@{}
+  foreach ($cap in 'webcam', 'microphone', 'location') { $R.deviceAccessSwitch[$cap] = "$((Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\$cap").Value)" }
+}
+Try-Section 'restore' {
+  $sr = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+  $rp = [ordered]@{ Frequency = $sr.SystemRestorePointCreationFrequency; COn = $null; Latest = $null; Count = $null }
+  if ($IsAdmin) {
+    $rp.COn = [bool]((vssadmin list shadowstorage 2>$null | Out-String) -match 'For volume: \(C:\)')
+    $pts = @(Get-ComputerRestorePoint)
+    $rp.Count = $pts.Count
+    if ($pts.Count) { $l = $pts[-1]; $rp.Latest = [ordered]@{ When = ([Management.ManagementDateTimeConverter]::ToDateTime($l.CreationTime)).ToString('yyyy-MM-dd HH:mm'); What = $l.Description } }
+  }
+  # $R and $r are the same name in PowerShell, so this block uses $rp.
+  $R.restore = $rp
+}
 Emit

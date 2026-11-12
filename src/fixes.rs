@@ -15,6 +15,8 @@ pub enum Fix {
     DisableFirewallRule { name: String, display: String },
     ServiceManual { name: String, display: String },
     DisableSmb1,
+    EnableSystemProtection,
+    AllowAutoUpdates,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -49,6 +51,8 @@ impl Fix {
             Fix::DisableFirewallRule { .. } => "Turn off this rule",
             Fix::ServiceManual { .. } => "Start only when needed",
             Fix::DisableSmb1 => "Turn off SMB1",
+            Fix::EnableSystemProtection => "Turn on System Restore",
+            Fix::AllowAutoUpdates => "Let Windows update itself",
         }
     }
 
@@ -63,6 +67,8 @@ impl Fix {
             Fix::DisableFirewallRule { display, .. } => format!("The firewall rule \"{display}\" will be switched off, not deleted. You can switch it back on from History."),
             Fix::ServiceManual { display, .. } => format!("{display} will start only when an app asks for it, instead of every time Windows starts. You can undo this from History."),
             Fix::DisableSmb1 => "The old SMB1 file-sharing protocol will be removed. Very old network drives may stop working; you can turn it back on from History. A restart finishes the change.".into(),
+            Fix::EnableSystemProtection => "Windows will start saving restore points for drive C before updates and driver installs, using a small share of the drive. Undoing this later deletes the saved restore points.".into(),
+            Fix::AllowAutoUpdates => "The policy that stops automatic updates will be removed, so Windows installs security fixes by itself again. You can put the policy back from History.".into(),
         }
     }
 
@@ -112,6 +118,13 @@ impl Fix {
                 "Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart | Out-Null".into(),
                 "Enable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart | Out-Null".into(),
             ),
+            Fix::EnableSystemProtection => {
+                ("Enable-ComputerRestore -Drive \"$env:SystemDrive\\\"".into(), "Disable-ComputerRestore -Drive \"$env:SystemDrive\\\"".into())
+            }
+            Fix::AllowAutoUpdates => {
+                let k = r"'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'";
+                (format!("Remove-ItemProperty -Path {k} -Name NoAutoUpdate"), format!("Set-ItemProperty -Path {k} -Name NoAutoUpdate -Value 1 -Type DWord"))
+            }
         }
     }
 }
@@ -171,6 +184,14 @@ pub fn apply(fix: &Fix, title: &str) -> Result<()> {
     save_history(&h)
 }
 
+/// Save a System Restore point. Windows normally allows one a day, so this checks that one was really made.
+pub fn restore_point(description: &str) -> Result<()> {
+    let d = ps_quote(description);
+    run_ps(&format!(
+        "$t = Get-Date\nCheckpoint-Computer -Description {d} -RestorePointType MODIFY_SETTINGS -WarningAction SilentlyContinue\n$l = Get-ComputerRestorePoint | Select-Object -Last 1\nif (-not $l -or [Management.ManagementDateTimeConverter]::ToDateTime($l.CreationTime) -lt $t.AddMinutes(-1)) {{ throw 'Windows skipped it because it already saved a restore point in the last 24 hours' }}"
+    ))
+}
+
 /// Undo the history entry at `index`.
 pub fn undo(index: usize) -> Result<()> {
     let mut h = history();
@@ -202,6 +223,16 @@ mod tests {
         assert_eq!(a, "Remove-MpPreference -ExclusionPath 'C:\\it''s here'");
         assert!(u.starts_with("Add-MpPreference"));
         assert!(f.needs_admin());
+    }
+
+    #[test]
+    fn restore_and_update_fixes_can_be_undone() {
+        let (a, u) = Fix::EnableSystemProtection.scripts();
+        assert!(a.starts_with("Enable-ComputerRestore") && u.starts_with("Disable-ComputerRestore"), "{a} / {u}");
+        assert!(a.contains(r#""$env:SystemDrive\""#), "{a}");
+        let (a, u) = Fix::AllowAutoUpdates.scripts();
+        assert!(a.contains("Remove-ItemProperty") && a.contains(r"WindowsUpdate\AU") && u.contains("-Value 1"));
+        assert!(Fix::AllowAutoUpdates.needs_admin());
     }
 
     /// Runs the real scripts against a throwaway key under HKCU, then removes it.

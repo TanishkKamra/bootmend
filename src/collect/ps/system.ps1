@@ -15,6 +15,11 @@ Try-Section 'device' {
     TpmSpec = $(if ($tpmc.SpecVersion) { ($tpmc.SpecVersion -split ',')[0] } else { $null })
     HasBattery = [bool](Get-CimInstance Win32_Battery)
   }
+  # Get-Tpm needs administrator rights; tpmtool answers the basic questions without them.
+  if ($null -eq $R.device.TpmPresent) {
+    $t = KV (tpmtool getdeviceinformation 2>$null | ForEach-Object { $_ -replace '^-', '' })
+    if ($t['TPM Present']) { $R.device.TpmPresent = ($t['TPM Present'] -eq 'True'); $R.device.TpmSpec = $t['TPM Version']; $R.device.TpmMaker = $t['TPM Manufacturer ID'] }
+  }
 }
 
 Try-Section 'os' {
@@ -95,4 +100,22 @@ Try-Section 'hardware' {
   $R.problemDevices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.Status -eq 'Error' -or $_.ConfigManagerErrorCode -ne 0 } | ForEach-Object { [ordered]@{ Name = $_.FriendlyName; Class = $_.Class; Code = [int]$_.ConfigManagerErrorCode } })
 }
 $R.isAdmin = $IsAdmin
+Try-Section 'winupdate' {
+  # Reads Windows Update's local history only; nothing here contacts Microsoft.
+  $q = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
+  $n = $q.GetTotalHistoryCount()
+  $hist = @($q.QueryHistory(0, [math]::Min($n, 200)) | Where-Object { $_.Title -and $_.Title -notmatch 'Security Intelligence Update|Definition Update' })
+  $since = (Get-Date).AddDays(-60)
+  $failed = @($hist | Where-Object { $_.ResultCode -eq 4 -and $_.Date -gt $since } | Group-Object Title | ForEach-Object { [ordered]@{ Title = $_.Name; Times = $_.Count; Last = $_.Group[0].Date.ToString('yyyy-MM-dd'); Code = ('0x{0:X8}' -f $_.Group[0].HResult) } })
+  # Microsoft Store app updates (titles like '9NBLGGH537C2-Microsoft.XboxGameOverlay') aren't Windows updates.
+  $ok = $hist | Where-Object { $_.ResultCode -eq 2 -and $_.Operation -eq 1 -and $_.Title -cnotmatch '^[0-9A-Z]{12}-' } | Select-Object -First 1
+  $ux = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'
+  $pol = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+  $R.winupdate = [ordered]@{
+    LastInstalled = $(if ($ok) { $ok.Date.ToString('yyyy-MM-dd') } else { $null }); LastInstalledTitle = $(if ($ok) { $ok.Title } else { $null })
+    Failed = $failed
+    PausedUntil = $(if ($ux.PauseUpdatesExpiryTime) { D $ux.PauseUpdatesExpiryTime } else { $null })
+    AutoUpdateOff = ($pol.NoAutoUpdate -eq 1)
+  }
+}
 Emit

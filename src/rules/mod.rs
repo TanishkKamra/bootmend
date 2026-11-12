@@ -2,10 +2,12 @@
 
 pub mod data;
 mod hardware;
-mod security;
+pub mod security;
 mod speed;
 mod stability;
+mod windows;
 pub use stability::bugcheck_code;
+pub use windows::{update_name, win11_readiness};
 
 use crate::fixes::Fix;
 use crate::gui::Page;
@@ -88,6 +90,7 @@ pub enum Action {
     Goto(Page),
     AnalyzeDumps,
     Elevate,
+    RestorePoint,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +159,7 @@ pub fn evaluate(s: &Snapshot) -> Vec<Finding> {
     stability::check(s, &mut f);
     speed::check(s, &mut f);
     hardware::check(s, &mut f);
+    windows::check(s, &mut f);
     for area in Area::ALL {
         if !f.iter().any(|x| x.area == area && x.level != Level::AllGood) {
             f.push(
@@ -241,6 +245,30 @@ mod tests {
         assert!(f.iter().any(|x| x.id.starts_with("ext-bad") && x.level == Level::DoFirst));
         assert!(f.iter().any(|x| x.id.starts_with("vuln-WinRAR")));
         assert!(!f.iter().any(|x| x.id.starts_with("vuln-7-Zip")), "24.09 is fixed");
+    }
+
+    #[test]
+    fn camera_use_is_listed_and_odd_folders_flagged() {
+        let mut s = base();
+        s.security["deviceAccess"] = json!([
+            {"Kind": "webcam", "App": "Discord", "Path": "C:\\Users\\me\\AppData\\Local\\Discord\\app-1\\Discord.exe", "LastUsed": "2026-11-01 10:00", "InUse": false},
+            {"Kind": "webcam", "App": "Discord", "Path": "C:\\Users\\me\\AppData\\Local\\Discord\\app-1\\Discord.exe", "LastUsed": "2026-11-05 10:00", "InUse": true},
+            {"Kind": "location", "App": "svchost", "Path": "C:\\Windows\\System32\\svchost.exe", "LastUsed": "2026-11-02 08:00", "InUse": false},
+            {"Kind": "microphone", "App": "setup", "Path": "C:\\Users\\me\\Downloads\\setup.exe", "LastUsed": "2026-10-01 09:00", "InUse": false},
+            {"Kind": "microphone", "App": "WhatsAppDesktop", "Path": null, "Store": true, "LastUsed": "2026-11-03 09:00", "InUse": false}
+        ]);
+        let rows = security::device_use(&s);
+        assert_eq!(rows.len(), 4, "Discord appears once: {rows:?}");
+        assert_eq!(rows[0].app, "Discord");
+        assert!(rows[0].in_use, "the newest record wins");
+        assert!(rows.iter().find(|r| r.app == "svchost").unwrap().windows);
+        assert_eq!(rows.iter().find(|r| r.what == "Microphone" && r.app.starts_with("WhatsApp")).unwrap().app, "WhatsApp");
+        assert_eq!(security::friendly_app("VALORANT-Win64-Shipping"), "VALORANT");
+        assert_eq!(security::friendly_app("immersivecontrolpanel"), "Windows Settings");
+        assert_eq!(security::friendly_app("Google Chrome"), "Google Chrome");
+        let f = evaluate(&s);
+        let x = f.iter().find(|x| x.id == "device-odd-app").expect("Downloads app flagged");
+        assert_eq!(x.details.len(), 1, "{:?}", x.details);
     }
 
     #[test]

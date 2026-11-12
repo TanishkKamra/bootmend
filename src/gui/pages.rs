@@ -352,6 +352,7 @@ impl App {
                             self.ask(Pending::Elevate);
                         }
                     }
+                    Action::RestorePoint => self.restore_point_button(ui),
                 }
             }
         });
@@ -374,6 +375,19 @@ impl App {
         let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart rigscan as administrator first.") } else { r };
         if r.clicked() {
             self.ask(Pending::Fix(fx.clone(), title.to_string()));
+        }
+    }
+
+    fn restore_point_button(&mut self, ui: &mut Ui) {
+        if self.busy.contains("restore") {
+            ui.add(egui::Spinner::new());
+            muted(ui, "Saving a restore point");
+            return;
+        }
+        let r = widgets::secondary_enabled(ui, "Save a restore point", self.elevated);
+        let r = if self.elevated { r } else { r.on_disabled_hover_text("Needs administrator rights. Restart rigscan as administrator first.") };
+        if r.clicked() {
+            self.ask(Pending::RestorePoint);
         }
     }
 
@@ -505,6 +519,9 @@ impl App {
                 ],
             );
         });
+        self.windows_update(ui, snap);
+        self.system_restore(ui, snap);
+        self.device_history(ui, snap);
         let accts: Vec<Vec<String>> = sec
             .a("accounts")
             .iter()
@@ -517,6 +534,145 @@ impl App {
         card(ui, |ui| {
             muted(ui, "Low-level drivers running right now that don't come from Microsoft. Most belong to your hardware, antivirus or games.");
             table(ui, "sec-kd", &["Driver", "Signed by", "File"], &kd);
+        });
+    }
+
+    fn windows_update(&mut self, ui: &mut Ui, snap: &Snapshot) {
+        let w = snap.system.g("winupdate");
+        if w.is_null() {
+            return;
+        }
+        section(ui, "Windows Update");
+        card(ui, |ui| {
+            let paused = w.s("PausedUntil").filter(|d| *d >= chrono::Local::now().format("%Y-%m-%d").to_string());
+            kv(
+                ui,
+                "sec-wu",
+                &[
+                    ("Last update installed", w.s("LastInstalled").map(|d| format!("{d}, {}", s(w, "LastInstalledTitle")))),
+                    ("Automatic updates", Some(if w.b("AutoUpdateOff") == Some(true) { "Off (set by a policy)" } else { "On" }.into())),
+                    ("Paused", Some(paused.map(|d| format!("Until {d}")).unwrap_or_else(|| "No".into()))),
+                ],
+            );
+            let failed: Vec<Vec<String>> = w
+                .a("Failed")
+                .iter()
+                .map(|u| {
+                    let (name, store) = crate::rules::update_name(&s(u, "Title"));
+                    vec![
+                        if store { format!("{name} (Store app)") } else { name },
+                        s(u, "Last"),
+                        u.i("Times").map(|t| t.to_string()).unwrap_or_default(),
+                        s(u, "Code"),
+                    ]
+                })
+                .collect();
+            ui.add_space(S3);
+            if failed.is_empty() {
+                muted(ui, "No update failed to install in the last 60 days.");
+            } else {
+                muted(ui, "Updates that failed to install in the last 60 days:");
+                table(ui, "sec-wu-failed", &["Update", "Last try", "Times", "Error code"], &failed);
+            }
+        });
+    }
+
+    fn system_restore(&mut self, ui: &mut Ui, snap: &Snapshot) {
+        let r = snap.security.g("restore");
+        if r.is_null() {
+            return;
+        }
+        section(ui, "System Restore");
+        card(ui, |ui| {
+            let on = r.b("COn");
+            if on.is_none() {
+                muted(ui, "Windows only shows restore points to administrators. Restart rigscan as administrator to see them.");
+                return;
+            }
+            kv(
+                ui,
+                "sec-rp",
+                &[
+                    ("System Restore for drive C", on_off(on)),
+                    ("Latest restore point", r.g("Latest").s("When").map(|w| format!("{w}, {}", s(r.g("Latest"), "What")))),
+                    ("Restore points saved", r.i("Count").map(|n| n.to_string())),
+                ],
+            );
+            ui.add_space(S3);
+            ui.horizontal_wrapped(|ui| {
+                if on == Some(true) {
+                    self.restore_point_button(ui);
+                } else {
+                    self.fix_button(ui, &Fix::EnableSystemProtection, "System Restore is off");
+                }
+                if widgets::icon_button(ui, icon::OPEN, "Open System Restore", true).clicked() {
+                    if let Err(e) = shell_open("rstrui.exe") {
+                        self.toast(format!("{e:#}"), false);
+                    }
+                }
+            });
+        });
+    }
+
+    fn device_history(&mut self, ui: &mut Ui, snap: &Snapshot) {
+        let rows = crate::rules::security::device_use(snap);
+        let sw = snap.security.g("deviceAccessSwitch");
+        section(ui, "Camera, microphone and location");
+        card(ui, |ui| {
+            muted(ui, "Windows keeps a note of which apps used these and when. rigscan only reads that note; it can't see or hear anything.");
+            let off: Vec<&str> = [("webcam", "camera"), ("microphone", "microphone"), ("location", "location")]
+                .iter()
+                .filter(|(k, _)| sw.s(k).as_deref() == Some("Deny"))
+                .map(|(_, n)| *n)
+                .collect();
+            if !off.is_empty() {
+                ui.add_space(S2);
+                small(ui, format!("Turned off for all apps: {}.", off.join(", ")));
+            }
+            ui.add_space(S3);
+            if rows.is_empty() {
+                muted(ui, "No app has used the camera, microphone or location yet.");
+            } else {
+                // One row per app, newest first (the rows already come sorted that way).
+                let mut apps: Vec<(String, Vec<&str>, String, bool)> = vec![];
+                for d in &rows {
+                    let name = if d.windows { format!("Windows ({})", d.app) } else { d.app.clone() };
+                    match apps.iter_mut().find(|a| a.0 == name) {
+                        Some(a) => {
+                            if !a.1.contains(&d.what) {
+                                a.1.push(d.what);
+                            }
+                            a.3 |= d.in_use;
+                        }
+                        None => apps.push((name, vec![d.what], d.last_used.clone(), d.in_use)),
+                    }
+                }
+                let t: Vec<Vec<String>> =
+                    apps.into_iter().map(|(name, what, last, now)| vec![name, if now { "In use now".into() } else { last }, what.join(", ")]).collect();
+                let head = ["App", "Last used", "Used"];
+                let recent = t.len().min(12);
+                table(ui, "sec-dev", &head, &t[..recent]);
+                if t.len() > recent {
+                    ui.add_space(S2);
+                    ui.collapsing(format!("{} used earlier", plural(t.len() - recent, "more app", "more apps")), |ui| {
+                        table(ui, "sec-dev-old", &head, &t[recent..])
+                    });
+                }
+            }
+            ui.add_space(S3);
+            ui.horizontal_wrapped(|ui| {
+                for (label, target) in [
+                    ("Camera settings", "ms-settings:privacy-webcam"),
+                    ("Microphone settings", "ms-settings:privacy-microphone"),
+                    ("Location settings", "ms-settings:privacy-location"),
+                ] {
+                    if widgets::icon_button(ui, icon::OPEN, label, true).clicked() {
+                        if let Err(e) = shell_open(target) {
+                            self.toast(format!("{e:#}"), false);
+                        }
+                    }
+                }
+            });
         });
     }
 
@@ -1156,6 +1312,18 @@ fn model(s: &Snapshot) -> String {
 
 // ---------- Detail pages that only display data ----------
 
+/// One line on whether this Windows 10 PC can move to Windows 11.
+fn win11_text(snap: &Snapshot) -> String {
+    let r = crate::rules::win11_readiness(snap);
+    if !r.missing.is_empty() {
+        format!("No. Missing: {}", r.missing.join("; "))
+    } else if !r.unsure.is_empty() {
+        format!("Probably. Couldn't confirm: {}", r.unsure.join("; "))
+    } else {
+        "Looks ready. It's a free upgrade from Windows Update.".into()
+    }
+}
+
 fn this_pc(ui: &mut Ui, snap: &Snapshot) {
     let sys = &snap.system;
     let dev = sys.g("device");
@@ -1177,7 +1345,11 @@ fn this_pc(ui: &mut Ui, snap: &Snapshot) {
                 ("Secure Boot", on_off(dev.b("SecureBoot"))),
                 (
                     "Security chip (TPM)",
-                    dev.s("TpmSpec").map(|v| format!("Version {v}, {}", if dev.b("TpmReady") == Some(true) { "ready" } else { "not ready" })),
+                    dev.s("TpmSpec").map(|v| match dev.b("TpmReady") {
+                        Some(true) => format!("Version {v}, ready"),
+                        Some(false) => format!("Version {v}, not ready"),
+                        None => format!("Version {v}"),
+                    }),
                 ),
             ],
         );
@@ -1190,6 +1362,7 @@ fn this_pc(ui: &mut Ui, snap: &Snapshot) {
             &[
                 ("Edition", os.s("Edition")),
                 ("Version", os.s("Version").map(|v| format!("{v} (build {})", s(os, "Build")))),
+                ("Ready for Windows 11", os.s("Edition").filter(|e| e.contains("Windows 10")).map(|_| win11_text(snap))),
                 ("Installed on", os.s("Installed")),
                 ("Activation", os.s("Activation")),
                 ("Last restart", os.s("LastBoot")),

@@ -85,6 +85,8 @@ fn headless(out: PathBuf, pdf: bool, hide: bool) -> Result<()> {
             collect::Progress::Failed(e) => bail!("The check didn't finish: {e}"),
         }
     };
+    // Like a check in the app, this one is kept in History.
+    snapshot::save(&snap)?;
     let host = if hide { "pc".to_string() } else { snap.host.clone() };
     let named = snapshot::Snapshot { host, ..snap.clone() };
     let path = out.join(report::default_name(&named, if pdf { "pdf" } else { "html" }));
@@ -125,6 +127,12 @@ fn main() {
     };
     let theme = args.theme;
     let shots = args.screenshots;
+    if let Some(dir) = &shots {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("Couldn't create {}: {e}", dir.display());
+            std::process::exit(1);
+        }
+    }
     let r = eframe::run_native(
         "rigscan",
         options,
