@@ -197,6 +197,7 @@ impl App {
             self.ui.area = None;
             self.go(Page::Suggestions);
         }
+        self.schedule_offer(ui);
 
         section(ui, "This PC");
         card(ui, |ui| {
@@ -237,6 +238,7 @@ impl App {
                 }
             }
         });
+        self.trends_ui(ui);
     }
 
     // ---------- Suggestions ----------
@@ -1186,6 +1188,7 @@ impl App {
             });
             ui.add_space(S2);
         }
+        self.schedule_setting(ui);
         section(ui, "Saved checks");
         card(ui, |ui| {
             let n = self.snap.as_ref().and_then(|s| crate::snapshot::list(&s.host).ok()).map(|v| v.len()).unwrap_or(0);

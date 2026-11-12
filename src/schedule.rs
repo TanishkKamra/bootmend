@@ -1,0 +1,234 @@
+//! Regular check-ups: a Task Scheduler task runs `rigscan --scheduled`, which checks quietly and
+//! shows a Windows notification only when something new needs a look. Nothing is ever fixed on its own.
+
+use crate::rules::{Finding, Level};
+use crate::snapshot::{self, Snapshot};
+use crate::util::{powershell, ps_quote};
+use anyhow::{anyhow, Result};
+use chrono::{Datelike, Local};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::time::Duration;
+
+pub const TASK: &str = "rigscan check-up";
+const AUMID: &str = "rigscan.checkup";
+/// Scheduled checks keep at most this many saved checks; the oldest go first.
+pub const KEEP: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Every {
+    #[default]
+    Off,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl Every {
+    pub fn label(self) -> &'static str {
+        match self {
+            Every::Off => "Off",
+            Every::Daily => "Every day",
+            Every::Weekly => "Every week",
+            Every::Monthly => "Every month",
+        }
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+}
+
+/// The task definition. Runs at noon, or as soon as the PC is on after a missed time, on battery too.
+pub fn task_xml(every: Every, exe: &str, user: &str, today: chrono::NaiveDate) -> String {
+    const DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let schedule = match every {
+        Every::Daily | Every::Off => "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>".to_string(),
+        Every::Weekly => format!(
+            "<ScheduleByWeek><DaysOfWeek><{0}/></DaysOfWeek><WeeksInterval>1</WeeksInterval></ScheduleByWeek>",
+            DAYS[today.weekday().num_days_from_monday() as usize]
+        ),
+        Every::Monthly => format!(
+            "<ScheduleByMonth><DaysOfMonth><Day>{}</Day></DaysOfMonth><Months>{}</Months></ScheduleByMonth>",
+            today.day().min(28),
+            MONTHS.iter().map(|m| format!("<{m}/>")).collect::<String>()
+        ),
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Runs a rigscan check-up and lets you know if something new needs a look. Nothing is changed on its own.</Description></RegistrationInfo>
+  <Triggers><CalendarTrigger><StartBoundary>{date}T12:00:00</StartBoundary><Enabled>true</Enabled>{schedule}</CalendarTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT30M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>{exe}</Command><Arguments>--scheduled</Arguments></Exec></Actions>
+</Task>"#,
+        date = today.format("%Y-%m-%d"),
+        user = xml_escape(user),
+        exe = xml_escape(exe),
+    )
+}
+
+/// Turns regular check-ups on at the chosen pace, or off. Also registers how Windows shows
+/// rigscan's notifications and opens rigscan when one is clicked.
+pub fn set(every: Every) -> Result<()> {
+    let exe = std::env::current_exe()?.to_string_lossy().to_string();
+    let script = if every == Every::Off {
+        format!(
+            "Unregister-ScheduledTask -TaskName {task} -Confirm:$false -ErrorAction SilentlyContinue\n\
+             Remove-Item -Path 'HKCU:\\Software\\Classes\\AppUserModelId\\{AUMID}' -Recurse -ErrorAction SilentlyContinue\n\
+             Remove-Item -Path 'HKCU:\\Software\\Classes\\rigscan' -Recurse -ErrorAction SilentlyContinue",
+            task = ps_quote(TASK)
+        )
+    } else {
+        let user = format!("{}\\{}", std::env::var("USERDOMAIN").unwrap_or_default(), std::env::var("USERNAME").unwrap_or_default());
+        let xml = task_xml(every, &exe, &user, Local::now().date_naive());
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             $k = New-Item -Path 'HKCU:\\Software\\Classes\\AppUserModelId\\{AUMID}' -Force\n\
+             Set-ItemProperty -Path $k.PSPath -Name DisplayName -Value 'rigscan'\n\
+             $p = New-Item -Path 'HKCU:\\Software\\Classes\\rigscan' -Force\n\
+             Set-ItemProperty -Path $p.PSPath -Name '(default)' -Value 'URL:rigscan'\n\
+             Set-ItemProperty -Path $p.PSPath -Name 'URL Protocol' -Value ''\n\
+             $c = New-Item -Path 'HKCU:\\Software\\Classes\\rigscan\\shell\\open\\command' -Force\n\
+             Set-ItemProperty -Path $c.PSPath -Name '(default)' -Value {cmd}\n\
+             Register-ScheduledTask -TaskName {task} -Xml {xml} -Force | Out-Null",
+            cmd = ps_quote(&format!("\"{exe}\"")),
+            task = ps_quote(TASK),
+            xml = ps_quote(&xml),
+        )
+    };
+    let out = powershell(&script, Duration::from_secs(60))?;
+    if out.code != Some(0) {
+        return Err(anyhow!("Task Scheduler said: {}", out.stderr.trim()));
+    }
+    Ok(())
+}
+
+/// Suggestions in `now` that weren't in `before`: only the ones worth interrupting someone for.
+pub fn new_items<'a>(before: &[Finding], now: &'a [Finding]) -> Vec<&'a Finding> {
+    let old: HashSet<&str> = before.iter().filter(|f| f.level != Level::AllGood).map(|f| f.id.as_str()).collect();
+    now.iter().filter(|f| matches!(f.level, Level::DoFirst | Level::WorthDoing) && !old.contains(f.id.as_str())).collect()
+}
+
+/// The notification: the first new item by name, and how many more.
+pub fn toast_xml(items: &[&Finding]) -> String {
+    let first = items.first().map(|f| f.title.as_str()).unwrap_or_default();
+    let body = match items.len() {
+        0 | 1 => first.to_string(),
+        n => format!("{first}, and {} more", n - 1),
+    };
+    format!(
+        r#"<toast activationType="protocol" launch="rigscan:open"><visual><binding template="ToastGeneric"><text>rigscan found something new</text><text>{}</text><text>Open rigscan to see what it means and what to do. Nothing was changed.</text></binding></visual></toast>"#,
+        xml_escape(&body)
+    )
+}
+
+pub fn notify(xml: &str) -> Result<()> {
+    let script = format!(
+        "$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]\n\
+         $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]\n\
+         $x = New-Object Windows.Data.Xml.Dom.XmlDocument\n\
+         $x.LoadXml({})\n\
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{AUMID}').Show([Windows.UI.Notifications.ToastNotification]::new($x))",
+        ps_quote(xml)
+    );
+    let out = powershell(&script, Duration::from_secs(30))?;
+    if out.code != Some(0) {
+        return Err(anyhow!("Windows didn't show the notification: {}", out.stderr.trim()));
+    }
+    Ok(())
+}
+
+/// Deletes the oldest saved checks beyond `keep`. Returns how many were removed.
+pub fn prune(host: &str, keep: usize) -> Result<usize> {
+    let files = snapshot::list(host)?;
+    let extra = files.len().saturating_sub(keep);
+    for f in &files[..extra] {
+        std::fs::remove_file(f)?;
+    }
+    Ok(extra)
+}
+
+/// What `rigscan --scheduled` does: check, save, and tell the person only about new suggestions.
+pub fn run_scheduled(snap: Snapshot) -> Result<()> {
+    let before = snapshot::previous(&snap.host, &snap.id).map(|p| crate::rules::evaluate(&p)).unwrap_or_default();
+    snapshot::save(&snap)?;
+    prune(&snap.host, KEEP)?;
+    let now = crate::rules::evaluate(&snap);
+    let new = new_items(&before, &now);
+    if !new.is_empty() {
+        notify(&toast_xml(&new))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rules::Area;
+
+    fn f(id: &str, level: Level) -> Finding {
+        Finding::new(id, Area::Security, level, format!("Title {id}"))
+    }
+
+    /// Creates the real task, shows one real notification, then removes everything again.
+    #[test]
+    #[ignore = "changes Task Scheduler and shows a notification"]
+    fn sets_notifies_and_clears_for_real() {
+        let exists = || {
+            powershell(
+                &format!("if (Get-ScheduledTask -TaskName {} -ErrorAction SilentlyContinue) {{ 'yes' }} else {{ 'no' }}", ps_quote(TASK)),
+                Duration::from_secs(30),
+            )
+            .unwrap()
+            .stdout
+            .trim()
+            .to_string()
+        };
+        set(Every::Weekly).unwrap();
+        assert_eq!(exists(), "yes");
+        let a = f("test", Level::DoFirst);
+        notify(&toast_xml(&[&a])).unwrap();
+        set(Every::Off).unwrap();
+        assert_eq!(exists(), "no");
+    }
+
+    #[test]
+    fn only_new_important_items_interrupt() {
+        let before = vec![f("a", Level::DoFirst), f("b", Level::AllGood)];
+        let now = vec![f("a", Level::DoFirst), f("b", Level::WorthDoing), f("c", Level::NiceToHave), f("d", Level::DoFirst)];
+        let ids: Vec<&str> = new_items(&before, &now).iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "d"]);
+        assert!(new_items(&now, &now).is_empty());
+    }
+
+    #[test]
+    fn notification_names_the_first_and_counts_the_rest() {
+        let a = f("a", Level::DoFirst);
+        let b = f("b<&>", Level::DoFirst);
+        let x = toast_xml(&[&a, &b]);
+        assert!(x.contains("Title a, and 1 more"), "{x}");
+        let y = toast_xml(&[&b]);
+        assert!(y.contains("Title b&lt;&amp;&gt;") && !y.contains("b<&>"), "{y}");
+    }
+
+    #[test]
+    fn task_runs_at_the_chosen_pace() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 11, 30).unwrap();
+        let w = task_xml(Every::Weekly, r"C:\Apps\rig & scan\rigscan.exe", r"PC\me", d);
+        assert!(w.contains("<Monday/>") && w.contains("rig &amp; scan") && w.contains("<StartWhenAvailable>true"), "{w}");
+        assert!(w.contains("2026-11-30T12:00:00"));
+        let m = task_xml(Every::Monthly, "r.exe", "u", d);
+        assert!(m.contains("<Day>28</Day>") && m.contains("<December/>"), "{m}");
+        assert!(task_xml(Every::Daily, "r.exe", "u", d).contains("<DaysInterval>1</DaysInterval>"));
+    }
+}

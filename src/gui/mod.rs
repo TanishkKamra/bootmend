@@ -3,6 +3,7 @@
 mod cleanup_page;
 mod live_page;
 mod pages;
+mod schedule_ui;
 mod screens;
 pub mod theme;
 mod widgets;
@@ -152,12 +153,18 @@ pub enum Job {
     Cleaned(Vec<(&'static str, Result<crate::cleanup::Cleaned, String>)>),
     RecycleEmptied(Result<(), String>),
     NetChecked(crate::nettest::NetCheck),
+    Scheduled(crate::schedule::Every, Result<(), String>),
+    Trends(Vec<crate::trends::Trend>),
 }
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     privacy_ack: bool,
+    /// How often check-ups run in the background.
+    schedule: crate::schedule::Every,
+    /// The check-up offer was answered (or the person chose a pace).
+    schedule_asked: bool,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -225,6 +232,9 @@ pub struct App {
     cleanup: Option<cleanup_page::CleanupView>,
     net: Option<crate::nettest::NetCheck>,
     live: Option<crate::live::Monitor>,
+    trends: Vec<crate::trends::Trend>,
+    /// The check the trends were drawn for.
+    trends_for: String,
 }
 
 impl App {
@@ -255,6 +265,8 @@ impl App {
             cleanup: None,
             net: None,
             live: None,
+            trends: vec![],
+            trends_for: String::new(),
         };
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
@@ -305,13 +317,17 @@ impl App {
         self.toasts.push((text.into(), ok, Instant::now()));
     }
 
-    pub fn start_check(&mut self) {
-        self.settings.privacy_ack = true;
+    fn save_settings(&self) {
         if let Some(p) = settings_path() {
             if let Err(e) = std::fs::write(&p, serde_json::to_vec(&self.settings).unwrap_or_default()) {
                 eprintln!("could not save settings: {e}");
             }
         }
+    }
+
+    pub fn start_check(&mut self) {
+        self.settings.privacy_ack = true;
+        self.save_settings();
         let (tx, rx) = channel();
         std::thread::spawn(move || collect::collect(tx));
         self.check_error = None;
@@ -671,6 +687,11 @@ impl App {
                 Job::CleanupFound(r) => self.cleanup_found(r),
                 Job::Cleaned(r) => self.cleaned(r),
                 Job::RecycleEmptied(r) => self.recycle_emptied(r),
+                Job::Scheduled(every, r) => self.scheduled(every, r),
+                Job::Trends(t) => {
+                    self.busy.remove("trends");
+                    self.trends = t;
+                }
                 Job::NetChecked(c) => {
                     self.busy.remove("net");
                     self.toast(

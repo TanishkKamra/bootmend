@@ -11,7 +11,9 @@ mod nettest;
 mod report;
 mod rules;
 mod scan;
+mod schedule;
 mod snapshot;
+mod trends;
 mod util;
 
 use anyhow::{anyhow, bail, Result};
@@ -31,13 +33,14 @@ struct Args {
     report: Option<PathBuf>,
     pdf: bool,
     show_personal: bool,
+    scheduled: bool,
     screenshots: Option<PathBuf>,
     theme: Option<String>,
     size: Option<(f32, f32)>,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut a = Args { report: None, pdf: false, show_personal: false, screenshots: None, theme: None, size: None };
+    let mut a = Args { report: None, pdf: false, show_personal: false, scheduled: false, screenshots: None, theme: None, size: None };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         let mut val = |name: &str| it.next().ok_or_else(|| anyhow!("{name} needs a value"));
@@ -45,6 +48,7 @@ fn parse_args() -> Result<Args> {
             "--report" => a.report = Some(val("--report")?.into()),
             "--pdf" => a.pdf = true,
             "--show-personal" => a.show_personal = true,
+            "--scheduled" => a.scheduled = true,
             "--screenshots" => a.screenshots = Some(val("--screenshots")?.into()),
             "--theme" => {
                 let t = val("--theme")?;
@@ -77,17 +81,38 @@ fn console() {
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
-fn headless(out: PathBuf, pdf: bool, hide: bool) -> Result<()> {
-    std::fs::create_dir_all(&out)?;
+/// Runs the full check without a window.
+fn collect_now() -> Result<snapshot::Snapshot> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || collect::collect(tx));
-    let snap = loop {
+    loop {
         match rx.recv()? {
             collect::Progress::StepDone { key, ok } => eprintln!("{} {key}", if ok { "done" } else { "incomplete" }),
-            collect::Progress::Finished(s) => break *s,
+            collect::Progress::Finished(s) => return Ok(*s),
             collect::Progress::Failed(e) => bail!("The check didn't finish: {e}"),
         }
-    };
+    }
+}
+
+/// A scheduled check-up has no window to show errors in, so they go to a small log next to the saved checks.
+fn scheduled() {
+    if let Err(e) = collect_now().and_then(schedule::run_scheduled) {
+        if let Ok(d) = util::data_dir("") {
+            let line = format!("{} {e:#}\n", util::now_stamp());
+            let log = d.join("check-up-errors.txt");
+            let old = std::fs::read_to_string(&log).unwrap_or_default();
+            // Keep only the recent end so the log never grows large.
+            let keep: String = old.lines().rev().take(50).collect::<Vec<_>>().into_iter().rev().map(|l| format!("{l}\n")).collect();
+            if let Err(w) = std::fs::write(&log, keep + &line) {
+                eprintln!("{e:#} (and the log couldn't be written: {w})");
+            }
+        }
+    }
+}
+
+fn headless(out: PathBuf, pdf: bool, hide: bool) -> Result<()> {
+    std::fs::create_dir_all(&out)?;
+    let snap = collect_now()?;
     // Like a check in the app, this one is kept in History.
     snapshot::save(&snap)?;
     let host = if hide { "pc".to_string() } else { snap.host.clone() };
@@ -111,6 +136,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if args.scheduled {
+        scheduled();
+        return;
+    }
     if let Some(out) = args.report {
         console();
         if let Err(e) = headless(out, args.pdf, !args.show_personal) {
