@@ -2,7 +2,7 @@
 
 A Windows desktop app that checks a PC (hardware, health, security, software) and explains, in plain words, what is worth fixing. It is written for people who aren't technical.
 
-Bootmend only reads until you press a button. Every change explains itself first, and every fix can be undone from History. Nothing is sent anywhere, except the connection test, and that one asks first.
+Bootmend only reads until you press a button, and every change explains itself first. Changes to Windows settings can be undone from History. Clearing space and updating apps can't be undone, and Bootmend says so before it runs them. It only goes online when you press one of four buttons (check for app updates, update an app, read crash files, test my connection), and each one asks first.
 
 ## What it does
 
@@ -16,7 +16,7 @@ Bootmend only reads until you press a button. Every change explains itself first
 - **Startup & background:** on/off switches for apps that open at sign-in, plus services and scheduled tasks from other makers.
 - **Crashes:** blue screens and app crashes, with what each stop code usually means.
 - **What's running:** live processor, memory and drive use, grouped by app.
-- **Changes and History:** what changed between checks, every change Bootmend made with an Undo button, and charts of free space, suggestions, startup apps and battery health over time.
+- **Changes and History:** what changed between checks, every settings change Bootmend made with an Undo button, and charts of free space, suggestions, startup apps and battery health over time.
 - **Regular check-ups (optional):** after the first check, Bootmend offers to check again daily, weekly or monthly. A check-up runs quietly at the hour you pick (noon unless you change it), or as soon as the PC is on after that, and shows a notification only when something new needs a look. It keeps up to 100 saved checks.
 - **Save a report:** HTML or PDF, with personal details hidden unless you choose to show them.
 

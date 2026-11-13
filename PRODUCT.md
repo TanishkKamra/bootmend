@@ -26,7 +26,7 @@ Bootmend checks a Windows PC (hardware, health, security, software), then turns 
 
 ## Positioning
 
-- **Does the work, safely.** It fixes things for you. Every change explains itself first, and every fix can be undone from History.
+- **Does the work, safely.** It fixes things for you. Every change explains itself first. Changes to Windows settings can be undone from History; clearing space and app updates can't, and Bootmend says so before it runs them.
 - **Honest, nothing to sell.** No scare scores, no upsell, nothing sent anywhere without asking.
 - **Plain words.** Each finding says what was found, why it matters and what to do.
 - **Feels part of Windows.** It looks and behaves like Windows' own apps, so it is trusted on sight.
@@ -45,8 +45,10 @@ Bootmend checks a Windows PC (hardware, health, security, software), then turns 
   - My PC, with tabs for Hardware, Storage, Network, Security, Apps, Crashes and Live.
   - History.
   - Settings.
-- **Safe fixes:** clearing temp files and caches only. "Fix the N safe ones for me" runs these without asking.
+- **Safe fixes:** clearing temp files and caches only. "Fix the N safe ones for me" runs these without asking. They can't be undone, but apps rebuild what they need, which is why they count as safe.
 - **Every other fix asks first,** with a "Don't ask again" checkbox. It never covers deleting things or going online, and Settings can turn asking back on.
+- **Undo:** changes to Windows settings (startup apps, services, firewall rules, System Restore and the like) can be undone from History. Deleting files and updating apps can't, and Bootmend says so before it runs them.
+- **Going online:** only when the person presses one of four buttons, and each asks first: check for app updates and update an app (both through winget), read crash files (the debugger downloads Microsoft's debugging files the first time), and test my connection (Cloudflare's public speed test).
 - **Guided help:** for anything Bootmend can't do itself, it opens the exact Windows page, shows a short checklist, re-checks automatically, and ticks the item off.
 - **Reports** save as HTML or PDF, with personal details hidden by default.
 - **Platform limits:**
@@ -71,7 +73,7 @@ Bootmend checks a Windows PC (hardware, health, security, software), then turns 
 ## Product Principles
 
 1. **Do it for them, then show what changed.** Plans and buttons, not dashboards to read.
-2. **Earn trust by restraint.** It only reads until you press, explains before it acts, can undo everything, and is never alarmist.
+2. **Earn trust by restraint.** It only reads until you press, explains before it acts, says plainly what can't be undone, and is never alarmist.
 3. **Plain words over completeness.** Detail is there for the helper, never in the main user's way.
 4. **Native first.** When Windows already has a pattern for something, use it.
 
