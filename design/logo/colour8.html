@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>keystone colour</title>
+<style>
+  body { margin: 0; padding: 18px 20px; background: #E7E8EB; font: 13px "Segoe UI Variable Text", "Segoe UI", sans-serif; color: #16181C; }
+  h1 { font: 600 18px "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 0 0 2px; } .sub { color: #5B616C; margin-bottom: 12px; }
+  .card { background: #fff; border-radius: 12px; padding: 14px 16px; } .n { font: 600 15px "Segoe UI Variable Display", "Segoe UI", sans-serif; }
+  .row { display: flex; gap: 14px; align-items: center; } .cap { color: #5B616C; font-size: 12.5px; text-align: center; margin-top: 4px; }
+  .ui { border-radius: 10px; padding: 14px; display: grid; gap: 10px; min-width: 250px; }
+  .L { background: #F3F3F3; color: #16181C; } .Dk { background: #202020; color: #F2F3F5; }
+  .btn { border-radius: 6px; padding: 7px 14px; font: 600 13.5px "Segoe UI Variable Text", "Segoe UI", sans-serif; display: inline-block; }
+  .sw { width: 40px; height: 20px; border-radius: 10px; position: relative; display: inline-block; vertical-align: middle; }
+  .sw::after { content: ""; position: absolute; right: 4px; top: 4px; width: 12px; height: 12px; border-radius: 6px; background: var(--k); }
+  .bar { display: flex; gap: 12px; align-items: center; padding: 0 12px; height: 44px; border-radius: 8px; }
+</style>
+<h1>Wider arch: before and after</h1>
+<div class="sub">About 8% wider, so it stands with its feet apart. Same stones, same keystone.</div>
+<div class="card row" id="ba" style="margin-bottom:14px"></div>
+<h1>Cobalt or gold, tested where they'd actually live</h1>
+<div class="sub">The icon, the taskbar, and the app's own controls (the main button, a switch, a link) in light and dark.</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px" id="cmp"></div>
+<script src="mark8.js"></script>
+<script>
+const url = (s) => 'data:image/svg+xml;utf8,' + encodeURIComponent(s);
+const im = (s, w) => `<img src="${url(s)}" width="${w}" height="${w}">`;
+const withSx = (v, fn) => { const o = ASX.v; ASX.v = v; const r = fn(); ASX.v = o; return r; };
+const cob = ['#6A92FF', '#2F5BEA'], gold = ['#F6D77E', '#D6A12E'];
+document.getElementById('ba').innerHTML = [[1, 'Before'], [1.08, 'After, 8% wider']].map(([v, l]) => `<div><div class="row">${withSx(v, () => im(icon('arch', 256, 'icon', cob), 120) + im(icon('arch', 256, 'light', cob), 96))}</div><div class="cap">${l}</div></div>`).join('<div style="width:30px"></div>');
+ASX.v = 1.08;
+const opts = [
+  ['Cobalt', cob, { lb: '#2F5BEA', lt: '#FFFFFF', db: '#8AABFF', dt: '#0B1530', link: '#2448D8', dlink: '#9DB8FF' }],
+  ['Gold', gold, { lb: '#E0AE3A', lt: '#1B1C20', db: '#F2C55C', dt: '#1B1C20', link: '#7A5A12', dlink: '#F2C55C' }],
+];
+document.getElementById('cmp').innerHTML = opts.map(([n, acc, c]) => `<div class="card">
+  <div class="n">${n}</div>
+  <div class="row" style="margin-top:10px;align-items:flex-start">${im(icon('arch', 256, 'icon', acc), 112)}
+    <div style="display:grid;gap:6px"><div class="bar L">${[32, 24, 16].map((z) => im(icon('arch', z, 'icon', acc), z)).join('')}</div><div class="bar Dk">${[32, 24, 16].map((z) => im(icon('arch', z, 'icon', acc), z)).join('')}</div></div>
+    <div class="ui L"><div><span class="btn" style="background:${c.lb};color:${c.lt}">Fix the 3 safe ones</span></div><div><span class="sw" style="background:${c.lb};--k:${c.lt}"></span> On &nbsp; <span style="color:${c.link};text-decoration:underline">Open Windows Security</span></div></div>
+    <div class="ui Dk"><div><span class="btn" style="background:${c.db};color:${c.dt}">Fix the 3 safe ones</span></div><div><span class="sw" style="background:${c.db};--k:${c.dt}"></span> On &nbsp; <span style="color:${c.dlink};text-decoration:underline">Open Windows Security</span></div></div>
+  </div></div>`).join('');
+</script>

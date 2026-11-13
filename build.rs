@@ -4,6 +4,7 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_manifest_file("assets/bootmend.manifest");
+        res.set_icon("assets/bootmend.ico");
         res.set("FileDescription", "Bootmend PC check-up");
         res.set("ProductName", "Bootmend");
         if let Err(e) = res.compile() {
@@ -11,4 +12,5 @@ fn main() {
         }
     }
     println!("cargo:rerun-if-changed=assets/bootmend.manifest");
+    println!("cargo:rerun-if-changed=assets/bootmend.ico");
 }

@@ -10,6 +10,38 @@ Bootmend is a **Use** surface: a native Windows utility that people open to answ
 4. **One loud thing per view.** One filled (accent) button per card at most. Long lists use switches or quiet secondary buttons.
 5. **Colour never works alone.** Every status pairs a colour with an icon or a word ("Needs attention", "On", "Off").
 
+## Logo
+
+The **Keystone** is an arch of five stones on two legs, with its top stone, the keystone, still dropping in.
+
+- **Why this logo:** a keystone is the last stone set in an arch. Until it goes in, the arch needs a wooden frame to stand. Once it's in, the stones lock together, the frame comes away, and the arch holds on its own. Bootmend does that for a PC: it puts the last piece right, then gets out of the way.
+  - Never say the keystone is the strongest stone. It isn't; it completes the arch.
+  - Wide and planted, the arch also stands like a guard on watch. That's a bonus reading, not a claim that Bootmend protects anything.
+- **Construction:**
+  - 48-unit grid.
+  - Arch centre (24, 31.5), inner radius 7.6, outer radius 18.6, widened 8%.
+  - Joints are 1.6 units wide.
+  - The keystone sits 2.6 units above its seat.
+- **Colour:**
+  - Stones: graphite.
+  - Keystone: cobalt `#2F5BEA` (gradient `#6A92FF` to `#2F5BEA`).
+  - A one-colour version exists for print.
+- **App icon:**
+  - The mark at 66% on a graphite plate (`#2B2D33` to `#121317`).
+  - At 24 px and below, the plate fills more of the square and the mark grows to 78%, so it still reads in the taskbar.
+  - `assets/bootmend.ico` holds 16, 20, 24, 30, 32, 36, 40, 48, 64 and 256 px.
+  - The exe and the window both use it.
+- **Files:**
+  - `design/logo/mark8.js` is the source.
+  - `node design/logo/gen.mjs` writes the SVGs.
+  - The PNGs come from `design/logo/png/r.html#<size>`, rendered with headless Edge (`--default-background-color=00000000 --window-size=<size>,<size> --screenshot=...`).
+  - `python design/logo/make_ico.py` packs the PNGs into the .ico.
+- **Don't:**
+  - Recolour the stones.
+  - Add a tagline or an outline.
+  - Seat the keystone in the app icon. A seated keystone is kept for "all fixed" inside the app.
+- **Motion:** the keystone dropping in is the app's motion character. It takes about 360 ms: a firm landing and a tiny settle, with no bounce. When Windows' Animation effects are off, it fades in instead.
+
 ## Tokens (`src/gui/theme.rs`)
 
 ### Colour
@@ -108,6 +140,11 @@ None beyond egui's defaults: hover fills, the spinner and scrolling. A check-up 
 - **Timestamps read "today at 20:15"** rather than an ISO date.
 - **Status cards on Overview stay.** Four equal cards could look like a stock "metric row", but each one is a real area with real counts, and the row answers the app's main question at a glance.
 - **No brand colour beyond one accent.** Blue reads as "system tool" on Windows and keeps red, amber and green free for meaning.
+- **Cobalt is the brand colour (2026-11-14).**
+  - `#2F5BEA` is the keystone colour. The app's accent tokens move from `#1F56C4` to cobalt in the theme update.
+  - Gold was considered and rejected. As a control on light backgrounds it reaches only 1.84:1, and gold on black looks like Norton.
+  - Simple and Detailed share one theme: Detailed changes density and content, not colour.
+  - A Settings option will let the accent follow the Windows accent colour. It uses Windows' own lighter and darker accent shades, falls back to cobalt when a pair fails contrast, and never changes the icon.
 
 ## Verifying
 

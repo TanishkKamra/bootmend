@@ -172,14 +172,14 @@ fn main() {
         return;
     }
     let (w, h) = args.size.unwrap_or((1180.0, 780.0));
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title(util::APP)
-            .with_app_id("bootmend")
-            .with_inner_size([w, h])
-            .with_min_inner_size([880.0, 600.0]),
-        ..Default::default()
-    };
+    let mut viewport =
+        eframe::egui::ViewportBuilder::default().with_title(util::APP).with_app_id("bootmend").with_inner_size([w, h]).with_min_inner_size([880.0, 600.0]);
+    // Without this, eframe puts its own default icon in the title bar.
+    match eframe::icon_data::from_png_bytes(include_bytes!("../assets/bootmend-256.png")) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(e) => eprintln!("Couldn't load the window icon: {e}"),
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     let theme = args.theme;
     let shots = args.screenshots;
     if let Some(dir) = &shots {
