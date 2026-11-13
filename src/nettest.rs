@@ -262,7 +262,7 @@ mod tests {
     #[test]
     #[ignore = "goes online"]
     fn checks_this_connection() {
-        let gw = std::env::var("RIGSCAN_GATEWAY").ok().and_then(|g| g.parse().ok());
+        let gw = std::env::var("BOOTMEND_GATEWAY").ok().and_then(|g| g.parse().ok());
         let t = Instant::now();
         println!("{:#?} in {:?}", run(gw), t.elapsed());
     }

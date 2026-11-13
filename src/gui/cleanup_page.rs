@@ -175,7 +175,7 @@ impl App {
         if self.cleanup.is_none() && !looking {
             self.start_cleanup_look(&ui.ctx().clone());
         }
-        muted(ui, "rigscan measures first and clears only what you tick. Files an app is using are skipped, and nothing else on the PC changes.");
+        muted(ui, "Bootmend measures first and clears only what you tick. Files an app is using are skipped, and nothing else on the PC changes.");
         ui.add_space(S4);
 
         let Some(v) = self.cleanup.as_mut().filter(|_| !looking) else {
@@ -295,7 +295,7 @@ impl App {
 
         section(ui, "Left alone on purpose");
         card(ui, |ui| {
-            muted(ui, "Some cleaners clear these too. rigscan doesn't, because the space isn't worth what can go wrong.");
+            muted(ui, "Some cleaners clear these too. Bootmend doesn't, because the space isn't worth what can go wrong.");
             ui.add_space(S2);
             ui.collapsing("Show the list", |ui| {
                 for (what, why) in LEFT_ALONE {
@@ -354,7 +354,7 @@ fn row(ui: &mut Ui, item: &Item, on: &mut bool, enabled: bool, done: Option<&Res
                 ui.add(egui::Label::new(RichText::new(format!("The catch: {t}")).color(p.amber)).wrap());
             }
             if needs_admin {
-                small(ui, "Needs administrator rights. Restart rigscan as administrator to clear this.");
+                small(ui, "Needs administrator rights. Restart Bootmend as administrator to clear this.");
             }
             if let (Some(apps), Some((name, _))) = (open, &item.close_first) {
                 if !apps.is_empty() && done.is_none() {

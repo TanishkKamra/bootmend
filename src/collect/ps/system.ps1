@@ -70,7 +70,7 @@ Try-Section 'displays' {
 }
 
 Try-Section 'directx' {
-  $dx = Join-Path $env:RIGSCAN_TMP 'dxdiag.txt'
+  $dx = Join-Path $env:BOOTMEND_TMP 'dxdiag.txt'
   Remove-Item $dx -Force
   $p = Start-Process dxdiag -ArgumentList '/whql:off', '/t', $dx -WindowStyle Hidden -PassThru
   if (-not $p.WaitForExit(90000)) { Stop-Process -Id $p.Id -Force }
@@ -80,7 +80,7 @@ Try-Section 'directx' {
 
 Try-Section 'battery' {
   if ($R.device.HasBattery) {
-    $bx = Join-Path $env:RIGSCAN_TMP 'battery.xml'; powercfg /batteryreport /xml /output $bx | Out-Null
+    $bx = Join-Path $env:BOOTMEND_TMP 'battery.xml'; powercfg /batteryreport /xml /output $bx | Out-Null
     if (Test-Path $bx) { [xml]$x = Get-Content $bx; $b = $x.BatteryReport.Batteries.Battery | Select-Object -First 1
       $R.battery = [ordered]@{ Name = $b.Id; Maker = $b.Manufacturer; Chemistry = $b.Chemistry; DesignmWh = [int]$b.DesignCapacity; FullChargemWh = [int]$b.FullChargeCapacity; Cycles = [int]$b.CycleCount
         ChargePct = (Get-CimInstance Win32_Battery).EstimatedChargeRemaining; OnAC = ((Get-CimInstance -Namespace root\wmi BatteryStatus).PowerOnline | Select-Object -First 1) } }

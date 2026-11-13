@@ -1,5 +1,5 @@
 [package]
-name = "rigscan"
+name = "bootmend"
 version = "0.1.0"
 edition = "2021"
 description = "Windows PC audit app: hardware, health, security, software, and what to fix"

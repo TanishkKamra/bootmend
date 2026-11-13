@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -75,10 +75,26 @@ impl J for Value {
     }
 }
 
-/// `%LOCALAPPDATA%\rigscan\<sub>`, created on first use.
+/// The app's name wherever Windows shows it: the window, its folder, Task Scheduler and notifications.
+pub const APP: &str = "Bootmend";
+/// The app was called rigscan before; its saved checks lived in a folder by that name.
+const OLD_DIR: &str = "rigscan";
+
+/// Moves the old app's folder (saved checks, settings, undo history) under the new name, once.
+/// Never touches a folder that already exists under the new name. True if something moved.
+pub fn move_old_data(base: &Path) -> Result<bool> {
+    let (old, new) = (base.join(OLD_DIR), base.join(APP));
+    if new.exists() || !old.is_dir() {
+        return Ok(false);
+    }
+    std::fs::rename(&old, &new).with_context(|| format!("moving {} to {}", old.display(), new.display()))?;
+    Ok(true)
+}
+
+/// `%LOCALAPPDATA%\Bootmend\<sub>`, created on first use.
 pub fn data_dir(sub: &str) -> Result<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").ok_or_else(|| anyhow!("LOCALAPPDATA is not set"))?;
-    let p = PathBuf::from(base).join("rigscan").join(sub);
+    let p = PathBuf::from(base).join(APP).join(sub);
     std::fs::create_dir_all(&p).with_context(|| format!("creating {}", p.display()))?;
     Ok(p)
 }
@@ -232,6 +248,22 @@ pub fn version_lt(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn old_saved_checks_move_to_the_new_folder_once() {
+        let base = std::env::temp_dir().join(format!("bootmend-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("rigscan").join("snapshots")).unwrap();
+        std::fs::write(base.join("rigscan").join("snapshots").join("a.json"), "{}").unwrap();
+        assert!(move_old_data(&base).unwrap(), "the first run moves the old folder");
+        assert!(base.join(APP).join("snapshots").join("a.json").exists());
+        assert!(!base.join("rigscan").exists());
+        assert!(!move_old_data(&base).unwrap(), "nothing left to move");
+        std::fs::create_dir_all(base.join("rigscan")).unwrap();
+        assert!(!move_old_data(&base).unwrap(), "an existing new folder is never overwritten");
+        assert!(base.join("rigscan").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn lenient_accessors_treat_empty_objects_as_missing() {

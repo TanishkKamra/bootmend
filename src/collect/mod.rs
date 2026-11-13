@@ -47,7 +47,7 @@ fn send(tx: &Sender<Progress>, p: Progress) {
 /// Run one embedded PowerShell section and parse its JSON.
 pub fn run_section(key: &str, body: &str, timeout: Duration) -> Result<Value> {
     let tmp = data_dir("tmp")?;
-    let script = format!("$env:RIGSCAN_TMP = {}\n{}\n{}", ps_quote(&tmp.to_string_lossy()), COMMON, body);
+    let script = format!("$env:BOOTMEND_TMP = {}\n{}\n{}", ps_quote(&tmp.to_string_lossy()), COMMON, body);
     let out = powershell(&script, timeout)?;
     if out.timed_out {
         return Err(anyhow!("{key} took too long and was stopped"));

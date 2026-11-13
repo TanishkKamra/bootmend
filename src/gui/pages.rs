@@ -83,9 +83,9 @@ impl App {
                 None => "What's different since the last check.".into(),
             },
             Page::Scan => "Run Windows Security's own scanner from here.".into(),
-            Page::History => "Every change rigscan made, and how to undo it.".into(),
+            Page::History => "Every change Bootmend made, and how to undo it.".into(),
             Page::Report => "A copy of this check you can keep or send to someone helping you.".into(),
-            Page::Privacy => "What rigscan reads, keeps and sends.".into(),
+            Page::Privacy => "What Bootmend reads, keeps and sends.".into(),
             Page::About => String::new(),
         };
         let title = if page == Page::Overview { "Your PC at a glance" } else { page.title() };
@@ -238,7 +238,7 @@ impl App {
         section(ui, "Since your last check");
         card(ui, |ui| match &self.prev_taken {
             None => {
-                muted(ui, "This is the first check on this PC. Next time, rigscan will show what was installed, removed or changed in between.");
+                muted(ui, "This is the first check on this PC. Next time, Bootmend will show what was installed, removed or changed in between.");
             }
             Some(t) => {
                 let notable = self.changes.iter().filter(|c| c.notable).count();
@@ -296,8 +296,8 @@ impl App {
                 small(ui, f.area.name());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     small(ui, f.confidence.name()).on_hover_text(match f.confidence {
-                        crate::rules::Confidence::Measured => "rigscan read this directly from Windows or the hardware.",
-                        crate::rules::Confidence::BestGuess => "rigscan is inferring this from indirect signs, so it may be wrong.",
+                        crate::rules::Confidence::Measured => "Bootmend read this directly from Windows or the hardware.",
+                        crate::rules::Confidence::BestGuess => "Bootmend is inferring this from indirect signs, so it may be wrong.",
                     });
                 });
             });
@@ -407,7 +407,7 @@ impl App {
         }
         let blocked = fx.needs_admin() && !self.elevated;
         let r = if primary { widgets::primary_enabled(ui, fx.label(), !blocked) } else { widgets::secondary_enabled(ui, fx.label(), !blocked) };
-        let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart rigscan as administrator first.") } else { r };
+        let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart Bootmend as administrator first.") } else { r };
         if r.clicked() {
             self.ask(Pending::Fix(fx.clone(), title.to_string()));
         }
@@ -420,7 +420,7 @@ impl App {
             return;
         }
         let r = widgets::secondary_enabled(ui, "Save a restore point", self.elevated);
-        let r = if self.elevated { r } else { r.on_disabled_hover_text("Needs administrator rights. Restart rigscan as administrator first.") };
+        let r = if self.elevated { r } else { r.on_disabled_hover_text("Needs administrator rights. Restart Bootmend as administrator first.") };
         if r.clicked() {
             self.ask(Pending::RestorePoint);
         }
@@ -485,7 +485,7 @@ impl App {
         card(ui, |ui| {
             let paths = d.strs("ExclusionPaths");
             if paths.iter().any(|x| x.starts_with("N/A")) {
-                muted(ui, "Windows only shows this list to administrators. Restart rigscan as administrator to see it.");
+                muted(ui, "Windows only shows this list to administrators. Restart Bootmend as administrator to see it.");
             } else {
                 let all: Vec<Vec<String>> = paths
                     .iter()
@@ -621,7 +621,7 @@ impl App {
         card(ui, |ui| {
             let on = r.b("COn");
             if on.is_none() {
-                muted(ui, "Windows only shows restore points to administrators. Restart rigscan as administrator to see them.");
+                muted(ui, "Windows only shows restore points to administrators. Restart Bootmend as administrator to see them.");
                 return;
             }
             kv(
@@ -654,7 +654,7 @@ impl App {
         let sw = snap.security.g("deviceAccessSwitch");
         section(ui, "Camera, microphone and location");
         card(ui, |ui| {
-            muted(ui, "Windows keeps a note of which apps used these and when. rigscan only reads that note; it can't see or hear anything.");
+            muted(ui, "Windows keeps a note of which apps used these and when. Bootmend only reads that note; it can't see or hear anything.");
             let off: Vec<&str> = [("webcam", "camera"), ("microphone", "microphone"), ("location", "location")]
                 .iter()
                 .filter(|(k, _)| sw.s(k).as_deref() == Some("Deny"))
@@ -724,7 +724,7 @@ impl App {
             let busy = self.busy.contains("winget");
             match &snap.upgrades {
                 None => {
-                    muted(ui, "rigscan can ask winget which of your apps have newer versions. This uses the internet, so it only runs when you ask.");
+                    muted(ui, "Bootmend can ask winget which of your apps have newer versions. This uses the internet, so it only runs when you ask.");
                     ui.add_space(S2);
                 }
                 Some(list) if list.is_empty() => {
@@ -866,7 +866,7 @@ impl App {
                     } else {
                         let r = widgets::switch(ui, on, !blocked, &shown);
                         let r =
-                            if blocked { r.on_hover_text("Changing this one needs administrator rights. Restart rigscan as administrator first.") } else { r };
+                            if blocked { r.on_hover_text("Changing this one needs administrator rights. Restart Bootmend as administrator first.") } else { r };
                         clicked = r.clicked();
                     }
                     ui.label(if on { "On" } else { "Off" });
@@ -1030,12 +1030,12 @@ impl App {
                 ui,
                 icon::CHANGES,
                 "Nothing to compare yet",
-                "This is the first check on this PC. Next time, rigscan will list what was installed, removed or changed in between.",
+                "This is the first check on this PC. Next time, Bootmend will list what was installed, removed or changed in between.",
             );
             return;
         }
         if self.changes.is_empty() {
-            widgets::empty(ui, icon::CHECK, "Nothing changed", "Everything rigscan tracks is the same as last time.");
+            widgets::empty(ui, icon::CHECK, "Nothing changed", "Everything Bootmend tracks is the same as last time.");
             return;
         }
         let mut groups: Vec<&str> = self.changes.iter().map(|c| c.group).collect();
@@ -1158,7 +1158,7 @@ impl App {
         }
         section(ui, "Results");
         if snap.scans.is_empty() {
-            muted(ui, "No checks run from rigscan yet.");
+            muted(ui, "No checks run from Bootmend yet.");
         }
         for r in &snap.scans {
             card(ui, |ui| {
@@ -1194,7 +1194,7 @@ impl App {
 
     fn history_page(&mut self, ui: &mut Ui) {
         let p = pal(ui.ctx());
-        section(ui, "Changes made with rigscan");
+        section(ui, "Changes made with Bootmend");
         if self.history.is_empty() {
             widgets::empty(ui, icon::UNDO, "No changes yet", "When you use a fix, it shows up here with a button to undo it.");
         }
@@ -1230,7 +1230,7 @@ impl App {
         section(ui, "Saved checks");
         card(ui, |ui| {
             let n = self.snap.as_ref().and_then(|s| crate::snapshot::list(&s.host).ok()).map(|v| v.len()).unwrap_or(0);
-            muted(ui, format!("rigscan keeps {} on this PC so it can show what changed between them.", plural(n, "check", "checks")));
+            muted(ui, format!("Bootmend keeps {} on this PC so it can show what changed between them.", plural(n, "check", "checks")));
             ui.add_space(S2);
             ui.horizontal(|ui| {
                 if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
@@ -1307,7 +1307,7 @@ impl App {
         };
         section(ui, "The short version");
         card(ui, |ui| {
-            para(ui, "rigscan works entirely on this PC. There's no account, no analytics, no ads and no \"cloud scan\". Nothing rigscan finds is sent to us or anyone else.");
+            para(ui, "Bootmend works entirely on this PC. There's no account, no analytics, no ads and no \"cloud scan\". Nothing Bootmend finds is sent to us or anyone else.");
             para(ui, "It only reads, until you press a fix button. Every fix explains itself first and can be undone from History.");
         });
         section(ui, "What it reads");
@@ -1330,7 +1330,7 @@ impl App {
         });
         section(ui, "What it keeps, and where");
         card(ui, |ui| {
-            para(ui, "Each check is saved as a file in your user folder (AppData\\Local\\rigscan), so it can show what changed next time. The undo history lives there too. Nothing else is stored.");
+            para(ui, "Each check is saved as a file in your user folder (AppData\\Local\\Bootmend), so it can show what changed next time. The undo history lives there too. Nothing else is stored.");
             ui.horizontal(|ui| {
                 if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
                     if let Ok(d) = crate::util::data_dir("") {
@@ -1339,7 +1339,7 @@ impl App {
                         }
                     }
                 }
-                if widgets::secondary_enabled(ui, "Delete everything rigscan saved", !self.busy.contains("delete")).clicked() {
+                if widgets::secondary_enabled(ui, "Delete everything Bootmend saved", !self.busy.contains("delete")).clicked() {
                     self.ask(Pending::DeleteData);
                 }
             });
@@ -1411,7 +1411,7 @@ fn upgrade_advisor(ui: &mut Ui, snap: &Snapshot) {
             }
         }
         ui.add_space(S3);
-        small(ui, "Biggest difference first, based on this check. rigscan doesn't sell anything or recommend brands.");
+        small(ui, "Biggest difference first, based on this check. Bootmend doesn't sell anything or recommend brands.");
     });
 }
 
@@ -1764,9 +1764,9 @@ fn network(ui: &mut Ui, snap: &Snapshot) {
 
 fn about(ui: &mut Ui) {
     card(ui, |ui| {
-        ui.label(RichText::new(format!("rigscan {}", env!("CARGO_PKG_VERSION"))).text_style(theme::h2()));
+        ui.label(RichText::new(format!("Bootmend {}", env!("CARGO_PKG_VERSION"))).text_style(theme::h2()));
         ui.add_space(S2);
-        ui.add(egui::Label::new("rigscan checks a Windows PC and explains, in plain words, what's worth fixing. It reads what Windows already knows about itself, runs no background service, and leaves no trace beyond its own saved checks.").wrap());
+        ui.add(egui::Label::new("Bootmend checks a Windows PC and explains, in plain words, what's worth fixing. It reads what Windows already knows about itself, runs no background service, and leaves no trace beyond its own saved checks.").wrap());
         ui.add_space(S2);
         ui.add(
             egui::Label::new("Every check is a small, readable script built into the app, and every fix shows exactly what it changes before it runs.").wrap(),

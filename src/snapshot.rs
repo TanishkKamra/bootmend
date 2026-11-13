@@ -25,7 +25,7 @@ pub struct Snapshot {
     pub drives: Vec<DriveHealth>,
     pub extensions: Vec<Extension>,
     pub dumps: Vec<DumpAnalysis>,
-    /// `None` until the person asks rigscan to check for app updates (it uses the internet).
+    /// `None` until the person asks Bootmend to check for app updates (it uses the internet).
     pub upgrades: Option<Vec<AppUpgrade>>,
     pub scans: Vec<ScanResult>,
     pub errors: Vec<String>,

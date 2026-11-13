@@ -1,6 +1,6 @@
-# rigscan design
+# Bootmend design
 
-rigscan is a **Use** surface: a native Windows utility that people open to answer one question ("is my PC OK, and what should I do?"), then close. Speed, consistency and plain words matter more than personality.
+Bootmend is a **Use** surface: a native Windows utility that people open to answer one question ("is my PC OK, and what should I do?"), then close. Speed, consistency and plain words matter more than personality.
 
 ## Principles
 
@@ -111,4 +111,4 @@ None beyond egui's defaults: hover fills, the spinner and scrolling. A check-up 
 
 ## Verifying
 
-`rigscan --screenshots <folder> --theme light|dark --size WxH` saves every page in parts. Check 880×640 (the smallest useful window) and 1440×900 in both themes after any visual change, and rerun the contrast script after any colour change.
+`bootmend --screenshots <folder> --theme light|dark --size WxH` saves every page in parts. Check 880×640 (the smallest useful window) and 1440×900 in both themes after any visual change, and rerun the contrast script after any colour change.

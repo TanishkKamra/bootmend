@@ -58,5 +58,5 @@ pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
 }
 
 pub fn default_name(s: &Snapshot, ext: &str) -> String {
-    format!("rigscan-{}-{}.{ext}", s.host.replace(|c: char| !c.is_ascii_alphanumeric(), "-"), s.id)
+    format!("bootmend-{}-{}.{ext}", s.host.replace(|c: char| !c.is_ascii_alphanumeric(), "-"), s.id)
 }

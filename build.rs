@@ -3,12 +3,12 @@ fn main() {
     // per-monitor DPI awareness and modern common controls.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
-        res.set_manifest_file("assets/rigscan.manifest");
-        res.set("FileDescription", "rigscan PC audit");
-        res.set("ProductName", "rigscan");
+        res.set_manifest_file("assets/bootmend.manifest");
+        res.set("FileDescription", "Bootmend PC check-up");
+        res.set("ProductName", "Bootmend");
         if let Err(e) = res.compile() {
             panic!("failed to embed Windows resources: {e}");
         }
     }
-    println!("cargo:rerun-if-changed=assets/rigscan.manifest");
+    println!("cargo:rerun-if-changed=assets/bootmend.manifest");
 }

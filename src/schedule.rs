@@ -1,17 +1,23 @@
-//! Regular check-ups: a Task Scheduler task runs `rigscan --scheduled`, which checks quietly and
+//! Regular check-ups: a Task Scheduler task runs `bootmend --scheduled`, which checks quietly and
 //! shows a Windows notification only when something new needs a look. Nothing is ever fixed on its own.
 
 use crate::rules::{Finding, Level};
 use crate::snapshot::{self, Snapshot};
-use crate::util::{powershell, ps_quote};
+use crate::util::{powershell, ps_quote, APP};
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::Duration;
 
-pub const TASK: &str = "rigscan check-up";
-const AUMID: &str = "rigscan.checkup";
+pub const TASK: &str = "Bootmend check-up";
+const AUMID: &str = "Bootmend.CheckUp";
+/// Clicking a notification opens `bootmend:open`, which Windows hands to the app.
+const PROTOCOL: &str = "bootmend";
+/// What the check-up was registered as before the app was renamed.
+const OLD_TASK: &str = "rigscan check-up";
+const OLD_AUMID: &str = "rigscan.checkup";
+const OLD_PROTOCOL: &str = "rigscan";
 /// Scheduled checks keep at most this many saved checks; the oldest go first.
 pub const KEEP: usize = 100;
 
@@ -66,7 +72,7 @@ pub fn task_xml(every: Every, hour: u8, exe: &str, user: &str, today: chrono::Na
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>Runs a rigscan check-up and lets you know if something new needs a look. Nothing is changed on its own.</Description></RegistrationInfo>
+  <RegistrationInfo><Description>Runs a Bootmend check-up and lets you know if something new needs a look. Nothing is changed on its own.</Description></RegistrationInfo>
   <Triggers><CalendarTrigger><StartBoundary>{date}T{time}:00</StartBoundary><Enabled>true</Enabled>{schedule}</CalendarTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
@@ -87,14 +93,14 @@ pub fn task_xml(every: Every, hour: u8, exe: &str, user: &str, today: chrono::Na
 }
 
 /// Turns regular check-ups on at the chosen pace and hour, or off. Also registers how Windows shows
-/// rigscan's notifications and opens rigscan when one is clicked.
+/// the app's notifications and opens the app when one is clicked.
 pub fn set(every: Every, hour: u8) -> Result<()> {
     let exe = std::env::current_exe()?.to_string_lossy().to_string();
     let script = if every == Every::Off {
         format!(
             "Unregister-ScheduledTask -TaskName {task} -Confirm:$false -ErrorAction SilentlyContinue\n\
              Remove-Item -Path 'HKCU:\\Software\\Classes\\AppUserModelId\\{AUMID}' -Recurse -ErrorAction SilentlyContinue\n\
-             Remove-Item -Path 'HKCU:\\Software\\Classes\\rigscan' -Recurse -ErrorAction SilentlyContinue",
+             Remove-Item -Path 'HKCU:\\Software\\Classes\\{PROTOCOL}' -Recurse -ErrorAction SilentlyContinue",
             task = ps_quote(TASK)
         )
     } else {
@@ -103,11 +109,11 @@ pub fn set(every: Every, hour: u8) -> Result<()> {
         format!(
             "$ErrorActionPreference = 'Stop'\n\
              $k = New-Item -Path 'HKCU:\\Software\\Classes\\AppUserModelId\\{AUMID}' -Force\n\
-             Set-ItemProperty -Path $k.PSPath -Name DisplayName -Value 'rigscan'\n\
-             $p = New-Item -Path 'HKCU:\\Software\\Classes\\rigscan' -Force\n\
-             Set-ItemProperty -Path $p.PSPath -Name '(default)' -Value 'URL:rigscan'\n\
+             Set-ItemProperty -Path $k.PSPath -Name DisplayName -Value '{APP}'\n\
+             $p = New-Item -Path 'HKCU:\\Software\\Classes\\{PROTOCOL}' -Force\n\
+             Set-ItemProperty -Path $p.PSPath -Name '(default)' -Value 'URL:{APP}'\n\
              Set-ItemProperty -Path $p.PSPath -Name 'URL Protocol' -Value ''\n\
-             $c = New-Item -Path 'HKCU:\\Software\\Classes\\rigscan\\shell\\open\\command' -Force\n\
+             $c = New-Item -Path 'HKCU:\\Software\\Classes\\{PROTOCOL}\\shell\\open\\command' -Force\n\
              Set-ItemProperty -Path $c.PSPath -Name '(default)' -Value {cmd}\n\
              Register-ScheduledTask -TaskName {task} -Xml {xml} -Force | Out-Null",
             cmd = ps_quote(&format!("\"{exe}\"")),
@@ -116,6 +122,32 @@ pub fn set(every: Every, hour: u8) -> Result<()> {
         )
     };
     let out = powershell(&script, Duration::from_secs(60))?;
+    if out.code != Some(0) {
+        return Err(anyhow!("Task Scheduler said: {}", out.stderr.trim()));
+    }
+    Ok(())
+}
+
+/// Check-ups set up before the rename ran as "rigscan check-up". If that task exists, the same pace
+/// and hour are set up under the new name, then the old task and its notification settings go.
+pub fn move_old_task(every: Every, hour: u8) -> Result<()> {
+    let found =
+        powershell(&format!("if (Get-ScheduledTask -TaskName {} -ErrorAction SilentlyContinue) {{ 'yes' }}", ps_quote(OLD_TASK)), Duration::from_secs(30))?;
+    if found.stdout.trim() != "yes" {
+        return Ok(());
+    }
+    if every != Every::Off {
+        set(every, hour)?;
+    }
+    let out = powershell(
+        &format!(
+            "Unregister-ScheduledTask -TaskName {} -Confirm:$false -ErrorAction SilentlyContinue\n\
+             Remove-Item -Path 'HKCU:\\Software\\Classes\\AppUserModelId\\{OLD_AUMID}' -Recurse -ErrorAction SilentlyContinue\n\
+             Remove-Item -Path 'HKCU:\\Software\\Classes\\{OLD_PROTOCOL}' -Recurse -ErrorAction SilentlyContinue",
+            ps_quote(OLD_TASK)
+        ),
+        Duration::from_secs(60),
+    )?;
     if out.code != Some(0) {
         return Err(anyhow!("Task Scheduler said: {}", out.stderr.trim()));
     }
@@ -136,7 +168,7 @@ pub fn toast_xml(items: &[&Finding]) -> String {
         n => format!("{first}, and {} more", n - 1),
     };
     format!(
-        r#"<toast activationType="protocol" launch="rigscan:open"><visual><binding template="ToastGeneric"><text>rigscan found something new</text><text>{}</text><text>Open rigscan to see what it means and what to do. Nothing was changed.</text></binding></visual></toast>"#,
+        r#"<toast activationType="protocol" launch="{PROTOCOL}:open"><visual><binding template="ToastGeneric"><text>{APP} found something new</text><text>{}</text><text>Open {APP} to see what it means and what to do. Nothing was changed.</text></binding></visual></toast>"#,
         xml_escape(&body)
     )
 }
@@ -167,7 +199,7 @@ pub fn prune(host: &str, keep: usize) -> Result<usize> {
     Ok(extra)
 }
 
-/// What `rigscan --scheduled` does: check, save, and tell the person only about new suggestions.
+/// What `bootmend --scheduled` does: check, save, and tell the person only about new suggestions.
 pub fn run_scheduled(snap: Snapshot) -> Result<()> {
     let before = snapshot::previous(&snap.host, &snap.id).map(|p| crate::rules::evaluate(&p)).unwrap_or_default();
     snapshot::save(&snap)?;
@@ -189,20 +221,22 @@ mod tests {
         Finding::new(id, Area::Security, level, format!("Title {id}"))
     }
 
+    fn task_exists(name: &str) -> String {
+        powershell(
+            &format!("if (Get-ScheduledTask -TaskName {} -ErrorAction SilentlyContinue) {{ 'yes' }} else {{ 'no' }}", ps_quote(name)),
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .stdout
+        .trim()
+        .to_string()
+    }
+
     /// Creates the real task, shows one real notification, then removes everything again.
     #[test]
     #[ignore = "changes Task Scheduler and shows a notification"]
     fn sets_notifies_and_clears_for_real() {
-        let exists = || {
-            powershell(
-                &format!("if (Get-ScheduledTask -TaskName {} -ErrorAction SilentlyContinue) {{ 'yes' }} else {{ 'no' }}", ps_quote(TASK)),
-                Duration::from_secs(30),
-            )
-            .unwrap()
-            .stdout
-            .trim()
-            .to_string()
-        };
+        let exists = || task_exists(TASK);
         set(Every::Weekly, 9).unwrap();
         assert_eq!(exists(), "yes");
         let start = powershell(&format!("(Get-ScheduledTask -TaskName {}).Triggers[0].StartBoundary", ps_quote(TASK)), Duration::from_secs(30)).unwrap();
@@ -211,6 +245,27 @@ mod tests {
         notify(&toast_xml(&[&a])).unwrap();
         set(Every::Off, NOON).unwrap();
         assert_eq!(exists(), "no");
+    }
+
+    /// Registers a check-up under the old name, moves it, and checks only the new one is left. Then removes it.
+    #[test]
+    #[ignore = "changes Task Scheduler"]
+    fn moves_a_check_up_set_up_under_the_old_name_for_real() {
+        let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        let user = format!("{}\\{}", std::env::var("USERDOMAIN").unwrap_or_default(), std::env::var("USERNAME").unwrap_or_default());
+        let xml = task_xml(Every::Weekly, 9, &exe, &user, Local::now().date_naive());
+        let made =
+            powershell(&format!("Register-ScheduledTask -TaskName {} -Xml {} -Force | Out-Null", ps_quote(OLD_TASK), ps_quote(&xml)), Duration::from_secs(60))
+                .unwrap();
+        assert_eq!(made.code, Some(0), "{}", made.stderr);
+        assert_eq!(task_exists(OLD_TASK), "yes");
+        move_old_task(Every::Weekly, 9).unwrap();
+        assert_eq!(task_exists(OLD_TASK), "no");
+        assert_eq!(task_exists(TASK), "yes");
+        let start = powershell(&format!("(Get-ScheduledTask -TaskName {}).Triggers[0].StartBoundary", ps_quote(TASK)), Duration::from_secs(30)).unwrap();
+        assert!(start.stdout.contains("T09:00:00"), "{}", start.stdout);
+        set(Every::Off, NOON).unwrap();
+        assert_eq!(task_exists(TASK), "no");
     }
 
     #[test]
@@ -228,6 +283,7 @@ mod tests {
         let b = f("b<&>", Level::DoFirst);
         let x = toast_xml(&[&a, &b]);
         assert!(x.contains("Title a, and 1 more"), "{x}");
+        assert!(x.contains("Bootmend found something new") && x.contains(r#"launch="bootmend:open""#) && !x.contains("rigscan"), "{x}");
         let y = toast_xml(&[&b]);
         assert!(y.contains("Title b&lt;&amp;&gt;") && !y.contains("b<&>"), "{y}");
     }
@@ -235,8 +291,10 @@ mod tests {
     #[test]
     fn task_runs_at_the_chosen_pace() {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 11, 30).unwrap();
-        let w = task_xml(Every::Weekly, NOON, r"C:\Apps\rig & scan\rigscan.exe", r"PC\me", d);
-        assert!(w.contains("<Monday/>") && w.contains("rig &amp; scan") && w.contains("<StartWhenAvailable>true"), "{w}");
+        let w = task_xml(Every::Weekly, NOON, r"C:\Apps\boot & mend\bootmend.exe", r"PC\me", d);
+        assert!(w.contains("<Monday/>") && w.contains("boot &amp; mend") && w.contains("<StartWhenAvailable>true"), "{w}");
+        assert!(w.contains("Runs a Bootmend check-up") && !w.contains("rigscan"), "{w}");
+        assert_eq!(TASK, "Bootmend check-up");
         assert!(w.contains("2026-11-30T12:00:00"));
         let m = task_xml(Every::Monthly, NOON, "r.exe", "u", d);
         assert!(m.contains("<Day>28</Day>") && m.contains("<December/>"), "{m}");

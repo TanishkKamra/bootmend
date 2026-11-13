@@ -318,7 +318,7 @@ pub fn render(snap: &Snapshot, hidden: bool) -> String {
         snap.software.a("apps").iter().map(|a| vec![s(a, "Name"), s(a, "Version"), s(a, "Publisher"), s(a, "Installed")]).collect(),
     );
 
-    let _ = write!(o, "<footer>Made by rigscan on this PC on {}. This report was saved to your own computer; rigscan did not upload it or anything else.</footer></main></body></html>", esc(&snap.taken));
+    let _ = write!(o, "<footer>Made by Bootmend on this PC on {}. This report was saved to your own computer; Bootmend did not upload it or anything else.</footer></main></body></html>", esc(&snap.taken));
     o
 }
 

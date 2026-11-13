@@ -270,7 +270,7 @@ pub fn catalog(p: &Places, elevated: bool, now: SystemTime) -> Vec<Item> {
     files(
         "crash-reports",
         "Crash reports",
-        "Reports Windows saved after an app or Windows itself crashed. Crash files from the last 90 days stay, so rigscan can still read them.",
+        "Reports Windows saved after an app or Windows itself crashed. Crash files from the last 90 days stay, so Bootmend can still read them.",
         None,
         Group::Safe,
         false,
@@ -623,7 +623,7 @@ mod tests {
     const DAY: Duration = Duration::from_secs(86_400);
 
     fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rigscan-test-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("bootmend-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

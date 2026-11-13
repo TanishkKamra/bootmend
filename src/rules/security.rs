@@ -148,7 +148,7 @@ fn defender(s: &Snapshot, f: &mut Vec<Finding>) {
         if !s.elevated {
             f.push(
                 Finding::new("av-exclusions-hidden", SEC, Level::NiceToHave, "Windows Security's skip list is hidden")
-                    .why("Windows only shows which folders virus protection skips to administrators. Restart rigscan as administrator to check it.")
+                    .why("Windows only shows which folders virus protection skips to administrators. Restart Bootmend as administrator to check it.")
                     .act(Action::Elevate),
             );
         }

@@ -29,6 +29,6 @@ pub fn relaunch_as_admin(args: &str) -> Result<()> {
     if r.0 as isize > 32 {
         Ok(())
     } else {
-        Err(anyhow!("Windows did not start rigscan as administrator. The prompt may have been cancelled."))
+        Err(anyhow!("Windows did not start Bootmend as administrator. The prompt may have been cancelled."))
     }
 }

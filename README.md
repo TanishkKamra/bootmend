@@ -1,8 +1,8 @@
-# rigscan
+# Bootmend
 
 A Windows desktop app that checks a PC (hardware, health, security, software) and explains, in plain words, what is worth fixing. It is written for people who aren't technical.
 
-rigscan only reads until you press a button. Every change explains itself first, and every fix can be undone from History. Nothing is sent anywhere, except the connection test, and that one asks first.
+Bootmend only reads until you press a button. Every change explains itself first, and every fix can be undone from History. Nothing is sent anywhere, except the connection test, and that one asks first.
 
 ## What it does
 
@@ -16,8 +16,8 @@ rigscan only reads until you press a button. Every change explains itself first,
 - **Startup & background:** on/off switches for apps that open at sign-in, plus services and scheduled tasks from other makers.
 - **Crashes:** blue screens and app crashes, with what each stop code usually means.
 - **What's running:** live processor, memory and drive use, grouped by app.
-- **Changes and History:** what changed between checks, every change rigscan made with an Undo button, and charts of free space, suggestions, startup apps and battery health over time.
-- **Regular check-ups (optional):** after the first check, rigscan offers to check again daily, weekly or monthly. A check-up runs quietly at the hour you pick (noon unless you change it), or as soon as the PC is on after that, and shows a notification only when something new needs a look. It keeps up to 100 saved checks.
+- **Changes and History:** what changed between checks, every change Bootmend made with an Undo button, and charts of free space, suggestions, startup apps and battery health over time.
+- **Regular check-ups (optional):** after the first check, Bootmend offers to check again daily, weekly or monthly. A check-up runs quietly at the hour you pick (noon unless you change it), or as soon as the PC is on after that, and shows a notification only when something new needs a look. It keeps up to 100 saved checks.
 - **Save a report:** HTML or PDF, with personal details hidden unless you choose to show them.
 
 Some details (Windows Security's skip list, crash files, some drive health data) need administrator rights. The app offers to restart as administrator and works without it.
@@ -30,21 +30,23 @@ Needs Windows 10 or 11 and Rust (MSVC toolchain).
 cargo build --release
 ```
 
-The app is `target\release\rigscan.exe`. It's a single file with no installer.
+The app is `target\release\bootmend.exe`. It's a single file with no installer.
 
 ## Run
 
 ```
-rigscan                                  Open the app
-rigscan --report <folder> [--pdf] [--show-personal]
+bootmend                                 Open the app
+bootmend --report <folder> [--pdf] [--show-personal]
                                          Run a check without a window and save a report
-rigscan --screenshots <folder> [--theme light|dark] [--size WxH]
+bootmend --screenshots <folder> [--theme light|dark] [--size WxH]
                                          Save a picture of every page (for testing)
 ```
 
 `--scheduled` is what the regular check-up task runs. You don't need to use it yourself.
 
-Saved checks live in `%LOCALAPPDATA%\rigscan\snapshots\<PC name>\`.
+Saved checks live in `%LOCALAPPDATA%\Bootmend\snapshots\<PC name>\`.
+
+Bootmend used to be called rigscan. The first time it runs, it moves the old `%LOCALAPPDATA%\rigscan` folder (saved checks, settings and undo history) to the new name, and moves a regular check-up set up under the old name over too.
 
 ## Test
 

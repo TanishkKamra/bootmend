@@ -58,7 +58,7 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
             x = x.step("Update your drivers, starting with graphics, network and chipset, from the makers' websites.");
         }
         if !h.a("minidumps").is_empty() && s.dumps.is_empty() {
-            x = x.step("rigscan can read the crash files to see which driver was involved.").act(Action::AnalyzeDumps);
+            x = x.step("Bootmend can read the crash files to see which driver was involved.").act(Action::AnalyzeDumps);
         }
         f.push(x.act(Action::Goto(Page::Crashes)));
     }

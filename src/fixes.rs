@@ -160,15 +160,15 @@ fn save_history(h: &[HistoryEntry]) -> Result<()> {
 
 fn run_ps(body: &str) -> Result<()> {
     let script =
-        format!("$ErrorActionPreference = 'Stop'\ntry {{\n{body}\n'RIGSCAN-OK'\n}} catch {{ Write-Output ('RIGSCAN-ERR ' + $_.Exception.Message); exit 1 }}");
+        format!("$ErrorActionPreference = 'Stop'\ntry {{\n{body}\n'BOOTMEND-OK'\n}} catch {{ Write-Output ('BOOTMEND-ERR ' + $_.Exception.Message); exit 1 }}");
     let out = powershell(&script, Duration::from_secs(300))?;
-    if out.stdout.contains("RIGSCAN-OK") {
+    if out.stdout.contains("BOOTMEND-OK") {
         return Ok(());
     }
     let msg = out
         .stdout
         .lines()
-        .find_map(|l| l.strip_prefix("RIGSCAN-ERR "))
+        .find_map(|l| l.strip_prefix("BOOTMEND-ERR "))
         .map(str::trim)
         .unwrap_or(if out.timed_out { "it took too long" } else { "Windows did not say why" })
         .to_string();
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     #[ignore = "writes to the registry; run with --ignored"]
     fn startup_fix_and_undo_on_a_scratch_key() {
-        let key = r"HKCU:\Software\rigscan-selftest\Run";
+        let key = r"HKCU:\Software\bootmend-selftest\Run";
         let f = Fix::DisableStartup { name: "Sample app".into(), approved_key: key.into() };
         let (apply, undo) = f.scripts();
         let first = |k: &str| {
@@ -250,6 +250,6 @@ mod tests {
         assert_eq!(first(key), "3");
         run_ps(&undo).unwrap();
         assert_eq!(first(key), "2");
-        run_ps(r"Remove-Item -Path 'HKCU:\Software\rigscan-selftest' -Recurse").unwrap();
+        run_ps(r"Remove-Item -Path 'HKCU:\Software\bootmend-selftest' -Recurse").unwrap();
     }
 }

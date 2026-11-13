@@ -70,7 +70,7 @@ pub fn manage_target(e: &Extension) -> Option<(&'static str, String)> {
 
 /// Opens the extension's page in its browser and profile, where it can be switched off or removed.
 pub fn open_manage(e: &Extension) -> anyhow::Result<()> {
-    let (exe, url) = manage_target(e).ok_or_else(|| anyhow::anyhow!("rigscan doesn't know how to open {}", e.browser))?;
+    let (exe, url) = manage_target(e).ok_or_else(|| anyhow::anyhow!("Bootmend doesn't know how to open {}", e.browser))?;
     let params = if e.profile_dir.is_empty() { url } else { format!("--profile-directory=\"{}\" {url}", e.profile_dir) };
     crate::util::shell_run(exe, &params).map_err(|_| anyhow::anyhow!("Windows couldn't open {}. Open it yourself and look under Extensions.", e.browser))
 }

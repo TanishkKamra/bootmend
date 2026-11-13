@@ -19,13 +19,13 @@ mod util;
 use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
 
-const HELP: &str = "rigscan: a plain-English check-up for your PC
+const HELP: &str = "Bootmend: a plain-English check-up for your PC
 
 Usage:
-  rigscan                               Open the app
-  rigscan --report <folder> [--pdf] [--show-personal]
+  bootmend                              Open the app
+  bootmend --report <folder> [--pdf] [--show-personal]
                                         Run a check without a window and save a report
-  rigscan --screenshots <folder> [--theme light|dark] [--size WxH]
+  bootmend --screenshots <folder> [--theme light|dark] [--size WxH]
                                         Save a picture of every page (for testing)
 ";
 
@@ -67,7 +67,7 @@ fn parse_args() -> Result<Args> {
                 print!("{HELP}");
                 std::process::exit(0);
             }
-            other => bail!("Unknown option {other}. Run rigscan --help for the list."),
+            other => bail!("Unknown option {other}. Run bootmend --help for the list."),
         }
     }
     Ok(a)
@@ -94,19 +94,41 @@ fn collect_now() -> Result<snapshot::Snapshot> {
     }
 }
 
-/// A scheduled check-up has no window to show errors in, so they go to a small log next to the saved checks.
+/// Work that runs without a window has nowhere to show errors, so they go to a small log next to the saved checks.
+fn log_error(e: &anyhow::Error) {
+    if let Ok(d) = util::data_dir("") {
+        let line = format!("{} {e:#}\n", util::now_stamp());
+        let log = d.join("check-up-errors.txt");
+        let old = std::fs::read_to_string(&log).unwrap_or_default();
+        // Keep only the recent end so the log never grows large.
+        let keep: String = old.lines().rev().take(50).collect::<Vec<_>>().into_iter().rev().map(|l| format!("{l}\n")).collect();
+        if let Err(w) = std::fs::write(&log, keep + &line) {
+            eprintln!("{e:#} (and the log couldn't be written: {w})");
+        }
+    }
+}
+
 fn scheduled() {
     if let Err(e) = collect_now().and_then(schedule::run_scheduled) {
-        if let Ok(d) = util::data_dir("") {
-            let line = format!("{} {e:#}\n", util::now_stamp());
-            let log = d.join("check-up-errors.txt");
-            let old = std::fs::read_to_string(&log).unwrap_or_default();
-            // Keep only the recent end so the log never grows large.
-            let keep: String = old.lines().rev().take(50).collect::<Vec<_>>().into_iter().rev().map(|l| format!("{l}\n")).collect();
-            if let Err(w) = std::fs::write(&log, keep + &line) {
-                eprintln!("{e:#} (and the log couldn't be written: {w})");
-            }
+        log_error(&e);
+    }
+}
+
+/// The app used to be called rigscan. The first time it runs under the new name, its saved checks
+/// move to the new folder, and check-ups set up under the old name move over in the background.
+fn move_from_old_name() {
+    let Some(base) = std::env::var_os("LOCALAPPDATA") else { return };
+    match util::move_old_data(std::path::Path::new(&base)) {
+        Ok(true) => {
+            std::thread::spawn(|| {
+                let (every, hour) = gui::saved_schedule();
+                if let Err(e) = schedule::move_old_task(every, hour) {
+                    log_error(&e);
+                }
+            });
         }
+        Ok(false) => {}
+        Err(e) => log_error(&e),
     }
 }
 
@@ -136,6 +158,7 @@ fn main() {
             std::process::exit(2);
         }
     };
+    move_from_old_name();
     if args.scheduled {
         scheduled();
         return;
@@ -151,8 +174,8 @@ fn main() {
     let (w, h) = args.size.unwrap_or((1180.0, 780.0));
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("rigscan")
-            .with_app_id("rigscan")
+            .with_title(util::APP)
+            .with_app_id("bootmend")
             .with_inner_size([w, h])
             .with_min_inner_size([880.0, 600.0]),
         ..Default::default()
@@ -166,7 +189,7 @@ fn main() {
         }
     }
     let r = eframe::run_native(
-        "rigscan",
+        util::APP,
         options,
         Box::new(move |cc| {
             let app = gui::App::new(cc, shots);
@@ -180,7 +203,7 @@ fn main() {
     );
     if let Err(e) = r {
         console();
-        eprintln!("rigscan couldn't open its window: {e}");
+        eprintln!("Bootmend couldn't open its window: {e}");
         std::process::exit(1);
     }
 }

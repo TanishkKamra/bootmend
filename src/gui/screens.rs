@@ -6,7 +6,7 @@ use super::{App, Pending};
 use crate::collect::STEPS;
 use eframe::egui::{self, RichText};
 
-/// What rigscan reads, in plain words. Shown on the welcome and privacy screens.
+/// What Bootmend reads, in plain words. Shown on the welcome and privacy screens.
 pub const READS: [&str; 9] = [
     "Hardware details: processor, memory, graphics, drives, battery and connected devices",
     "Windows version, update history and activation status",
@@ -30,7 +30,7 @@ impl App {
                 ui.add_space(S3);
                 ui.label(RichText::new("A plain-English check-up for your PC").text_style(egui::TextStyle::Heading));
                 ui.add_space(S2);
-                ui.label(RichText::new("rigscan looks at your hardware, security settings and recent problems, then explains what's worth fixing and how.").color(p.muted));
+                ui.label(RichText::new("Bootmend looks at your hardware, security settings and recent problems, then explains what's worth fixing and how.").color(p.muted));
                 ui.add_space(S5);
             });
             ui.vertical_centered(|ui| {
@@ -38,8 +38,8 @@ impl App {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     widgets::card(ui, |ui| {
                         for (ic, title, body) in [
-                            (icon::LOCK, "Stays on this PC", "Everything rigscan finds is kept on this computer. There's no account, no tracking and no ads."),
-                            (icon::CHECK, "Changes nothing on its own", "rigscan only looks. Every fix waits for you to press a button, tells you what it will do, and can be undone."),
+                            (icon::LOCK, "Stays on this PC", "Everything Bootmend finds is kept on this computer. There's no account, no tracking and no ads."),
+                            (icon::CHECK, "Changes nothing on its own", "Bootmend only looks. Every fix waits for you to press a button, tells you what it will do, and can be undone."),
                             (icon::NETWORK, "Goes online only when you ask", "Two optional features use the internet: checking for app updates and reading crash files. Each one asks first."),
                         ] {
                             ui.horizontal_top(|ui| {
@@ -69,7 +69,7 @@ impl App {
                         widgets::muted(ui, "Takes about a minute. You can keep using your PC.");
                     });
                     ui.add_space(S4);
-                    let t = if self.ui.show_reads { "Hide what rigscan reads" } else { "What exactly does rigscan read?" };
+                    let t = if self.ui.show_reads { "Hide what Bootmend reads" } else { "What exactly does Bootmend read?" };
                     if ui.link(t).clicked() {
                         self.ui.show_reads = !self.ui.show_reads;
                     }
@@ -85,7 +85,7 @@ impl App {
                     if !self.elevated {
                         ui.add_space(S5);
                         widgets::note(ui, p.blue, p.blue_bg, icon::ADMIN, |ui| {
-                            ui.label("Running as administrator lets rigscan read a few more things, such as Windows Security's skip list and crash files. It's optional.");
+                            ui.label("Running as administrator lets Bootmend read a few more things, such as Windows Security's skip list and crash files. It's optional.");
                             if widgets::secondary(ui, "Restart as administrator").clicked() {
                                 self.ask(Pending::Elevate);
                             }

@@ -336,6 +336,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootmend"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "eframe",
+ "egui_extras",
+ "png 0.17.16",
+ "regex",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "windows",
+ "winresource",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2284,24 +2302,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rigscan"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "eframe",
- "egui_extras",
- "png 0.17.16",
- "regex",
- "rfd",
- "serde",
- "serde_json",
- "sysinfo",
- "windows",
- "winresource",
 ]
 
 [[package]]

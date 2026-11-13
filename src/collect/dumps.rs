@@ -146,11 +146,11 @@ mod tests {
         assert_eq!(a.image.as_deref(), Some("AuthenticAMD"));
     }
 
-    /// Runs the real debugger on a crash file named by RIGSCAN_TEST_DUMP. Downloads symbols from Microsoft.
+    /// Runs the real debugger on a crash file named by BOOTMEND_TEST_DUMP. Downloads symbols from Microsoft.
     #[test]
     #[ignore = "needs a crash file, the Windows debugger and the internet"]
     fn analyzes_a_real_crash_file() {
-        let dump = std::env::var("RIGSCAN_TEST_DUMP").expect("set RIGSCAN_TEST_DUMP to a .dmp file");
+        let dump = std::env::var("BOOTMEND_TEST_DUMP").expect("set BOOTMEND_TEST_DUMP to a .dmp file");
         let cdb = cdb_path().expect("Debugging Tools for Windows not installed");
         let a = analyze(&cdb, Path::new(&dump)).unwrap();
         println!("{a:#?}");

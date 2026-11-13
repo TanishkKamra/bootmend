@@ -183,6 +183,12 @@ fn load_settings() -> Settings {
     settings_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
+/// The check-up pace and hour the person chose, for setting the task up again outside the window.
+pub fn saved_schedule() -> (crate::schedule::Every, u8) {
+    let s = load_settings();
+    (s.schedule, s.schedule_hour)
+}
+
 pub struct Checking {
     rx: Receiver<Progress>,
     done: HashMap<&'static str, bool>,
@@ -363,16 +369,16 @@ impl App {
             Pending::Fix(f, title) => {
                 let mut body = vec![f.describe(), format!("This is for: {title}.")];
                 if self.restore_point_first() {
-                    body.push("rigscan saves a restore point first, so the whole PC can be rolled back if anything goes wrong.".into());
+                    body.push("Bootmend saves a restore point first, so the whole PC can be rolled back if anything goes wrong.".into());
                 }
                 Confirm { title: f.label().to_string(), body, yes: f.label().to_string(), action }
             }
-            Pending::Undo(_, title) => Confirm { title: "Undo this change?".into(), body: vec![format!("rigscan will put back how things were before \"{title}\".")], yes: "Undo".into(), action },
+            Pending::Undo(_, title) => Confirm { title: "Undo this change?".into(), body: vec![format!("Bootmend will put back how things were before \"{title}\".")], yes: "Undo".into(), action },
             Pending::Upgrade(_, name) => Confirm {
                 title: format!("Update {name}?"),
                 body: vec![
                     "winget, Windows' own app installer, will download the newest version from the app's publisher and install it quietly.".into(),
-                    "Close the app first if it's open. Updates can't be undone from rigscan.".into(),
+                    "Close the app first if it's open. Updates can't be undone from Bootmend.".into(),
                 ],
                 yes: "Update".into(),
                 action,
@@ -388,8 +394,8 @@ impl App {
             Pending::CheckUpdates => Confirm {
                 title: "Check for app updates?".into(),
                 body: vec![
-                    "rigscan will ask winget, Windows' own app installer, which of your apps have newer versions.".into(),
-                    "winget compares your installed apps with Microsoft's public app catalog online. rigscan itself sends nothing anywhere.".into(),
+                    "Bootmend will ask winget, Windows' own app installer, which of your apps have newer versions.".into(),
+                    "winget compares your installed apps with Microsoft's public app catalog online. Bootmend itself sends nothing anywhere.".into(),
                 ],
                 yes: "Check now".into(),
                 action,
@@ -397,7 +403,7 @@ impl App {
             Pending::AnalyzeDumps => Confirm {
                 title: "Read the crash files?".into(),
                 body: vec![
-                    "rigscan will open each crash file with Microsoft's debugger to see which driver was involved.".into(),
+                    "Bootmend will open each crash file with Microsoft's debugger to see which driver was involved.".into(),
                     "The first time, the debugger downloads matching debugging files from Microsoft (often 50 to 200 MB). It asks for them by driver name and version; the crash files themselves stay on this PC.".into(),
                     "This can take several minutes.".into(),
                 ],
@@ -407,7 +413,7 @@ impl App {
             Pending::Elevate => Confirm {
                 title: "Restart as administrator?".into(),
                 body: vec![
-                    "Windows will ask for permission, then rigscan opens again with access to a few more details: Windows Security's skip list, crash files and some drive health data.".into(),
+                    "Windows will ask for permission, then Bootmend opens again with access to a few more details: Windows Security's skip list, crash files and some drive health data.".into(),
                     "Administrator rights are used for reading. Fixes still wait for you.".into(),
                 ],
                 yes: "Restart".into(),
@@ -459,7 +465,7 @@ impl App {
             Pending::NetCheck => Confirm {
                 title: "Test your connection?".into(),
                 body: vec![
-                    "rigscan pings your router, times a few website name lookups, then downloads and uploads test data with Cloudflare's public speed test (speed.cloudflare.com).".into(),
+                    "Bootmend pings your router, times a few website name lookups, then downloads and uploads test data with Cloudflare's public speed test (speed.cloudflare.com).".into(),
                     "It uses up to about 135 MB of data and takes under a minute. Like any website, Cloudflare sees this connection's internet address. Nothing about the PC is sent.".into(),
                 ],
                 yes: "Test now".into(),
@@ -478,7 +484,7 @@ impl App {
                 }
             }
             Pending::DeleteData => Confirm {
-                title: "Delete everything rigscan saved?".into(),
+                title: "Delete everything Bootmend saved?".into(),
                 body: vec![
                     "This removes all saved checks, the undo history and settings from this PC. Changes you already made to Windows stay as they are.".into(),
                     "This can't be undone.".into(),
@@ -497,7 +503,7 @@ impl App {
                 let first = self.restore_point_first();
                 self.restore_saved |= first;
                 self.spawn(ctx, move || {
-                    let note = first.then(|| match fixes::restore_point("Before changes made with rigscan") {
+                    let note = first.then(|| match fixes::restore_point("Before changes made with Bootmend") {
                         Ok(()) => "A restore point was saved first.".to_string(),
                         Err(e) => format!("No restore point was saved first: {e:#}."),
                     });
@@ -557,7 +563,7 @@ impl App {
             }
             Pending::RestorePoint => {
                 self.busy.insert("restore".into());
-                self.spawn(ctx, || Job::RestorePoint(fixes::restore_point("Saved with rigscan").map_err(|e| format!("{e:#}"))));
+                self.spawn(ctx, || Job::RestorePoint(fixes::restore_point("Saved with Bootmend").map_err(|e| format!("{e:#}"))));
             }
             Pending::DeleteData => {
                 self.busy.insert("delete".into());
@@ -613,7 +619,7 @@ impl App {
                             self.restore_saved = true;
                             self.update_snapshot(|s| {
                                 if let Some(r) = s.security.get_mut("restore").and_then(|r| r.as_object_mut()) {
-                                    r.insert("Latest".into(), serde_json::json!({"When": crate::util::now_stamp(), "What": "Saved with rigscan"}));
+                                    r.insert("Latest".into(), serde_json::json!({"When": crate::util::now_stamp(), "What": "Saved with Bootmend"}));
                                 }
                             });
                         }
@@ -717,7 +723,7 @@ impl App {
                             self.changes.clear();
                             self.history.clear();
                             self.settings = Settings::default();
-                            self.toast("Everything rigscan saved has been deleted.", true);
+                            self.toast("Everything Bootmend saved has been deleted.", true);
                         }
                         Err(e) => self.toast(format!("Couldn't delete everything: {e}"), false),
                     }
@@ -736,7 +742,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(S3);
             ui.label(ico(icon::PC, 20.0).color(p.accent));
-            ui.label(RichText::new("rigscan").size(19.0).family(theme::semibold()));
+            ui.label(RichText::new("Bootmend").size(19.0).family(theme::semibold()));
         });
         ui.add_space(S5);
         let do_first = self.findings.iter().filter(|f| f.level == rules::Level::DoFirst).count();

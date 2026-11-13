@@ -9,7 +9,7 @@ use crate::trends::{self, Trend};
 use eframe::egui::{self, RichText, Stroke, Ui};
 
 impl App {
-    /// The offer waits until nothing is left that rigscan could fix, or the person has already used a fix.
+    /// The offer waits until nothing is left that Bootmend could fix, or the person has already used a fix.
     fn schedule_offer_due(&self) -> bool {
         let fixable = self.findings.iter().any(|f| f.level != Level::AllGood && f.actions.iter().any(|a| matches!(a, Action::Fix(_))));
         !self.settings.schedule_asked && self.settings.schedule == Every::Off && (!fixable || !self.history.is_empty())
@@ -34,7 +34,7 @@ impl App {
                 } else {
                     self.toast(
                         format!(
-                            "Check-ups are on: {} at {}. rigscan lets you know only when something new needs a look.",
+                            "Check-ups are on: {} at {}. Bootmend lets you know only when something new needs a look.",
                             every.label().to_lowercase(),
                             schedule::hour_label(hour)
                         ),
@@ -53,7 +53,7 @@ impl App {
         let mut pick = None;
         ui.add_space(S4);
         card(ui, |ui| {
-            ui.label(RichText::new("Want rigscan to keep an eye on this PC?").text_style(theme::h2()));
+            ui.label(RichText::new("Want Bootmend to keep an eye on this PC?").text_style(theme::h2()));
             ui.add_space(S1);
             ui.add(egui::Label::new("It can run this same check quietly in the background and show a notification only when something new needs a look. It never fixes anything on its own.").wrap());
             ui.add_space(S3);
@@ -103,7 +103,7 @@ impl App {
             muted(
                 ui,
                 format!(
-                    "rigscan checks quietly at {}, or as soon as the PC is on after that, and shows a notification only when something new needs a look.",
+                    "Bootmend checks quietly at {}, or as soon as the PC is on after that, and shows a notification only when something new needs a look.",
                     schedule::hour_label(hour)
                 ),
             );
@@ -135,7 +135,7 @@ impl App {
                 small(
                     ui,
                     format!(
-                        "Up to {} saved checks are kept; older ones are removed as new ones arrive. If you move rigscan to another folder, set this again.",
+                        "Up to {} saved checks are kept; older ones are removed as new ones arrive. If you move Bootmend to another folder, set this again.",
                         schedule::KEEP
                     ),
                 );

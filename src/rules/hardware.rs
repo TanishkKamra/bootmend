@@ -36,7 +36,7 @@ fn drives(s: &Snapshot, f: &mut Vec<Finding>) {
         if let Some(r) = d.reallocated.filter(|r| *r > 0.0) {
             f.push(
                 Finding::new(format!("drive-realloc-{}", d.disk), HW, Level::WorthDoing, format!("{} has replaced {} damaged spots", d.model, r))
-                    .why("The drive swapped out some worn areas for spare ones. A small, steady number can last for years, but it should not keep growing. rigscan will tell you if it does.")
+                    .why("The drive swapped out some worn areas for spare ones. A small, steady number can last for years, but it should not keep growing. Bootmend will tell you if it does.")
                     .step("Make sure your important files are backed up.")
                     .act(Action::Goto(Page::Storage)),
             );
