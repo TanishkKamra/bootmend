@@ -4,7 +4,7 @@ Bootmend is a **Use** surface: a native Windows utility that people open to answ
 
 ## Principles
 
-1. **Trust before anything.** It reads until you press a button. Every change explains itself in a confirm dialog and can be undone. No alarm colours for things that aren't urgent, no fake scores, and nothing to buy.
+1. **Trust before anything.** It reads until you press a button. Every change explains itself in a confirm dialog. Changes to Windows settings can be undone from History; clearing space and app updates can't, and the dialog says so. No alarm colours for things that aren't urgent, no fake scores, and nothing to buy.
 2. **Native, not themed.** Segoe UI, Segoe Fluent Icons, and switches and spacing that match Windows Settings. It follows the Windows light or dark setting.
 3. **Plain words.** Each suggestion says what was found, why it matters and what to do, in that order. No jargon without an explanation next to it.
 4. **One loud thing per view.** One filled (accent) button per card at most. Long lists use switches or quiet secondary buttons.
