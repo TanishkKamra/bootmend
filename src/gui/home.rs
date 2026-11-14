@@ -329,7 +329,7 @@ impl App {
             });
     }
 
-    /// One to-do: a ring that fills when it's done, what it is, and one button. "Fix it for me"
+    /// One to-do: its area's icon (a tick once it's done), what it is, and one button. "Fix it for me"
     /// when one change does it; "Walk me through it" opens the steps in place.
     fn todo_row(&mut self, ui: &mut Ui, f: &Finding, done: bool, safe_ids: &[&'static str]) {
         let p = pal(ui.ctx());
@@ -342,7 +342,7 @@ impl App {
         // Short of room, the button moves under the text. Otherwise its column is measured
         // generously, so a row's text never runs under it.
         let compact = avail < COMPACT;
-        // The ring, the gap the layout puts after it, and the space before the words.
+        // The mark, the gap the layout puts after it, and the space before the words.
         let indent = 20.0 + ui.spacing().item_spacing.x + S4;
         let text_w = if compact { avail - indent } else { (avail - indent - 230.0).max(160.0) };
         let title = egui::WidgetText::from(RichText::new(&f.title).family(theme::semibold())).into_galley(
@@ -362,7 +362,7 @@ impl App {
         let mut clear = false;
         let chevron = more && (one_fix || done);
         let text = |ui: &mut Ui| {
-            ring(ui, f.level, done);
+            mark(ui, f.area, f.level, done);
             ui.add_space(S4);
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
@@ -516,17 +516,23 @@ fn group_head(ui: &mut Ui, name: &str, count: usize, open: Option<bool>) -> bool
     pressed
 }
 
-/// The ring at the start of a to-do: red for Do first, filled with a tick once done.
-fn ring(ui: &mut Ui, level: Level, done: bool) {
+/// The mark at the start of a to-do: its area's icon, red for Do first, and a green tick once
+/// it's done. An icon rather than a ring, so it never looks like a box to tick.
+fn mark(ui: &mut Ui, area: Area, level: Level, done: bool) {
     let p = pal(ui.ctx());
     let (r, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::hover());
-    let c = r.center();
-    if done {
-        ui.painter().circle_filled(c, 10.0, p.accent);
-        ui.painter().text(c, egui::Align2::CENTER_CENTER, icon::CHECK, egui::FontId::new(11.0, theme::icons()), p.on_accent);
+    let (glyph, color) = if done {
+        (icon::CHECK, p.green)
     } else {
-        ui.painter().circle_stroke(c, 9.25, Stroke::new(1.5_f32, if level == Level::DoFirst { p.red } else { p.control }));
-    }
+        let g = match area {
+            Area::Security => icon::SHIELD,
+            Area::Stability => icon::HEALTH,
+            Area::Speed => icon::SPEED,
+            Area::Hardware => icon::CHIP,
+        };
+        (g, if level == Level::DoFirst { p.red } else { p.muted })
+    };
+    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, glyph, egui::FontId::new(16.0, theme::icons()), color);
 }
 
 #[cfg(test)]

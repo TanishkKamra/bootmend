@@ -16,6 +16,9 @@ pub mod icon {
     pub const INFO: &str = "\u{E946}";
     pub const REFRESH: &str = "\u{E72C}";
     pub const CHECK: &str = "\u{E73E}";
+    pub const HEALTH: &str = "\u{E95E}";
+    pub const SPEED: &str = "\u{EC4A}";
+    pub const CHIP: &str = "\u{E950}";
     pub const WARN: &str = "\u{E7BA}";
     pub const OPEN: &str = "\u{E8A7}";
     pub const FOLDER: &str = "\u{E8B7}";
