@@ -369,53 +369,105 @@ pub fn table_action(ui: &mut Ui, id: &str, head: &[&str], rows: &[Vec<String>], 
         let n = head.len();
         // With a button column, the text columns share what's left so the table never runs past the card.
         let avail = ui.available_width() - ui.spacing().item_spacing.x * (n + 1) as f32 - if button.is_some() { 72.0 } else { 0.0 };
-        let first = (avail * 0.32).min(240.0);
-        let rest = ((avail - first) / (n.max(2) - 1) as f32).min(130.0);
-        // Widths follow the window every frame and never ask for more than a column's share, so
-        // a narrow window shortens cells instead of pushing the table past its card.
-        let least = rest.min(60.0);
-        let mut tb = TableBuilder::new(ui).striped(true).vscroll(false).cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-        for i in 0..n {
-            tb = tb.column(if i + 1 == n && button.is_none() {
-                Column::remainder().at_least(least).clip(true)
-            } else {
-                Column::initial(if i == 0 { first } else { rest }).at_least(least).clip(true)
-            });
-        }
-        if button.is_some() {
-            tb = tb.column(Column::exact(64.0));
-        }
-        tb.header(26.0, |mut h| {
-            for t in head {
-                h.col(|ui| {
-                    ui.label(RichText::new(*t).color(p.muted).family(theme::semibold()));
+        // Each column starts as wide as its widest entry, heading included, while the table fits
+        // its card; columns too wide for that share what's left. Measured once, because the
+        // widths are kept from then on, dragged or not.
+        let key = ui.id().with("natural-widths");
+        let widths = match ui.data(|d| d.get_temp::<Vec<f32>>(key)) {
+            Some(w) if w.len() == n => w,
+            _ => {
+                let measure =
+                    |t: RichText| egui::WidgetText::from(t).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x;
+                let natural: Vec<f32> = (0..n)
+                    .map(|i| {
+                        let heading = measure(RichText::new(head[i]).family(theme::semibold()));
+                        rows.iter().take(200).filter_map(|r| r.get(i)).map(|c| measure(RichText::new(c.as_str()))).fold(heading, f32::max) + S1
+                    })
+                    .collect();
+                let w = fit_widths(&natural, avail);
+                ui.data_mut(|d| d.insert_temp(key, w.clone()));
+                w
+            }
+        };
+        let least = (avail / n as f32).min(60.0);
+        // Columns can be dragged wider, as in File Explorer. A table dragged wider than its card
+        // scrolls sideways instead of spilling out of it.
+        egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| {
+            let gap = ui.spacing().item_spacing.x;
+            let painter = ui.painter().clone();
+            // The edges show only in the header, as File Explorer's do, and down the whole table
+            // while one is pointed at or dragged.
+            ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
+            let mut tb = TableBuilder::new(ui).striped(true).resizable(true).vscroll(false).cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+            for (i, &w) in widths.iter().enumerate() {
+                tb = tb.column(if i + 1 == n && button.is_none() {
+                    Column::remainder().at_least(least).clip(true)
+                } else {
+                    Column::initial(w).at_least(least).clip(true)
                 });
             }
             if button.is_some() {
-                h.col(|_| {});
+                tb = tb.column(Column::exact(64.0).resizable(false));
             }
-        })
-        .body(|body| {
-            body.rows(26.0, rows.len(), |mut row| {
-                let r = &rows[row.index()];
-                let i = row.index();
-                for c in r {
-                    row.col(|ui| {
-                        // A truncated label shows its full text on hover by itself.
-                        ui.add(egui::Label::new(c.as_str()).truncate());
-                    });
-                }
-                if let Some(label) = button {
-                    row.col(|ui| {
-                        if ui.small_button(label).clicked() {
-                            pressed = Some(i);
+            // The last column has no edge of its own to drag: it takes what's left.
+            let last = n + usize::from(button.is_some()) - 1;
+            tb.header(26.0, |mut h| {
+                for (i, t) in head.iter().enumerate() {
+                    h.col(|ui| {
+                        ui.label(RichText::new(*t).color(p.muted).family(theme::semibold()));
+                        if i < last {
+                            let r = ui.max_rect();
+                            painter.vline(r.right() + gap / 2.0, r.center().y - 7.0..=r.center().y + 7.0, Stroke::new(1.0_f32, p.line));
                         }
                     });
                 }
+                if button.is_some() {
+                    h.col(|_| {});
+                }
+            })
+            .body(|body| {
+                body.rows(26.0, rows.len(), |mut row| {
+                    let r = &rows[row.index()];
+                    let i = row.index();
+                    for c in r {
+                        row.col(|ui| {
+                            // A truncated label shows its full text on hover by itself.
+                            ui.add(egui::Label::new(c.as_str()).truncate());
+                        });
+                    }
+                    if let Some(label) = button {
+                        row.col(|ui| {
+                            if ui.small_button(label).clicked() {
+                                pressed = Some(i);
+                            }
+                        });
+                    }
+                });
             });
         });
     });
     pressed
+}
+
+/// Starting column widths that fit `avail`: columns narrower than an even share keep their
+/// natural width, and the wider ones split what's left evenly.
+fn fit_widths(natural: &[f32], avail: f32) -> Vec<f32> {
+    let mut w = natural.to_vec();
+    let mut open: Vec<usize> = (0..w.len()).collect();
+    let mut left = avail;
+    while !open.is_empty() {
+        let share = left / open.len() as f32;
+        let (fits, wide): (Vec<usize>, Vec<usize>) = open.into_iter().partition(|&i| natural[i] <= share);
+        if fits.is_empty() {
+            for &i in &wide {
+                w[i] = share;
+            }
+            break;
+        }
+        left -= fits.iter().map(|&i| natural[i]).sum::<f32>();
+        open = wide;
+    }
+    w
 }
 
 pub fn empty(ui: &mut Ui, ic: &str, title: &str, body: &str) {
@@ -550,6 +602,14 @@ pub fn nav_item(ui: &mut Ui, ic: &str, text: &str, selected: bool, badge: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn columns_start_as_wide_as_their_content_and_wide_ones_share_the_rest() {
+        assert_eq!(fit_widths(&[100.0, 100.0], 600.0), [100.0, 100.0], "room for all");
+        assert_eq!(fit_widths(&[100.0, 300.0, 400.0], 600.0), [100.0, 250.0, 250.0]);
+        assert_eq!(fit_widths(&[500.0, 500.0], 600.0), [300.0, 300.0]);
+        assert_eq!(fit_widths(&[120.0, 260.0, 700.0], 950.0), [120.0, 260.0, 570.0]);
+    }
 
     /// Runs one frame with a single button and the focus ring pass, and says whether the ring
     /// (a 2 px stroke in the text colour) was painted.
