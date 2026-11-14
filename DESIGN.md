@@ -119,6 +119,22 @@ Contrast (checked 2026-11-12 with `design-playbook/scripts/contrast.mjs`; accent
   - the switch is 40×20 px
   - the checkbox is 18 px
 
+### Window sizes
+
+Like Windows Settings, what shows depends on how wide the window is.
+
+| Width | What changes |
+|---|---|
+| Window 1008 px and up | The sidebar is docked, 208 px wide. WinUI's NavigationView stays open from 1008 px |
+| Window under 1008 px | The sidebar folds away. The menu button (≡) before the page title opens it over the page with a shadow and no dimming, as WinUI's pane does. The pane's own ≡ sits exactly on the one that opened it, so the same spot opens and closes it. While it's open the page takes no clicks or focus, so Tab stays in the pane. Esc, a click outside it or picking a place closes it, and closing it from inside puts focus back on the menu button |
+| Window under 640 px | The page margin drops from 32 to 24 |
+| Page content under 560 px | Header buttons show as icons with tooltips, and "Checked …" moves under the title. "Home › Save a report" folds to "… › Save a report", as WinUI's BreadcrumbBar folds. On Home the Keystone stays beside the verdict and the rest of the summary moves under both, and each to-do's button moves under its text |
+| Card under 476 px | Rows stack, as a narrow WinUI SettingsCard does: a control goes under its words, a value under its name and a clean-up size under its item. A table becomes a list: the first cell as each item's name, the others as "Heading: value" under it |
+
+- Page content is at most 1040 px wide. The smallest window is 360 × 320.
+- Tab bars scroll sideways when they don't fit, with the mouse wheel too, and keep the current or focused tab in view.
+- Tables never run past their card. Columns share the width again on every frame, and a long cell ends in "…" and shows in full on hover.
+
 ## Components
 
 | Component | States | When to use |
@@ -130,7 +146,7 @@ Contrast (checked 2026-11-12 with `design-playbook/scripts/contrast.mjs`; accent
 | Pill (`pill`, `level_pill`) | static | Priority ("Do first", "Worth doing") and short states |
 | Note (`widgets::note`) | info, warning | A tinted strip with an icon and words; never colour alone |
 | Card (`widgets::card`) | static | One group of related content. Cards are never nested |
-| Setting row (`pages::setting`) | static, holding a switch or a button | One option on the Settings page: its name over a wrapped explanation, the control on the right, as in Windows Settings |
+| Setting row (`pages::setting`) | static, holding a switch or a button | One option on the Settings page: its name over a wrapped explanation, the control on the right, as in Windows Settings. In a narrow card the control goes under the words |
 | Table (`table`, `table_action`) | rows, optional row button | Lists of like items with real columns |
 | Confirm dialog (`Pending` + `ask`) | open, busy | Before anything that changes the PC or goes online. At most two choices |
 | Toast | success, failure | The result of a background job |
@@ -170,6 +186,7 @@ None beyond egui's defaults: hover fills, the spinner and scrolling. A check-up 
   - The accent can follow the Windows accent colour instead (see Following Windows).
 - **Mica behind the sidebar only (2026-11-14).** Mica behind the cards would make dark-mode cards (`#1F2227`) sit darker than the backdrop (about `#202020`) and put page text on a surface that changes with the wallpaper. Keeping it to the title bar and sidebar gives the Windows 11 feel with no contrast risk.
 - **Sidebar hover is a faint wash of the text colour (2026-11-14).** The old hover fill (`surface2`) was the same colour as the light sidebar, so hover didn't show. Ink at 7% shows on the solid sidebar and on Mica alike.
+- **Table columns can't be dragged wider (2026-11-14).** egui_extras keeps a dragged column at its width when the window narrows, which pushed tables past their cards. The full text of any cell shows on hover instead.
 
 ## Verifying
 

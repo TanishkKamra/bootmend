@@ -29,6 +29,28 @@ use std::time::Instant;
 use theme::{pal, S1, S2, S3, S4, S5, S6};
 use widgets::{ico, icon};
 
+/// The frame adapts to the window the way Windows Settings does. From `DOCK_MIN` up the sidebar
+/// stays open beside the page (WinUI's NavigationView switches at 1008); narrower, it folds
+/// away behind a menu button and opens over the page.
+const DOCK_MIN: f32 = 1008.0;
+/// Below this window width the page margins tighten, so a narrow window keeps room for content.
+const NARROW: f32 = 640.0;
+/// Below this much content width, rows put their buttons under the text and the page's actions
+/// show as icons, the way Settings moves the Windows Update tile under the PC's name.
+pub(super) const COMPACT: f32 = 560.0;
+const SIDEBAR_W: f32 = 208.0;
+
+/// How the frame sits in a window of a given width.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Fit {
+    docked: bool,
+    margin: f32,
+}
+
+fn fit_for(width: f32) -> Fit {
+    Fit { docked: width >= DOCK_MIN, margin: if width < NARROW { S5 } else { S6 } }
+}
+
 /// The places in the sidebar. Settings sits at its foot, the way Windows apps place it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Place {
@@ -259,11 +281,28 @@ pub struct UiState {
     pub last_tab: HashMap<Place, Page>,
     /// What sorts the What's running table: 0 processor, 1 memory, 2 drive.
     pub live_sort: usize,
+    /// Whether the window is wide enough to keep the sidebar open, this frame.
+    pub docked: bool,
+    /// The folded sidebar, opened over the page, and whether to focus it on its first frame.
+    pub nav_open: bool,
+    pub nav_focus: bool,
+    /// The pane was closed from inside it, so focus goes back to the menu button that opened it.
+    pub nav_refocus: bool,
+    /// Where the menu button sits this frame, so the pane's close button can sit on top of it.
+    pub nav_button: Option<egui::Rect>,
+}
+
+/// One screenshot: the first-run screen, a view, or Home with the folded sidebar open.
+#[derive(Clone, Copy)]
+enum Shot {
+    Welcome,
+    View(Page),
+    Menu,
 }
 
 struct SnapMode {
     dir: PathBuf,
-    queue: Vec<Option<Page>>,
+    queue: Vec<Shot>,
     frames: u32,
     asked: bool,
     /// Long pages are captured in screen-sized parts: which part this is, and whether more follows.
@@ -354,8 +393,9 @@ impl App {
             app.set_snapshot(s);
         }
         if let Some(dir) = snap_dir {
-            let mut queue: Vec<Option<Page>> = vec![None];
-            queue.extend(Page::ALL.iter().map(|p| Some(*p)));
+            let mut queue = vec![Shot::Welcome];
+            queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
+            queue.push(Shot::Menu);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         }
         app
@@ -847,8 +887,22 @@ impl App {
         }
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(S4);
+    /// The places. `overlay` is the folded sidebar opened over the page: it starts with the
+    /// menu button that closes it again, and closes when a place is picked.
+    fn sidebar(&mut self, ui: &mut egui::Ui, overlay: bool) {
+        if overlay {
+            // The close button sits exactly where the menu button that opened the pane is, as in
+            // WinUI, so the same spot opens and closes it.
+            let at = self.ui.nav_button.unwrap_or_else(|| egui::Rect::from_min_size(ui.cursor().min + egui::vec2(0.0, S2), egui::vec2(32.0, 32.0)));
+            let r = ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| widgets::subtle_icon(ui, icon::MENU, 16.0, "Close navigation")).inner;
+            if r.clicked() {
+                self.ui.nav_open = false;
+                self.ui.nav_refocus = true;
+            }
+            ui.add_space(S2);
+        } else {
+            ui.add_space(S4);
+        }
         ui.horizontal(|ui| {
             ui.add_space(S3);
             keystone::mark(ui, 24.0);
@@ -859,19 +913,72 @@ impl App {
         let do_first = self.findings.iter().filter(|f| f.level == rules::Level::DoFirst).count();
         let here = self.page.place();
         ui.spacing_mut().item_spacing.y = S1;
+        // Opened from the menu button, keyboard focus moves to the place on screen.
+        let focus = std::mem::take(&mut self.ui.nav_focus);
+        let pick = |this: &mut Self, r: egui::Response, pl: Place| {
+            if focus && here == pl {
+                r.request_focus();
+            }
+            if r.clicked() {
+                this.go_place(pl);
+                this.ui.nav_open = false;
+            }
+        };
         for pl in Place::MAIN {
             let badge = (pl == Place::Home).then_some(do_first);
-            if widgets::nav_item(ui, pl.icon(), pl.title(), here == pl, badge).clicked() {
-                self.go_place(pl);
-            }
+            let r = widgets::nav_item(ui, pl.icon(), pl.title(), here == pl, badge);
+            pick(self, r, pl);
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.add_space(S3);
             let pl = Place::Settings;
-            if widgets::nav_item(ui, pl.icon(), pl.title(), here == pl, None).clicked() {
-                self.go_place(pl);
-            }
+            let r = widgets::nav_item(ui, pl.icon(), pl.title(), here == pl, None);
+            pick(self, r, pl);
         });
+    }
+
+    /// The folded sidebar, sliding in over the page from the left. While it's open the page
+    /// under it takes no clicks or focus, so Tab stays inside it. A click outside it, Escape or
+    /// picking a place closes it.
+    fn nav_overlay(&mut self, ctx: &egui::Context) {
+        let open = self.ui.nav_open;
+        let t = if self.snap_mode.is_some() || !theme::motion(ctx) {
+            f32::from(u8::from(open))
+        } else {
+            ctx.animate_bool_with_time(egui::Id::new("nav-slide"), open, 0.2)
+        };
+        if t <= 0.0 {
+            return;
+        }
+        let p = pal(ctx);
+        let screen = ctx.content_rect();
+        // Eases out: quick to arrive, gentle to stop.
+        let ease = 1.0 - (1.0 - t).powi(3);
+        let rect = egui::Rect::from_min_size(egui::pos2(screen.left() - SIDEBAR_W * (1.0 - ease), screen.top()), egui::vec2(SIDEBAR_W, screen.height()));
+        let id = egui::Id::new("nav-pane");
+        // The pane slides in; egui's own fade on a new Area would leave it see-through.
+        egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(rect.min).constrain(false).movable(false).fade_in(false).show(ctx, |ui| {
+            let shadow = egui::Shadow { offset: [4, 0], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(if p.bg.r() < 128 { 96 } else { 40 }) };
+            ui.painter().add(shadow.as_shape(rect, egui::CornerRadius::ZERO));
+            ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, p.sidebar);
+            ui.painter().vline(rect.right(), rect.y_range(), egui::Stroke::new(1.0_f32, p.line));
+            let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(S2, 0.0))));
+            self.sidebar(&mut pane, true);
+            // The Area covers the whole pane, so a click on its empty parts stays in it.
+            ui.allocate_rect(rect, egui::Sense::hover());
+        });
+        if open {
+            ctx.memory_mut(|m| m.set_modal_layer(egui::LayerId::new(egui::Order::Foreground, id)));
+        }
+        // Only once it's fully open: the click that opened it lands outside it while it slides in.
+        let outside = t >= 1.0 && ctx.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|q| !rect.contains(q)));
+        if outside {
+            self.ui.nav_open = false;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.ui.nav_open = false;
+            self.ui.nav_refocus = true;
+        }
     }
 
     /// The page title, the place's quiet actions, its tabs and a line on what this view shows.
@@ -880,30 +987,49 @@ impl App {
         let place = self.page.place();
         // A view inside Home shows the way back the way Windows Settings does: "Home > Save a report".
         let crumb = self.page == Page::Report;
+        let fold = !self.ui.docked;
+        let compact = ui.available_width() < COMPACT;
         let draw_title = |this: &mut Self, ui: &mut egui::Ui| {
+            if fold {
+                let r = widgets::subtle_icon(ui, icon::MENU, 16.0, "Open navigation");
+                this.ui.nav_button = Some(r.rect);
+                // Once the pane has gone and stopped holding focus, it comes back here.
+                if this.ui.nav_refocus && !this.ui.nav_open && ui.ctx().memory(|m| m.top_modal_layer()).is_none() {
+                    this.ui.nav_refocus = false;
+                    r.request_focus();
+                }
+                if r.clicked() {
+                    this.ui.nav_open = true;
+                    this.ui.nav_focus = true;
+                }
+                ui.add_space(S1);
+            }
             if crumb {
-                let home = egui::Button::new(RichText::new(Place::Home.title()).text_style(egui::TextStyle::Heading).color(p.muted)).frame(false);
-                if ui.add(home).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                // Short of room the way back folds to an ellipsis, as WinUI's BreadcrumbBar does.
+                let words = if compact { "…" } else { Place::Home.title() };
+                let home = egui::Button::new(RichText::new(words).text_style(egui::TextStyle::Heading).color(p.muted)).frame(false);
+                let r = ui.add(home).on_hover_cursor(egui::CursorIcon::PointingHand);
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, Place::Home.title()));
+                let r = if compact { r.on_hover_text(Place::Home.title()) } else { r };
+                if r.clicked() {
                     this.go(Page::Home);
                 }
                 ui.label(widgets::ico(icon::CHEVRON_RIGHT, 16.0).color(p.muted));
             }
-            widgets::page_title(ui, title);
-        };
-        let has_title = crumb || !title.is_empty();
-        // Below about 700 px of content, the actions move under the title instead of crowding it.
-        if ui.available_width() >= 700.0 {
-            ui.horizontal(|ui| {
-                if has_title {
-                    draw_title(self, ui);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.header_actions(ui, place, true));
-            });
-        } else {
-            if has_title {
-                ui.horizontal(|ui| draw_title(self, ui));
+            if !title.is_empty() {
+                widgets::page_title(ui, title);
             }
-            ui.horizontal_wrapped(|ui| self.header_actions(ui, place, false));
+        };
+        // One row, as in Settings: the menu button and title on the left, the place's actions on
+        // the right. When room runs short the actions keep their icons and drop their words.
+        ui.horizontal(|ui| {
+            draw_title(self, ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.header_actions(ui, place, compact));
+        });
+        if compact {
+            if let Some(w) = self.checked_words(place) {
+                widgets::small(ui, w);
+            }
         }
         let tabs = place.tabs();
         if let Some(cur) = tabs.iter().position(|t| *t == self.page) {
@@ -937,37 +1063,33 @@ impl App {
         }
     }
 
-    /// Home and My PC can run the check again, and Home can save a report. My PC says when the
-    /// check ran here; Home says it beside the verdict. `rtl` is true when the actions sit at the
-    /// right edge, so they're added right to left.
-    fn header_actions(&mut self, ui: &mut egui::Ui, place: Place, rtl: bool) {
+    /// When the check ran, said on My PC. Home says it beside the verdict.
+    fn checked_words(&self, place: Place) -> Option<String> {
+        let s = self.snap.as_ref().filter(|_| place == Place::MyPc)?;
+        Some(format!("Checked {}", crate::util::when_words(&s.taken, chrono::Local::now().date_naive())))
+    }
+
+    /// Home and My PC can run the check again, and Home can save a report. They sit at the right
+    /// edge, so they're added right to left. `compact` shows them as icons alone, and leaves
+    /// "Checked ..." to a line under the title.
+    fn header_actions(&mut self, ui: &mut egui::Ui, place: Place, compact: bool) {
         if !matches!(place, Place::Home | Place::MyPc) || self.page == Page::Report {
             return;
         }
-        let when = self
-            .snap
-            .as_ref()
-            .filter(|_| place == Place::MyPc)
-            .map(|s| format!("Checked {}", crate::util::when_words(&s.taken, chrono::Local::now().date_naive())));
-        let checked = |ui: &mut egui::Ui| {
-            if let Some(w) = &when {
-                widgets::small(ui, w.clone());
+        let button = |ui: &mut egui::Ui, ic: &str, text: &str| {
+            if compact {
+                widgets::subtle_icon(ui, ic, 16.0, text)
+            } else {
+                widgets::subtle_button(ui, ic, text)
             }
         };
-        let again = |ui: &mut egui::Ui| {
-            widgets::subtle_button(ui, icon::REFRESH, "Check again").on_hover_text("Run every check again. Takes about a minute.").clicked()
-        };
-        let report = |ui: &mut egui::Ui| place == Place::Home && widgets::subtle_button(ui, icon::REPORT, "Save a report").clicked();
-        let (run, save) = if rtl {
-            let run = again(ui);
-            let save = report(ui);
-            checked(ui);
-            (run, save)
-        } else {
-            checked(ui);
-            let save = report(ui);
-            (again(ui), save)
-        };
+        let run = button(ui, icon::REFRESH, "Check again").on_hover_text("Run every check again. Takes about a minute.").clicked();
+        let save = place == Place::Home && button(ui, icon::REPORT, "Save a report").clicked();
+        if !compact {
+            if let Some(w) = self.checked_words(place) {
+                widgets::small(ui, w);
+            }
+        }
         if run {
             self.start_check();
         }
@@ -981,7 +1103,7 @@ impl App {
         let (title, body, yes) = (c.title.clone(), c.body.clone(), c.yes.clone());
         let mut decision: Option<bool> = None;
         let m = egui::Modal::new(egui::Id::new("confirm")).show(ctx, |ui| {
-            ui.set_width(440.0);
+            ui.set_width((ctx.content_rect().width() - 2.0 * (S5 + S4)).min(440.0));
             let t = ui.label(RichText::new(&title).text_style(theme::h2()));
             widgets::heading_role(ui, &t, 2, &title);
             ui.add_space(S2);
@@ -1028,7 +1150,7 @@ impl App {
                     .corner_radius(egui::CornerRadius::same(theme::RADIUS))
                     .inner_margin(egui::Margin::symmetric(S4 as i8, S3 as i8))
                     .show(ui, |ui| {
-                        ui.set_max_width(420.0);
+                        ui.set_max_width((ctx.content_rect().width() - 2.0 * (S5 + S4)).min(420.0));
                         ui.horizontal(|ui| {
                             ui.label(ico(ic, 16.0).color(fg));
                             ui.add(egui::Label::new(RichText::new(t).color(fg)).wrap());
@@ -1049,9 +1171,10 @@ impl App {
         let live_pending = self.page == Page::Live && self.live_data().is_none();
         let Some(m) = &mut self.snap_mode else { return };
         if let Some(img) = shot {
-            let name = match m.queue.first().copied().flatten() {
-                None => "welcome".to_string(),
-                Some(p) => p.slug(),
+            let name = match m.queue.first() {
+                Some(Shot::View(p)) => p.slug(),
+                Some(Shot::Menu) => "menu".to_string(),
+                _ => "welcome".to_string(),
             };
             let file = m.dir.join(if m.part == 0 { format!("{name}.png") } else { format!("{name}-{}.png", m.part + 1) });
             if let Err(e) = save_png(&img, &file) {
@@ -1069,9 +1192,19 @@ impl App {
         }
         match m.queue.first().copied() {
             None => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Some(Shot::Menu) if self.ui.docked => {
+                m.queue.remove(0);
+                ctx.request_repaint();
+            }
             Some(target) => {
-                self.force_welcome = target.is_none();
-                if let Some(p) = target {
+                self.force_welcome = matches!(target, Shot::Welcome);
+                self.ui.nav_open = matches!(target, Shot::Menu);
+                let page = match target {
+                    Shot::View(p) => Some(p),
+                    Shot::Menu => Some(Page::Home),
+                    Shot::Welcome => None,
+                };
+                if let Some(p) = page {
                     if self.page != p {
                         self.page = p;
                         self.ui.scroll_top = true;
@@ -1125,9 +1258,16 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let p = pal(&ctx);
+        let fit = fit_for(ui.available_width());
+        self.ui.docked = fit.docked;
+        if fit.docked {
+            self.ui.nav_open = false;
+            self.ui.nav_refocus = false;
+        }
 
-        if self.checking.is_some() || self.snap.is_none() || self.force_welcome || self.check_error.is_some() && self.snap.is_none() {
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(S6 as i8))).show(ui, |ui| {
+        let full_screen = self.checking.is_some() || self.snap.is_none() || self.force_welcome;
+        if full_screen {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(fit.margin as i8))).show(ui, |ui| {
                 if self.checking.is_some() {
                     self.checking_screen(ui);
                 } else {
@@ -1135,13 +1275,17 @@ impl eframe::App for App {
                 }
             });
         } else {
-            egui::Panel::left("nav")
-                .resizable(false)
-                .exact_size(208.0)
-                .frame(
-                    egui::Frame::new().fill(if self.mica { egui::Color32::TRANSPARENT } else { p.sidebar }).inner_margin(egui::Margin::symmetric(S2 as i8, 0)),
-                )
-                .show(ui, |ui| self.sidebar(ui));
+            if fit.docked {
+                egui::Panel::left("nav")
+                    .resizable(false)
+                    .exact_size(SIDEBAR_W)
+                    .frame(
+                        egui::Frame::new()
+                            .fill(if self.mica { egui::Color32::TRANSPARENT } else { p.sidebar })
+                            .inner_margin(egui::Margin::symmetric(S2 as i8, 0)),
+                    )
+                    .show(ui, |ui| self.sidebar(ui, false));
+            }
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
                 let mut sa = egui::ScrollArea::vertical().auto_shrink(false);
                 if std::mem::take(&mut self.ui.scroll_top) {
@@ -1153,8 +1297,9 @@ impl eframe::App for App {
                 }
                 let out = sa.show(ui, |ui| {
                     // Fix the content width so wide rows never push past the window edge.
-                    let w = (ui.available_width() - 2.0 * S6).clamp(320.0, 1040.0);
-                    egui::Frame::new().inner_margin(egui::Margin { left: S6 as i8, right: S6 as i8, top: S5 as i8, bottom: S6 as i8 }).show(ui, |ui| {
+                    let m = fit.margin;
+                    let w = (ui.available_width() - 2.0 * m).clamp(0.0, 1040.0);
+                    egui::Frame::new().inner_margin(egui::Margin { left: m as i8, right: m as i8, top: S5 as i8, bottom: S6 as i8 }).show(ui, |ui| {
                         ui.set_width(w);
                         self.page_ui(ui);
                     });
@@ -1163,6 +1308,10 @@ impl eframe::App for App {
                     m.more = out.content_size.y > (m.part + 1) as f32 * (view - 48.0) + 48.0;
                 }
             });
+        }
+        // The folded sidebar belongs to the pages; the welcome and checking screens have none.
+        if !fit.docked && !full_screen {
+            self.nav_overlay(&ctx);
         }
         self.confirm_dialog(&ctx);
         self.toasts_ui(&ctx);
@@ -1187,6 +1336,21 @@ mod tests {
             let reachable = place.first() == page || place.tabs().contains(&page) || page == Page::Report;
             assert!(reachable, "{page:?} can't be reached from the sidebar or a tab");
         }
+    }
+
+    #[test]
+    fn the_frame_adapts_to_the_window_like_windows_settings() {
+        use super::{fit_for, S5, S6};
+        let wide = fit_for(1440.0);
+        assert!(wide.docked, "a wide window shows the sidebar");
+        assert_eq!(wide.margin, S6);
+        assert!(fit_for(1008.0).docked, "WinUI keeps the pane open from 1008 up");
+        let half = fit_for(1007.0);
+        assert!(!half.docked, "narrower than that, the sidebar folds behind a menu button");
+        assert_eq!(half.margin, S6);
+        let phone = fit_for(360.0);
+        assert!(!phone.docked);
+        assert_eq!(phone.margin, S5, "a narrow window gives its margins to the content");
     }
 
     #[test]

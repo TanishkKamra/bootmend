@@ -1,7 +1,7 @@
 //! The "Free up space" page: measure first, then clear only what the person ticked.
 
 use super::theme::{self, pal, S1, S2, S3, S4};
-use super::widgets::{self, card, icon, muted, section, small};
+use super::widgets::{self, card, icon, muted, section, small, WRAP};
 use super::{App, Job, Pending};
 use crate::cleanup::{self, size_text, Cleaned, Group, Item, Places};
 use crate::rules::plural;
@@ -211,27 +211,44 @@ impl App {
         card(ui, |ui| {
             let sel = v.selected();
             let (bytes, unknown) = total(&sel);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(size_text(bytes)).text_style(theme::big()));
-                    let more = if unknown { ", plus what Windows' own clean-up finds" } else { "" };
-                    small(ui, format!("{} ticked{more}", plural(sel.len(), "item", "items")));
-                    if let Some(f) = v.found.free {
-                        small(ui, format!("Free on drive C now: {}", size_text(f)));
-                    }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if cleaning {
-                        let i = v.progress.load(Ordering::Relaxed);
-                        let title = v.cleaning.get(i).and_then(|id| v.found.items.iter().find(|x| x.id == *id)).map(|x| x.title).unwrap_or("");
-                        ui.label(format!("Clearing {title} ({} of {})", i + 1, v.cleaning.len()));
+            // In a narrow card the buttons go under the numbers instead of beside them.
+            let narrow = ui.available_width() < WRAP;
+            let numbers = |ui: &mut Ui| {
+                ui.label(RichText::new(size_text(bytes)).text_style(theme::big()));
+                let more = if unknown { ", plus what Windows' own clean-up finds" } else { "" };
+                small(ui, format!("{} ticked{more}", plural(sel.len(), "item", "items")));
+                if let Some(f) = v.found.free {
+                    small(ui, format!("Free on drive C now: {}", size_text(f)));
+                }
+            };
+            let actions = |ui: &mut Ui| {
+                if cleaning {
+                    let i = v.progress.load(Ordering::Relaxed);
+                    let title = v.cleaning.get(i).and_then(|id| v.found.items.iter().find(|x| x.id == *id)).map(|x| x.title).unwrap_or("");
+                    let words = format!("Clearing {title} ({} of {})", i + 1, v.cleaning.len());
+                    // Spinner first in reading order, whichever way the row fills.
+                    if narrow {
                         ui.add(egui::Spinner::new());
+                        ui.add(egui::Label::new(words).wrap());
                     } else {
-                        clean_now = widgets::primary_enabled(ui, "Free up space", !sel.is_empty()).clicked();
-                        look_again = widgets::icon_button(ui, icon::REFRESH, "Look again", true).clicked();
+                        ui.label(words);
+                        ui.add(egui::Spinner::new());
                     }
+                } else {
+                    clean_now = widgets::primary_enabled(ui, "Free up space", !sel.is_empty()).clicked();
+                    look_again = widgets::icon_button(ui, icon::REFRESH, "Look again", true).clicked();
+                }
+            };
+            if narrow {
+                ui.vertical(numbers);
+                ui.add_space(S3);
+                ui.horizontal(actions);
+            } else {
+                ui.horizontal(|ui| {
+                    ui.vertical(numbers);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
                 });
-            });
+            }
         });
 
         let elevated = self.elevated;
@@ -337,6 +354,16 @@ fn row(ui: &mut Ui, item: &Item, on: &mut bool, enabled: bool, done: Option<&Res
     let mut changed = false;
     // A square, larger box: the theme's rounded corners otherwise make it look like a radio button.
     const BOX: f32 = 18.0;
+    // In a narrow card the size moves under the name, so the two never overlap.
+    let narrow = ui.available_width() < WRAP;
+    let (text, color) = match (done, item.bytes) {
+        (Some(Ok(c)), _) => (format!("Cleared {}", size_text(c.bytes)), p.green),
+        (Some(Err(_)), _) => ("Not cleared".to_string(), p.red),
+        (None, Some(b)) => (size_text(b), p.ink),
+        (None, None) if needs_admin => ("Size unknown".to_string(), p.muted),
+        (None, None) => ("Measured while clearing".to_string(), p.muted),
+    };
+    let size = RichText::new(text).color(color).family(theme::semibold());
     ui.horizontal(|ui| {
         ui.spacing_mut().icon_width = BOX;
         ui.spacing_mut().icon_width_inner = 10.0;
@@ -345,21 +372,17 @@ fn row(ui: &mut Ui, item: &Item, on: &mut bool, enabled: bool, done: Option<&Res
             w.corner_radius = egui::CornerRadius::same(theme::CONTROL_RADIUS);
         }
         changed = ui.add_enabled(enabled, egui::Checkbox::new(on, RichText::new(item.title).family(theme::semibold()))).changed();
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (text, color) = match (done, item.bytes) {
-                (Some(Ok(c)), _) => (format!("Cleared {}", size_text(c.bytes)), p.green),
-                (Some(Err(_)), _) => ("Not cleared".to_string(), p.red),
-                (None, Some(b)) => (size_text(b), p.ink),
-                (None, None) if needs_admin => ("Size unknown".to_string(), p.muted),
-                (None, None) => ("Measured while clearing".to_string(), p.muted),
-            };
-            ui.label(RichText::new(text).color(color).family(theme::semibold()));
-        });
+        if !narrow {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(size.clone()));
+        }
     });
     let indent = BOX + ui.spacing().icon_spacing;
     ui.horizontal(|ui| {
         ui.add_space(indent);
         ui.vertical(|ui| {
+            if narrow {
+                ui.label(size);
+            }
             ui.add(egui::Label::new(RichText::new(item.why).color(p.muted)).wrap());
             if let Some(t) = item.tradeoff {
                 ui.add(egui::Label::new(RichText::new(format!("The catch: {t}")).color(p.amber)).wrap());

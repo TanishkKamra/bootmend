@@ -125,10 +125,18 @@ impl App {
                 }
             }
             ui.add_space(S3);
-            ui.horizontal(|ui| {
-                start = widgets::icon_button(ui, icon::NETWORK, if self.net.is_some() { "Test again" } else { "Test my connection" }, true).clicked();
-                small(ui, "Uses Cloudflare's public speed test. Asks before going online.");
-            });
+            // The note sits beside the button, or under it in a narrow card.
+            let muted = pal(ui.ctx()).muted;
+            let again = self.net.is_some();
+            let row = |ui: &mut Ui| {
+                start = widgets::icon_button(ui, icon::NETWORK, if again { "Test again" } else { "Test my connection" }, true).clicked();
+                ui.add(egui::Label::new(RichText::new("Uses Cloudflare's public speed test. Asks before going online.").small().color(muted)).wrap());
+            };
+            if ui.available_width() < widgets::WRAP {
+                ui.vertical(row);
+            } else {
+                ui.horizontal(row);
+            }
         });
         if start {
             self.ask(Pending::NetCheck);

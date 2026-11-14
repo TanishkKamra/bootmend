@@ -99,7 +99,7 @@ impl App {
                 ),
             );
             ui.add_space(S2);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for e in [Every::Off, Every::Daily, Every::Weekly, Every::Monthly] {
                     let r = ui.add_enabled(!busy, egui::Button::new(e.label()).selected(self.settings.schedule == e));
                     if r.clicked() && self.settings.schedule != e {

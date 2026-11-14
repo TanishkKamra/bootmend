@@ -24,7 +24,7 @@ impl App {
         let p = pal(ui.ctx());
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                ui.set_max_width(600.0);
+                ui.set_max_width(ui.available_width().min(600.0));
                 ui.add_space(S5);
                 ui.label(ico(icon::PC, 36.0).color(p.accent));
                 ui.add_space(S3);
@@ -34,7 +34,7 @@ impl App {
                 ui.add_space(S5);
             });
             ui.vertical_centered(|ui| {
-                ui.set_max_width(600.0);
+                ui.set_max_width(ui.available_width().min(600.0));
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     widgets::card(ui, |ui| {
                         for (ic, title, body) in [
@@ -61,13 +61,21 @@ impl App {
                         });
                         ui.add_space(S4);
                     }
-                    ui.horizontal(|ui| {
-                        let label = if self.check_error.is_some() { "Try again" } else { "Start the check" };
-                        if widgets::primary(ui, label).clicked() {
-                            self.start_check();
-                        }
-                        widgets::muted(ui, "Takes about a minute. You can keep using your PC.");
-                    });
+                    // The note sits beside the button, or under it where there isn't room.
+                    let label = if self.check_error.is_some() { "Try again" } else { "Start the check" };
+                    let mut start = false;
+                    let row = |ui: &mut egui::Ui| {
+                        start = widgets::primary(ui, label).clicked();
+                        ui.add(egui::Label::new(RichText::new("Takes about a minute. You can keep using your PC.").color(p.muted)).wrap());
+                    };
+                    if ui.available_width() < widgets::WRAP {
+                        ui.vertical(row);
+                    } else {
+                        ui.horizontal(row);
+                    }
+                    if start {
+                        self.start_check();
+                    }
                     ui.add_space(S4);
                     let t = if self.ui.show_reads { "Hide what Bootmend reads" } else { "What exactly does Bootmend read?" };
                     if ui.link(t).clicked() {
@@ -103,7 +111,7 @@ impl App {
         let secs = c.started.elapsed().as_secs();
         let done = c.done.clone();
         ui.vertical_centered(|ui| {
-            ui.set_max_width(520.0);
+            ui.set_max_width(ui.available_width().min(520.0));
             ui.add_space(S6);
             widgets::page_title(ui, "Checking your PC");
             ui.add_space(S2);
@@ -111,7 +119,7 @@ impl App {
             ui.add_space(S5);
         });
         ui.vertical_centered(|ui| {
-            ui.set_max_width(520.0);
+            ui.set_max_width(ui.available_width().min(520.0));
             widgets::card(ui, |ui| {
                 for st in STEPS.iter() {
                     ui.horizontal(|ui| {

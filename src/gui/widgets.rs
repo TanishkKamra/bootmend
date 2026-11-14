@@ -27,7 +27,13 @@ pub mod icon {
     pub const CHEVRON_RIGHT: &str = "\u{E76C}";
     pub const CHEVRON_DOWN: &str = "\u{E70D}";
     pub const CHEVRON_UP: &str = "\u{E70E}";
+    /// GlobalNavigationButton, the three lines that open a folded sidebar.
+    pub const MENU: &str = "\u{E700}";
 }
+
+/// Below this width a card's rows stack: a control goes under its words and a value under its
+/// name. It is WinUI's SettingsCard threshold, 476 px, less the card's padding.
+pub const WRAP: f32 = 476.0 - 2.0 * S4;
 
 pub fn ico(ch: &str, size: f32) -> RichText {
     RichText::new(ch).family(theme::icons()).size(size)
@@ -68,7 +74,7 @@ pub fn pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) -> Response {
         .fill(bg)
         .corner_radius(CornerRadius::same(u8::MAX))
         .inner_margin(Margin::symmetric(S2 as i8, 2))
-        .show(ui, |ui| ui.label(RichText::new(text).small().color(fg).family(theme::semibold())))
+        .show(ui, |ui| ui.add(egui::Label::new(RichText::new(text).small().color(fg).family(theme::semibold())).extend()))
         .response
 }
 
@@ -119,32 +125,50 @@ pub fn subtle_button(ui: &mut Ui, ic: &str, text: &str) -> Response {
 pub fn selector_bar(ui: &mut Ui, labels: &[&str], current: usize) -> Option<usize> {
     let p = pal(ui.ctx());
     let mut picked = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        for (i, label) in labels.iter().enumerate() {
-            let on = i == current;
-            // Measured in semibold so a tab never changes width when it's picked.
-            let wide = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::new(14.0, theme::semibold()), p.ink);
-            let (rect, r) = ui.allocate_exact_size(egui::vec2(wide.size().x + 2.0 * S3, 40.0), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, *label));
-            ui.ctx().accesskit_node_builder(r.id, |b| {
-                b.set_role(egui::accesskit::Role::Tab);
-                b.set_selected(on);
+    // Too many tabs for a narrow window scroll sideways, and the current one is brought into view
+    // whenever it changes.
+    let shown_id = egui::Id::new(("tabs-shown", labels));
+    let scroll_to = ui.data(|d| d.get_temp::<usize>(shown_id)) != Some(current);
+    ui.data_mut(|d| d.insert_temp(shown_id, current));
+    ui.scope(|ui| {
+        // A plain mouse wheel scrolls the tabs too, as it does a browser's tab strip.
+        ui.style_mut().always_scroll_the_only_direction = true;
+        egui::ScrollArea::horizontal().id_salt(shown_id).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (i, label) in labels.iter().enumerate() {
+                    let on = i == current;
+                    // Measured in semibold so a tab never changes width when it's picked.
+                    let wide = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::new(14.0, theme::semibold()), p.ink);
+                    let (rect, r) = ui.allocate_exact_size(egui::vec2(wide.size().x + 2.0 * S3, 40.0), Sense::click());
+                    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, *label));
+                    ui.ctx().accesskit_node_builder(r.id, |b| {
+                        b.set_role(egui::accesskit::Role::Tab);
+                        b.set_selected(on);
+                    });
+                    let painter = ui.painter();
+                    if r.hovered() && !on {
+                        painter.rect_filled(rect.shrink2(egui::vec2(0.0, S1)), CornerRadius::same(CONTROL_RADIUS), p.ink.gamma_multiply(0.05));
+                    }
+                    let font = egui::FontId::new(14.0, if on { theme::semibold() } else { egui::FontFamily::Proportional });
+                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, *label, font, if on || r.hovered() { p.ink } else { p.muted });
+                    if on {
+                        let bar = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.bottom() - 1.5), egui::vec2(16.0, 3.0));
+                        painter.rect_filled(bar, CornerRadius::same(u8::MAX), p.accent);
+                        if scroll_to {
+                            r.scroll_to_me(Some(egui::Align::Center));
+                        }
+                    }
+                    // A tab reached with Tab comes into view, so its focus ring shows.
+                    if r.gained_focus() {
+                        r.scroll_to_me(None);
+                    }
+                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        picked = Some(i);
+                    }
+                }
             });
-            let painter = ui.painter();
-            if r.hovered() && !on {
-                painter.rect_filled(rect.shrink2(egui::vec2(0.0, S1)), CornerRadius::same(CONTROL_RADIUS), p.ink.gamma_multiply(0.05));
-            }
-            let font = egui::FontId::new(14.0, if on { theme::semibold() } else { egui::FontFamily::Proportional });
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, *label, font, if on || r.hovered() { p.ink } else { p.muted });
-            if on {
-                let bar = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.bottom() - 1.5), egui::vec2(16.0, 3.0));
-                painter.rect_filled(bar, CornerRadius::same(u8::MAX), p.accent);
-            }
-            if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                picked = Some(i);
-            }
-        }
+        });
     });
     let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
     ui.painter().rect_filled(line, CornerRadius::ZERO, p.line);
@@ -274,6 +298,16 @@ pub fn kv(ui: &mut Ui, id: &str, rows: &[(&str, Option<String>)]) {
         return;
     }
     let p = pal(ui.ctx());
+    if ui.available_width() < WRAP {
+        for (i, (k, v)) in rows.into_iter().enumerate() {
+            if i > 0 {
+                ui.add_space(S2);
+            }
+            ui.label(RichText::new(k).color(p.muted));
+            ui.add(egui::Label::new(v).wrap());
+        }
+        return;
+    }
     egui::Grid::new(id).num_columns(2).spacing(egui::vec2(theme::S5, S2)).min_col_width(160.0).show(ui, |ui| {
         for (k, v) in rows {
             ui.label(RichText::new(k).color(p.muted));
@@ -296,18 +330,49 @@ pub fn table_action(ui: &mut Ui, id: &str, head: &[&str], rows: &[Vec<String>], 
     }
     let p = pal(ui.ctx());
     let mut pressed = None;
+    // In a narrow card each row becomes a list item, as Windows Settings lists apps: the first
+    // cell as its name and the others as "Heading: value" under it.
+    if ui.available_width() < WRAP {
+        for (i, r) in rows.iter().enumerate() {
+            if i > 0 {
+                ui.separator();
+            }
+            ui.horizontal_top(|ui| {
+                let text_w = ui.available_width() - if button.is_some() { 64.0 + ui.spacing().item_spacing.x } else { 0.0 };
+                ui.vertical(|ui| {
+                    ui.set_width(text_w);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let name = r.first().map(String::as_str).unwrap_or_default();
+                    ui.add(egui::Label::new(RichText::new(name).family(theme::semibold())).wrap());
+                    let rest: Vec<String> = head.iter().zip(r).skip(1).filter(|(_, v)| !v.is_empty()).map(|(h, v)| format!("{h}: {v}")).collect();
+                    if !rest.is_empty() {
+                        ui.add(egui::Label::new(RichText::new(rest.join(" · ")).small().color(p.muted)).wrap());
+                    }
+                });
+                if let Some(label) = button {
+                    if ui.small_button(label).clicked() {
+                        pressed = Some(i);
+                    }
+                }
+            });
+        }
+        return pressed;
+    }
     ui.push_id(id, |ui| {
         let n = head.len();
         // With a button column, the text columns share what's left so the table never runs past the card.
         let avail = ui.available_width() - ui.spacing().item_spacing.x * (n + 1) as f32 - if button.is_some() { 72.0 } else { 0.0 };
         let first = (avail * 0.32).min(240.0);
         let rest = ((avail - first) / (n.max(2) - 1) as f32).min(130.0);
+        // Widths follow the window every frame and never ask for more than a column's share, so
+        // a narrow window shortens cells instead of pushing the table past its card.
+        let least = rest.min(60.0);
         let mut tb = TableBuilder::new(ui).striped(true).vscroll(false).cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         for i in 0..n {
             tb = tb.column(if i + 1 == n && button.is_none() {
-                Column::remainder().at_least(80.0).clip(true)
+                Column::remainder().at_least(least).clip(true)
             } else {
-                Column::initial(if i == 0 { first } else { rest }).at_least(60.0).resizable(true).clip(true)
+                Column::initial(if i == 0 { first } else { rest }).at_least(least).clip(true)
             });
         }
         if button.is_some() {
@@ -418,6 +483,12 @@ pub fn segments(ui: &mut Ui, name: &str, done: usize, total: usize, width: f32) 
 
 /// A frameless chevron that opens and closes a row, as in a Windows settings expander.
 pub fn chevron(ui: &mut Ui, open: bool) -> Response {
+    subtle_icon(ui, if open { icon::CHEVRON_UP } else { icon::CHEVRON_DOWN }, 12.0, if open { "Show less" } else { "Show more" })
+}
+
+/// A frameless button that is only an icon, at least 32 px square. `name` is what a screen
+/// reader says and the tooltip shows.
+pub fn subtle_icon(ui: &mut Ui, ic: &str, glyph: f32, name: &str) -> Response {
     let p = pal(ui.ctx());
     let r = ui
         .scope(|ui| {
@@ -426,10 +497,9 @@ pub fn chevron(ui: &mut Ui, open: bool) -> Response {
                 v.weak_bg_fill = p.ink.gamma_multiply(wash);
                 v.bg_stroke = Stroke::NONE;
             }
-            ui.add(egui::Button::new(ico(if open { icon::CHEVRON_UP } else { icon::CHEVRON_DOWN }, 12.0).color(p.ink)).min_size(egui::vec2(32.0, 32.0)))
+            ui.add(egui::Button::new(ico(ic, glyph).color(p.ink)).min_size(egui::vec2(32.0, 32.0)))
         })
         .inner;
-    let name = if open { "Show less" } else { "Show more" };
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
     r.on_hover_text(name)
 }
@@ -505,5 +575,38 @@ mod tests {
             egui::Event::PointerButton { pos: egui::pos2(5.0, 5.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
         frame(&ctx, vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0)), click]);
         assert!(!frame(&ctx, vec![]), "a click hides the ring");
+    }
+
+    /// How wide `add` ends up drawing when a card gives it `width`.
+    fn used_width(width: f32, add: impl Fn(&mut Ui)) -> f32 {
+        let ctx = egui::Context::default();
+        theme::fonts(&ctx);
+        let mut used = 0.0;
+        // Two frames: a table settles its column widths on the first.
+        for _ in 0..2 {
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 2000.0))), ..Default::default() };
+            let out = ctx.run_ui(input, |ui| {
+                let mut card = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 2000.0))));
+                add(&mut card);
+                used = card.min_rect().width();
+            });
+            out.drop_without_applying_deltas();
+        }
+        used
+    }
+
+    #[test]
+    fn rows_never_run_past_a_narrow_card() {
+        let rows = [("Blocks adware and bundled extras", Some("Only reports".to_string())), ("Hardware address", Some("2C-F0-5D-73-F1-69".to_string()))];
+        let head = ["Extension", "Browser", "From the store", "Reads all sites", "Status"];
+        let cells = vec![vec!["Picture-in-Picture Extension (by Google)".to_string(), "Chrome (Your Chrome)".into(), "Yes".into(), "Yes".into(), "Off".into()]];
+        for width in [300.0, 700.0] {
+            let kv_w = used_width(width, |ui| kv(ui, "kv", &rows));
+            assert!(kv_w <= width, "label/value rows take {kv_w} px of {width}");
+            let table_w = used_width(width, |ui| {
+                table_action(ui, "t", &head, &cells, Some("Open"));
+            });
+            assert!(table_w <= width, "a table takes {table_w} px of {width}");
+        }
     }
 }

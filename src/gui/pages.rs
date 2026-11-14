@@ -36,10 +36,21 @@ fn two_lines(ui: &mut Ui, title: &str, detail: &str, hover: &str) {
 }
 
 /// A row like the ones in Windows Settings: a name over a wrapped explanation, and the
-/// control on the right, centred against both lines.
+/// control on the right, centred against both lines. In a narrow card the control goes under them.
 fn setting<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
     const CONTROL_W: f32 = 200.0;
     let muted = pal(ui.ctx()).muted;
+    if ui.available_width() < widgets::WRAP {
+        return ui
+            .vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = S1;
+                ui.label(RichText::new(title).family(theme::semibold()));
+                ui.add(egui::Label::new(RichText::new(detail).color(muted)).wrap());
+                ui.add_space(S2);
+                ui.horizontal(control).inner
+            })
+            .inner;
+    }
     let text_w = (ui.available_width() - CONTROL_W).max(160.0);
     let detail = egui::WidgetText::from(RichText::new(detail).color(muted)).into_galley(ui, Some(egui::TextWrapMode::Wrap), text_w, egui::TextStyle::Body);
     let h = (ui.text_style_height(&egui::TextStyle::Body) + S1 + detail.size().y).max(40.0);
@@ -633,8 +644,8 @@ impl App {
         let apps = snap.software.a("apps");
         section(ui, &format!("Installed apps ({})", apps.len()));
         card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.ui.search).hint_text("Search apps").desired_width(280.0));
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.ui.search).hint_text("Search apps").desired_width(ui.available_width().min(280.0)));
                 if ui.link("Open Installed apps in Settings").clicked() {
                     if let Err(e) = shell_open("ms-settings:appsfeatures") {
                         self.toast(format!("{e:#}"), false);
@@ -942,24 +953,17 @@ impl App {
             card(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(20.0).color(p.accent));
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(format!("{} running", self.ui.scan_label)).family(theme::semibold()));
-                        muted(
-                            ui,
-                            if mins == 0 {
-                                "Just started. You can keep using your PC.".to_string()
-                            } else {
-                                format!("{} so far. You can keep using your PC.", plural(mins as usize, "minute", "minutes"))
-                            },
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::secondary(ui, "Stop").clicked() {
-                            if let Some(c) = &self.ui.scan_cancel {
-                                c.store(true, std::sync::atomic::Ordering::Relaxed);
-                            }
+                    let title = format!("{} running", self.ui.scan_label);
+                    let detail = if mins == 0 {
+                        "Just started. You can keep using your PC.".to_string()
+                    } else {
+                        format!("{} so far. You can keep using your PC.", plural(mins as usize, "minute", "minutes"))
+                    };
+                    if setting(ui, &title, &detail, |ui| widgets::secondary(ui, "Stop").clicked()) {
+                        if let Some(c) = &self.ui.scan_cancel {
+                            c.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
-                    });
+                    }
                 });
             });
             ui.add_space(S4);
@@ -980,24 +984,15 @@ impl App {
         ];
         for (kind, title, body) in options {
             card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_max_width((ui.available_width() - 140.0).max(200.0));
-                        ui.label(RichText::new(title).family(theme::semibold()));
-                        ui.add(egui::Label::new(RichText::new(body).color(p.muted)).wrap());
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::secondary_enabled(ui, "Start", !running).clicked() {
-                            if kind == scan::Kind::Folder {
-                                if let Some(dir) = rfd::FileDialog::new().set_title("Choose a folder or drive to check").pick_folder() {
-                                    self.ask(Pending::Scan(kind, Some(dir)));
-                                }
-                            } else {
-                                self.ask(Pending::Scan(kind, None));
-                            }
+                if setting(ui, title, body, |ui| widgets::secondary_enabled(ui, "Start", !running).clicked()) {
+                    if kind == scan::Kind::Folder {
+                        if let Some(dir) = rfd::FileDialog::new().set_title("Choose a folder or drive to check").pick_folder() {
+                            self.ask(Pending::Scan(kind, Some(dir)));
                         }
-                    });
-                });
+                    } else {
+                        self.ask(Pending::Scan(kind, None));
+                    }
+                }
             });
             ui.add_space(S2);
         }
@@ -1046,27 +1041,23 @@ impl App {
         let hist = self.history.clone();
         for (i, h) in hist.iter().enumerate().rev() {
             card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(format!("{}: {}", h.fix.label(), fix_target(&h.fix))).family(theme::semibold()));
-                        small(ui, format!("{} · for \"{}\"", h.when, h.title));
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(u) = &h.undone {
-                            ui.label(RichText::new(format!("Undone {u}")).color(p.muted));
-                        } else if self.busy.contains(&format!("undo:{i}")) {
-                            ui.add(egui::Spinner::new());
-                        } else {
-                            let blocked = h.fix.needs_admin() && !self.elevated;
-                            let r = widgets::icon_button(ui, icon::UNDO, "Undo", !blocked);
-                            if blocked {
-                                r.clone().on_disabled_hover_text("Needs administrator rights, like the original change.");
-                            }
-                            if r.clicked() {
-                                self.ask(Pending::Undo(i, h.title.clone()));
-                            }
+                let title = format!("{}: {}", h.fix.label(), fix_target(&h.fix));
+                let detail = format!("{} · for \"{}\"", h.when, h.title);
+                setting(ui, &title, &detail, |ui| {
+                    if let Some(u) = &h.undone {
+                        ui.label(RichText::new(format!("Undone {u}")).color(p.muted));
+                    } else if self.busy.contains(&format!("undo:{i}")) {
+                        ui.add(egui::Spinner::new());
+                    } else {
+                        let blocked = h.fix.needs_admin() && !self.elevated;
+                        let r = widgets::icon_button(ui, icon::UNDO, "Undo", !blocked);
+                        if blocked {
+                            r.clone().on_disabled_hover_text("Needs administrator rights, like the original change.");
                         }
-                    });
+                        if r.clicked() {
+                            self.ask(Pending::Undo(i, h.title.clone()));
+                        }
+                    }
                 });
             });
             ui.add_space(S2);
@@ -1505,7 +1496,7 @@ fn storage(ui: &mut Ui, snap: &Snapshot) {
     for d in &snap.drives {
         let disk = snap.storage.a("disks").into_iter().find(|x| x.i("Number") == Some(d.disk)).cloned().unwrap_or(Value::Null);
         card(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(&d.model).text_style(theme::h2()));
                 let health = disk.s("Health").unwrap_or_else(|| "Unknown".into());
                 let (fg, bg) = if health == "Healthy" { (p.green, p.green_bg) } else { (p.red, p.red_bg) };

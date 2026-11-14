@@ -2,7 +2,7 @@
 
 use super::theme::{self, pal, RADIUS, S1, S2, S3, S4, S5, S6};
 use super::widgets::{self, icon, small};
-use super::{keystone, App, Page, Pending};
+use super::{keystone, App, Page, Pending, COMPACT};
 use crate::cleanup::size_text;
 use crate::fixes::Fix;
 use crate::rules::{plural, Action, Area, Finding, Level};
@@ -165,49 +165,72 @@ impl App {
     fn hero(&mut self, ui: &mut Ui, snap: &Snapshot, prog: Progress, safe: Option<&(Vec<&'static str>, u64)>) {
         let p = pal(ui.ctx());
         let (title, lede) = verdict(prog);
-        let wide = ui.available_width() >= 640.0;
+        let avail = ui.available_width();
+        let wide = avail >= 640.0;
+        // Short of room, the Keystone and verdict stay side by side and the rest moves under
+        // both, the way Settings moves the Windows Update tile under the PC's name.
+        let compact = avail < COMPACT;
         let size = if wide { 112.0 } else { 72.0 };
         let keys = self.keystone_keys(ui.ctx(), prog.raised());
         let cleaning = self.busy.contains("cleanup");
         let mut clear = false;
+        let rest = |ui: &mut Ui, clear: &mut bool| {
+            ui.add(egui::Label::new(RichText::new(&lede).text_style(theme::lede()).color(p.muted)).wrap());
+            if prog.total() > 0 {
+                ui.add_space(S1);
+                ui.horizontal(|ui| {
+                    let w = (ui.available_width() - 120.0).clamp(120.0, 420.0);
+                    widgets::segments(ui, "The plan", prog.done, prog.total(), w);
+                    ui.add_space(S2);
+                    small(ui, format!("{} of {} done", prog.done, prog.total()));
+                });
+            }
+            if let Some((_, left)) = safe {
+                ui.add_space(S2);
+                ui.horizontal_wrapped(|ui| {
+                    if cleaning {
+                        ui.add(egui::Spinner::new().color(p.accent));
+                        widgets::muted(ui, "Clearing leftover files");
+                    } else {
+                        *clear = widgets::primary(ui, "Fix the safe one for me").clicked();
+                        // Short of room, the note goes under the button rather than wrapping around it.
+                        if compact {
+                            ui.end_row();
+                        } else {
+                            ui.add_space(S3);
+                        }
+                        small(ui, format!("Clears {} of leftover files. Nothing else changes.", size_text(*left)));
+                    }
+                });
+            }
+        };
         let row = ui.horizontal_top(|ui| {
             let (slot, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
             ui.add_space(if wide { S6 } else { S5 });
             ui.vertical(|ui| {
-                ui.set_max_width(560.0);
+                ui.set_max_width(ui.available_width().min(560.0));
                 ui.spacing_mut().item_spacing.y = S2;
                 let when = crate::util::when_words(&snap.taken, chrono::Local::now().date_naive());
                 small(ui, format!("Checked {when}"));
-                let r = ui.add(egui::Label::new(RichText::new(&title).text_style(theme::big())).wrap());
+                // Title Large where there's room, Title where there isn't, as Settings' page titles.
+                let style = if compact { egui::TextStyle::Heading } else { theme::big() };
+                let r = ui.add(egui::Label::new(RichText::new(&title).text_style(style)).wrap());
                 widgets::heading_role(ui, &r, 1, &title);
-                ui.add(egui::Label::new(RichText::new(&lede).text_style(theme::lede()).color(p.muted)).wrap());
-                if prog.total() > 0 {
-                    ui.add_space(S1);
-                    ui.horizontal(|ui| {
-                        let w = (ui.available_width() - 120.0).clamp(120.0, 420.0);
-                        widgets::segments(ui, "The plan", prog.done, prog.total(), w);
-                        ui.add_space(S2);
-                        small(ui, format!("{} of {} done", prog.done, prog.total()));
-                    });
-                }
-                if let Some((_, left)) = safe {
-                    ui.add_space(S2);
-                    ui.horizontal_wrapped(|ui| {
-                        if cleaning {
-                            ui.add(egui::Spinner::new().color(p.accent));
-                            widgets::muted(ui, "Clearing leftover files");
-                        } else {
-                            clear = widgets::primary(ui, "Fix the safe one for me").clicked();
-                            ui.add_space(S3);
-                            small(ui, format!("Clears {} of leftover files. Nothing else changes.", size_text(*left)));
-                        }
-                    });
+                if !compact {
+                    rest(ui, &mut clear);
                 }
             });
             slot
         });
         let centre = egui::pos2(row.inner.center().x, row.response.rect.center().y);
         keystone::paint(ui, egui::Rect::from_center_size(centre, egui::vec2(size, size)), &keys);
+        if compact {
+            ui.add_space(S3);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = S2;
+                rest(ui, &mut clear);
+            });
+        }
         if clear {
             if let Some((ids, _)) = safe {
                 self.start_cleaning(&ui.ctx().clone(), ids.clone());
@@ -315,8 +338,13 @@ impl App {
         let one_fix = leftovers || fixes.len() == 1;
         let more = !f.steps.is_empty() || !f.details.is_empty() || f.actions.len() > usize::from(fixes.len() == 1);
         let open = self.ui.expanded.contains(&f.id);
-        // The button column is measured generously, so a row's text never runs under it.
-        let text_w = (ui.available_width() - 20.0 - S4 - 230.0).max(160.0);
+        let avail = ui.available_width();
+        // Short of room, the button moves under the text. Otherwise its column is measured
+        // generously, so a row's text never runs under it.
+        let compact = avail < COMPACT;
+        // The ring, the gap the layout puts after it, and the space before the words.
+        let indent = 20.0 + ui.spacing().item_spacing.x + S4;
+        let text_w = if compact { avail - indent } else { (avail - indent - 230.0).max(160.0) };
         let title = egui::WidgetText::from(RichText::new(&f.title).family(theme::semibold())).into_galley(
             ui,
             Some(egui::TextWrapMode::Wrap),
@@ -332,50 +360,44 @@ impl App {
         let h = (title.size().y + 2.0 + summary.size().y).max(32.0) + 2.0 * S3;
         let mut toggle = false;
         let mut clear = false;
-        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if more && (one_fix || done) {
-                toggle = widgets::chevron(ui, open).clicked();
-                ui.add_space(S1);
-            }
-            if done {
-                ui.label(RichText::new("Done").color(p.green));
-                ui.label(widgets::ico(icon::CHECK, 14.0).color(p.green));
-            } else if leftovers {
-                if self.busy.contains("cleanup") {
-                    widgets::muted(ui, "Clearing");
-                    ui.add(egui::Spinner::new().color(p.accent));
-                } else {
-                    clear = widgets::secondary(ui, "Fix it for me").clicked();
-                }
-            } else if one_fix {
-                let fx = fixes[0];
-                if self.busy.contains(&format!("fix:{fx:?}")) {
-                    widgets::muted(ui, "Working on it");
-                    ui.add(egui::Spinner::new().color(p.accent));
-                } else {
-                    let blocked = fx.needs_admin() && !self.elevated;
-                    let r = widgets::secondary_enabled(ui, "Fix it for me", !blocked).on_hover_text(fx.label());
-                    let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart Bootmend as administrator first.") } else { r };
-                    if r.clicked() {
-                        self.ask(Pending::Fix(fx.clone(), f.title.clone()));
-                    }
-                }
-            } else {
-                toggle = widgets::secondary(ui, if open { "Hide the steps" } else { "Walk me through it" }).clicked();
-            }
+        let chevron = more && (one_fix || done);
+        let text = |ui: &mut Ui| {
+            ring(ui, f.level, done);
             ui.add_space(S4);
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ring(ui, f.level, done);
-                ui.add_space(S4);
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(title);
-                    if !f.summary.is_empty() {
-                        ui.label(summary);
-                    }
-                });
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(title);
+                if !f.summary.is_empty() {
+                    ui.label(summary);
+                }
             });
-        });
+        };
+        if compact {
+            ui.add_space(S3);
+            ui.horizontal(text);
+            ui.add_space(S2);
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                (toggle, clear) = self.todo_action(ui, f, &fixes, done, open, false);
+                if chevron {
+                    ui.add_space(S1);
+                    toggle |= widgets::chevron(ui, open).clicked();
+                }
+            });
+            ui.add_space(S3);
+        } else {
+            ui.allocate_ui_with_layout(egui::vec2(avail, h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if chevron {
+                    toggle = widgets::chevron(ui, open).clicked();
+                    ui.add_space(S1);
+                }
+                let (t, c) = self.todo_action(ui, f, &fixes, done, open, true);
+                toggle |= t;
+                clear = c;
+                ui.add_space(S4);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), text);
+            });
+        }
         if toggle {
             if open {
                 self.ui.expanded.remove(&f.id);
@@ -406,6 +428,66 @@ impl App {
             });
             ui.add_space(S3);
         }
+    }
+}
+
+impl App {
+    /// A to-do's one button, or what stands in for it: "Done", or a spinner while it works.
+    /// `rtl` is true when the row is filled from the right. Returns whether the steps were asked
+    /// for, and whether to clear the leftover files.
+    fn todo_action(&mut self, ui: &mut Ui, f: &Finding, fixes: &[&Fix], done: bool, open: bool, rtl: bool) -> (bool, bool) {
+        let p = pal(ui.ctx());
+        let (mut toggle, mut clear) = (false, false);
+        let spinner = |ui: &mut Ui| {
+            ui.add(egui::Spinner::new().color(p.accent));
+        };
+        if done {
+            status(
+                ui,
+                rtl,
+                |ui| {
+                    ui.label(widgets::ico(icon::CHECK, 14.0).color(p.green));
+                },
+                |ui| {
+                    ui.label(RichText::new("Done").color(p.green));
+                },
+            );
+        } else if f.id == LEFTOVERS {
+            if self.busy.contains("cleanup") {
+                status(ui, rtl, spinner, |ui| {
+                    widgets::muted(ui, "Clearing");
+                });
+            } else {
+                clear = widgets::secondary(ui, "Fix it for me").clicked();
+            }
+        } else if let [fx] = fixes {
+            if self.busy.contains(&format!("fix:{fx:?}")) {
+                status(ui, rtl, spinner, |ui| {
+                    widgets::muted(ui, "Working on it");
+                });
+            } else {
+                let blocked = fx.needs_admin() && !self.elevated;
+                let r = widgets::secondary_enabled(ui, "Fix it for me", !blocked).on_hover_text(fx.label());
+                let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart Bootmend as administrator first.") } else { r };
+                if r.clicked() {
+                    self.ask(Pending::Fix((*fx).clone(), f.title.clone()));
+                }
+            }
+        } else {
+            toggle = widgets::secondary(ui, if open { "Hide the steps" } else { "Walk me through it" }).clicked();
+        }
+        (toggle, clear)
+    }
+}
+
+/// An icon or spinner and its words, in reading order whichever way the row is filled.
+fn status(ui: &mut Ui, rtl: bool, lead: impl FnOnce(&mut Ui), words: impl FnOnce(&mut Ui)) {
+    if rtl {
+        words(ui);
+        lead(ui);
+    } else {
+        lead(ui);
+        words(ui);
     }
 }
 
