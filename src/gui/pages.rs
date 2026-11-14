@@ -1622,6 +1622,7 @@ fn this_pc(ui: &mut Ui, snap: &Snapshot) {
                     ui.label(format!("Holds {:.0}% of its original charge", pct * 100.0));
                     widgets::bar(
                         ui,
+                        "Battery health",
                         pct,
                         if pct < 0.5 {
                             p.red
@@ -1743,6 +1744,7 @@ fn storage(ui: &mut Ui, snap: &Snapshot) {
             });
             widgets::bar(
                 ui,
+                &format!("{name}, space used"),
                 used,
                 if used > 0.95 {
                     p.red

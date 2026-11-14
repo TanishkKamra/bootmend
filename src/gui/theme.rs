@@ -139,7 +139,13 @@ fn readable(p: &Pal) -> bool {
         && [p.bg, p.surface, p.surface2, p.sidebar].into_iter().all(|bg| text(p.accent, bg))
         && text(p.ink, p.accent_soft)
         && text(p.muted, p.accent_soft)
+        && text(p.ink, pressed(p))
         && contrast(p.accent, p.accent_soft) >= 3.0
+}
+
+/// The fill of a control while it is pressed: the hover tint, one step deeper.
+pub fn pressed(p: &Pal) -> Color32 {
+    p.accent_soft.lerp_to_gamma(p.accent, 0.12)
 }
 
 /// The palette with the Windows accent in place of cobalt, the way Windows 11 uses it, or
@@ -173,7 +179,27 @@ pub const S3: f32 = 12.0;
 pub const S4: f32 = 16.0;
 pub const S5: f32 = 24.0;
 pub const S6: f32 = 32.0;
+/// Corner radii, as Windows 11 draws them: 8 px for cards, dialogs and menus, 4 px for
+/// controls. Pills and switches are fully round.
 pub const RADIUS: u8 = 8;
+pub const CONTROL_RADIUS: u8 = 4;
+
+fn motion_id() -> egui::Id {
+    egui::Id::new("bootmend-motion")
+}
+
+/// Whether Windows' Animation effects setting is on. When it is off, things fade instead of
+/// moving.
+pub fn motion(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(motion_id())).unwrap_or(true)
+}
+
+pub fn set_motion(ctx: &egui::Context, on: bool) {
+    ctx.data_mut(|d| d.insert_temp(motion_id(), on));
+    // egui's own movement (opening sections, smooth scrolling) follows the same setting.
+    let time = if on { egui::Style::default().animation_time } else { 0.0 };
+    ctx.all_styles_mut(|st| st.animation_time = time);
+}
 
 pub fn semibold() -> FontFamily {
     FontFamily::Name("semibold".into())
@@ -188,8 +214,30 @@ pub fn h2() -> TextStyle {
 pub fn title() -> TextStyle {
     TextStyle::Name("title".into())
 }
+/// The verdict on Home and big totals: Title Large.
 pub fn big() -> TextStyle {
     TextStyle::Name("big".into())
+}
+/// A line that leads into a page: Body Large.
+pub fn lede() -> TextStyle {
+    TextStyle::Name("lede".into())
+}
+
+/// The Windows 11 type ramp: Caption 12, Body 14, Body Strong 14, Body Large 18, Subtitle 20,
+/// Title 28 and Title Large 40. Semibold is for titles only.
+fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
+    [
+        (big(), FontId::new(40.0, semibold())),
+        (TextStyle::Heading, FontId::new(28.0, semibold())),
+        (h2(), FontId::new(20.0, semibold())),
+        (lede(), FontId::new(18.0, FontFamily::Proportional)),
+        (title(), FontId::new(14.0, semibold())),
+        (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
+        (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
+        (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
+    ]
+    .into()
 }
 
 fn load(name: &str) -> Option<FontData> {
@@ -234,12 +282,12 @@ fn visuals(p: &Pal, dark: bool) -> Visuals {
     v.code_bg_color = p.surface2;
     v.hyperlink_color = p.accent;
     v.window_stroke = Stroke::new(1.0_f32, p.line);
-    v.window_corner_radius = CornerRadius::same(RADIUS + 2);
+    v.window_corner_radius = CornerRadius::same(RADIUS);
     v.menu_corner_radius = CornerRadius::same(RADIUS);
     v.selection.bg_fill = p.accent_soft;
     v.selection.stroke = Stroke::new(1.0_f32, p.ink);
     v.striped = false;
-    let r = CornerRadius::same(6);
+    let r = CornerRadius::same(CONTROL_RADIUS);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = p.surface;
     w.noninteractive.weak_bg_fill = p.surface;
@@ -257,10 +305,12 @@ fn visuals(p: &Pal, dark: bool) -> Visuals {
     w.hovered.fg_stroke = Stroke::new(1.5_f32, p.ink);
     w.hovered.corner_radius = r;
     w.hovered.expansion = 0.0;
-    w.active.bg_fill = p.accent_soft;
-    w.active.weak_bg_fill = p.accent_soft;
-    w.active.bg_stroke = Stroke::new(2.0_f32, p.accent);
-    w.active.fg_stroke = Stroke::new(2.0_f32, p.ink);
+    // egui also uses this look for keyboard focus; the two-tone ring drawn by
+    // widgets::focus_ring is what tells focus apart from a press.
+    w.active.bg_fill = pressed(p);
+    w.active.weak_bg_fill = pressed(p);
+    w.active.bg_stroke = Stroke::new(1.0_f32, p.accent);
+    w.active.fg_stroke = Stroke::new(1.5_f32, p.ink);
     w.active.corner_radius = r;
     w.active.expansion = 0.0;
     w.open = w.active;
@@ -272,17 +322,7 @@ pub fn apply(ctx: &egui::Context) {
     ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::System);
     for theme in [Theme::Light, Theme::Dark] {
         ctx.style_mut_of(theme, |st| {
-            st.text_styles = [
-                (TextStyle::Heading, FontId::new(26.0, semibold())),
-                (h2(), FontId::new(18.0, semibold())),
-                (title(), FontId::new(16.0, semibold())),
-                (big(), FontId::new(30.0, semibold())),
-                (TextStyle::Body, FontId::new(14.5, FontFamily::Proportional)),
-                (TextStyle::Button, FontId::new(14.5, FontFamily::Proportional)),
-                (TextStyle::Small, FontId::new(12.5, FontFamily::Proportional)),
-                (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
-            ]
-            .into();
+            st.text_styles = text_styles();
             let sp = &mut st.spacing;
             sp.item_spacing = egui::vec2(S2, S2);
             sp.button_padding = egui::vec2(S3 + 2.0, S1 + 2.0);
@@ -348,6 +388,45 @@ mod tests {
         assert_eq!(p.accent, hex(0x4CC2FF));
         assert_eq!(p.on_accent, Color32::BLACK);
         assert_eq!(p.bg, DARK.bg, "only the accent colours change");
+    }
+
+    #[test]
+    fn every_text_size_is_on_the_windows_ramp() {
+        // Caption 12, Body 14, Body Large 18, Subtitle 20, Title 28, Title Large 40. Code keeps
+        // Consolas at 13, the size Visual Studio uses, because the ramp has no code size.
+        for (style, font) in text_styles() {
+            let ramp = if style == TextStyle::Monospace { &[13.0][..] } else { &[12.0, 14.0, 18.0, 20.0, 28.0, 40.0][..] };
+            assert!(ramp.contains(&font.size), "{style:?} is {} px, off the ramp", font.size);
+        }
+    }
+
+    #[test]
+    fn a_pressed_control_keeps_its_text_readable() {
+        for p in [LIGHT, DARK] {
+            assert!(contrast(p.ink, pressed(&p)) >= 4.5, "text on a pressed control");
+            assert_ne!(pressed(&p), p.accent_soft, "pressed must differ from hover");
+        }
+    }
+
+    #[test]
+    fn the_focus_ring_shows_on_every_surface() {
+        for p in [LIGHT, DARK] {
+            for bg in [p.bg, p.surface, p.surface2, p.sidebar, p.accent_soft] {
+                assert!(contrast(p.ink, bg) >= 3.0, "focus ring against {bg:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn turning_animation_effects_off_stops_movement() {
+        let ctx = egui::Context::default();
+        assert!(motion(&ctx), "Windows starts with Animation effects on");
+        set_motion(&ctx, false);
+        assert!(!motion(&ctx));
+        assert_eq!(ctx.style().animation_time, 0.0, "egui's own animations stop too");
+        set_motion(&ctx, true);
+        assert!(motion(&ctx));
+        assert!(ctx.style().animation_time > 0.0);
     }
 
     #[test]

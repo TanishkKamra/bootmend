@@ -23,6 +23,24 @@ pub fn windows_accent() -> Option<AccentShades> {
     accent_shades(&buf[..n])
 }
 
+/// Settings > Accessibility > Visual effects > Animation effects. Windows starts with it on,
+/// so a failed read keeps motion on.
+pub fn animations_on() -> bool {
+    use windows::core::BOOL;
+    use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
+    let mut on = BOOL(1);
+    // Safety: this action writes one BOOL, and `on` lives across the call.
+    let read =
+        unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(std::ptr::from_mut(&mut on).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
+    match read {
+        Ok(()) => on.as_bool(),
+        Err(e) => {
+            eprintln!("couldn't read the Animation effects setting, so motion stays on: {e}");
+            true
+        }
+    }
+}
+
 /// Mica needs Windows 11 version 22H2 (build 22621) or later, with Transparency effects on.
 pub fn mica_available() -> bool {
     let mut on = [0u8; 4];
@@ -73,7 +91,7 @@ mod tests {
     #[ignore]
     fn reads_this_pcs_look() {
         let accent = windows_accent();
-        eprintln!("accent: {accent:?}, mica: {}", mica_available());
+        eprintln!("accent: {accent:?}, mica: {}, animations: {}", mica_available(), animations_on());
         assert!(accent.is_some(), "Windows 11 always stores an AccentPalette");
     }
 

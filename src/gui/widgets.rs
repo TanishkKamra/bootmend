@@ -1,6 +1,6 @@
 //! Small building blocks shared by every page.
 
-use super::theme::{self, pal, Pal, RADIUS, S2, S3, S4};
+use super::theme::{self, pal, Pal, CONTROL_RADIUS, RADIUS, S2, S3, S4};
 use crate::rules::Level;
 use eframe::egui::{self, Color32, CornerRadius, Margin, Response, RichText, Sense, Stroke, Ui};
 use egui_extras::{Column, TableBuilder};
@@ -78,9 +78,9 @@ pub fn note(ui: &mut Ui, fg: Color32, bg: Color32, ic: &str, add: impl FnOnce(&m
 pub fn pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) -> Response {
     egui::Frame::new()
         .fill(bg)
-        .corner_radius(CornerRadius::same(10))
+        .corner_radius(CornerRadius::same(u8::MAX))
         .inner_margin(Margin::symmetric(S2 as i8, 2))
-        .show(ui, |ui| ui.label(RichText::new(text).size(12.5).color(fg).family(theme::semibold())))
+        .show(ui, |ui| ui.label(RichText::new(text).small().color(fg).family(theme::semibold())))
         .response
 }
 
@@ -113,11 +113,7 @@ pub fn icon_button(ui: &mut Ui, ic: &str, text: &str, enabled: bool) -> Response
     let mut job = egui::text::LayoutJob::default();
     let color = pal(ui.ctx()).ink;
     job.append(ic, 0.0, egui::TextFormat { font_id: egui::FontId::new(14.0, theme::icons()), color, valign: egui::Align::Center, ..Default::default() });
-    job.append(
-        text,
-        S2,
-        egui::TextFormat { font_id: egui::FontId::new(14.5, egui::FontFamily::Proportional), color, valign: egui::Align::Center, ..Default::default() },
-    );
+    job.append(text, S2, egui::TextFormat { font_id: egui::TextStyle::Button.resolve(ui.style()), color, valign: egui::Align::Center, ..Default::default() });
     ui.add_enabled(enabled, egui::Button::new(job).min_size(egui::vec2(0.0, 32.0)))
 }
 
@@ -129,8 +125,9 @@ pub fn switch(ui: &mut Ui, on: bool, enabled: bool, name: &str) -> Response {
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
     let (rect, r) = ui.allocate_exact_size(size, sense);
     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, name));
+    ring_radius(ui, &r, size.y / 2.0);
     if ui.is_rect_visible(rect) {
-        let radius = CornerRadius::same(10);
+        let radius = CornerRadius::same(u8::MAX);
         let (track, edge, knob) = match (enabled, on) {
             (false, true) => (p.accent_soft, p.accent_soft, p.control),
             (false, false) => (p.surface2, p.line, p.control),
@@ -149,16 +146,73 @@ pub fn switch(ui: &mut Ui, on: bool, enabled: bool, name: &str) -> Response {
             0.0
         };
         painter.circle_filled(egui::pos2(x, rect.center().y), 6.0 + grow, knob);
-        if r.has_focus() {
-            painter.rect_stroke(rect.expand(3.0), CornerRadius::same(13), Stroke::new(2.0_f32, p.accent), egui::StrokeKind::Outside);
-        }
     }
+    r
+}
+
+fn ring_id(id: egui::Id) -> egui::Id {
+    id.with("focus-ring")
+}
+
+/// Rounds the focus ring for a control whose corners aren't the standard 4 px.
+pub fn ring_radius(ui: &Ui, r: &Response, radius: f32) {
+    ui.ctx().data_mut(|d| d.insert_temp(ring_id(r.id), radius));
+}
+
+/// Draws the Windows focus visual around whatever has keyboard focus: a 2 px ring in the text
+/// colour with a 1 px ring in the surface colour inside it, 3 px out from the control, so it
+/// reads on any fill. Like `:focus-visible`, it shows once a key moves focus and goes away on
+/// the next click. Call it after the whole UI is laid out.
+pub fn focus_ring(ctx: &egui::Context) {
+    let keyboard_id = egui::Id::new("bootmend-keyboard");
+    let mut keyboard = ctx.data(|d| d.get_temp::<bool>(keyboard_id)).unwrap_or(false);
+    ctx.input(|i| {
+        for e in &i.events {
+            match e {
+                egui::Event::Key {
+                    key: egui::Key::Tab | egui::Key::ArrowUp | egui::Key::ArrowDown | egui::Key::ArrowLeft | egui::Key::ArrowRight,
+                    pressed: true,
+                    ..
+                } => keyboard = true,
+                egui::Event::PointerButton { pressed: true, .. } => keyboard = false,
+                _ => {}
+            }
+        }
+    });
+    ctx.data_mut(|d| d.insert_temp(keyboard_id, keyboard));
+    let Some(r) = keyboard.then(|| ctx.memory(|m| m.focused())).flatten().and_then(|id| ctx.read_response(id)) else { return };
+    if r.interact_rect.area() <= 0.0 {
+        return;
+    }
+    let p = pal(ctx);
+    let radius = ctx.data(|d| d.get_temp::<f32>(ring_id(r.id))).unwrap_or(CONTROL_RADIUS as f32);
+    let corner = |grow: f32| CornerRadius::same((radius + grow).round().min(u8::MAX as f32) as u8);
+    // Clip to the visible part of the control, so a ring never spills over a header.
+    let painter = ctx.layer_painter(r.layer_id).with_clip_rect(r.interact_rect.expand(4.0));
+    painter.rect_stroke(r.rect.expand(3.0), corner(3.0), Stroke::new(2.0_f32, p.ink), egui::StrokeKind::Inside);
+    painter.rect_stroke(r.rect.expand(1.0), corner(1.0), Stroke::new(1.0_f32, p.surface), egui::StrokeKind::Inside);
+}
+
+/// Tells screen readers a label is a heading, so Narrator can jump from one to the next.
+pub fn heading_role(ui: &Ui, r: &Response, level: usize, text: &str) {
+    ui.ctx().accesskit_node_builder(r.id, |b| {
+        b.set_role(egui::accesskit::Role::Heading);
+        b.set_level(level);
+        b.set_label(text);
+    });
+}
+
+/// A page title, in the Title size.
+pub fn page_title(ui: &mut Ui, title: &str) -> Response {
+    let r = ui.label(RichText::new(title).text_style(egui::TextStyle::Heading));
+    heading_role(ui, &r, 1, title);
     r
 }
 
 pub fn section(ui: &mut Ui, title: &str) {
     ui.add_space(S3);
-    ui.label(RichText::new(title).text_style(theme::h2()));
+    let r = ui.label(RichText::new(title).text_style(theme::h2()));
+    heading_role(ui, &r, 2, title);
     ui.add_space(theme::S1);
 }
 
@@ -257,22 +311,34 @@ pub fn empty(ui: &mut Ui, ic: &str, title: &str, body: &str) {
             ui.add_space(S3);
             ui.label(ico(ic, 28.0).color(p.muted));
             ui.add_space(S2);
-            ui.label(RichText::new(title).text_style(theme::h2()));
+            let r = ui.label(RichText::new(title).text_style(theme::h2()));
+            heading_role(ui, &r, 2, title);
             ui.label(RichText::new(body).color(p.muted));
             ui.add_space(S3);
         });
     });
 }
 
-/// A horizontal usage bar, for free space and battery health.
-pub fn bar(ui: &mut Ui, fraction: f32, fill: Color32) {
+/// A horizontal usage bar, for free space and battery health. `name` is what a screen reader
+/// says before the percentage.
+pub fn bar(ui: &mut Ui, name: &str, fraction: f32, fill: Color32) {
     let p = pal(ui.ctx());
+    let fraction = fraction.clamp(0.0, 1.0);
     let w = ui.available_width();
-    let (r, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), Sense::hover());
-    ui.painter().rect_filled(r, CornerRadius::same(4), p.surface2);
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 8.0), Sense::hover());
+    resp.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, name);
+        info.value = Some((fraction * 100.0).round() as f64);
+        info
+    });
+    ui.ctx().accesskit_node_builder(resp.id, |b| {
+        b.set_min_numeric_value(0.0);
+        b.set_max_numeric_value(100.0);
+    });
+    ui.painter().rect_filled(r, CornerRadius::same(u8::MAX), p.surface2);
     let mut f = r;
-    f.set_width(r.width() * fraction.clamp(0.0, 1.0));
-    ui.painter().rect_filled(f, CornerRadius::same(4), fill);
+    f.set_width(r.width() * fraction);
+    ui.painter().rect_filled(f, CornerRadius::same(u8::MAX), fill);
 }
 
 /// A clickable row in the sidebar.
@@ -288,17 +354,14 @@ pub fn nav_item(ui: &mut Ui, ic: &str, text: &str, selected: bool, badge: Option
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
+    ui.painter().rect_filled(rect, CornerRadius::same(CONTROL_RADIUS), bg);
     if selected {
         let bar = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 9.0), egui::vec2(3.0, 16.0));
-        ui.painter().rect_filled(bar, CornerRadius::same(2), p.accent);
-    }
-    if resp.has_focus() {
-        ui.painter().rect_stroke(rect.shrink(1.0), CornerRadius::same(6), Stroke::new(2.0_f32, p.accent), egui::StrokeKind::Inside);
+        ui.painter().rect_filled(bar, CornerRadius::same(u8::MAX), p.accent);
     }
     let y = rect.center().y;
     ui.painter().text(egui::pos2(rect.left() + S3 + 2.0, y), egui::Align2::LEFT_CENTER, ic, egui::FontId::new(16.0, theme::icons()), p.ink);
-    let font = if selected { egui::FontId::new(14.5, theme::semibold()) } else { egui::FontId::new(14.5, egui::FontFamily::Proportional) };
+    let font = egui::FontId::new(14.0, if selected { theme::semibold() } else { egui::FontFamily::Proportional });
     ui.painter().text(egui::pos2(rect.left() + S3 + 30.0, y), egui::Align2::LEFT_CENTER, text, font, p.ink);
     if let Some(n) = badge.filter(|n| *n > 0) {
         let t = n.to_string();
@@ -306,6 +369,45 @@ pub fn nav_item(ui: &mut Ui, ic: &str, text: &str, selected: bool, badge: Option
         ui.painter().circle_filled(c, 10.0, p.red_bg);
         ui.painter().text(c, egui::Align2::CENTER_CENTER, t, egui::FontId::new(12.0, theme::semibold()), p.red);
     }
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, text));
+    let name = match badge.filter(|n| *n > 0) {
+        Some(n) => format!("{text}, {n} to look at"),
+        None => text.to_string(),
+    };
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &name));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs one frame with a single button and the focus ring pass, and says whether the ring
+    /// (a 2 px stroke in the text colour) was painted.
+    fn frame(ctx: &egui::Context, events: Vec<egui::Event>) -> bool {
+        let input = egui::RawInput { events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))), ..Default::default() };
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.add_space(40.0);
+                secondary(ui, "Check again");
+            });
+            focus_ring(ctx);
+        });
+        let ink = pal(ctx).ink;
+        out.shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.stroke.width == 2.0 && r.stroke.color == ink))
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn the_focus_ring_follows_the_keyboard_not_the_mouse() {
+        let ctx = egui::Context::default();
+        assert!(!frame(&ctx, vec![]), "no ring before anything has focus");
+        frame(&ctx, vec![key(egui::Key::Tab)]);
+        assert!(frame(&ctx, vec![]), "Tab gives the button focus and a ring");
+        let click = egui::Event::PointerButton { pos: egui::pos2(5.0, 5.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
+        frame(&ctx, vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0)), click]);
+        assert!(!frame(&ctx, vec![]), "a click hides the ring");
+    }
 }

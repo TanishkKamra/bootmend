@@ -65,7 +65,7 @@ impl App {
                     });
                 });
                 let fill = if frac > 0.85 { p.amber } else { p.accent };
-                widgets::bar(ui, frac.clamp(0.0, 1.0), fill);
+                widgets::bar(ui, label, frac, fill);
                 ui.add_space(S2);
             }
         });

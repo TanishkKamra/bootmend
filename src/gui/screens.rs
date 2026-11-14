@@ -28,7 +28,7 @@ impl App {
                 ui.add_space(S5);
                 ui.label(ico(icon::PC, 36.0).color(p.accent));
                 ui.add_space(S3);
-                ui.label(RichText::new("A plain-English check-up for your PC").text_style(egui::TextStyle::Heading));
+                widgets::page_title(ui, "A plain-English check-up for your PC");
                 ui.add_space(S2);
                 ui.label(RichText::new("Bootmend looks at your hardware, security settings and recent problems, then explains what's worth fixing and how.").color(p.muted));
                 ui.add_space(S5);
@@ -105,7 +105,7 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.set_max_width(520.0);
             ui.add_space(S6);
-            ui.label(RichText::new("Checking your PC").text_style(egui::TextStyle::Heading));
+            widgets::page_title(ui, "Checking your PC");
             ui.add_space(S2);
             ui.label(RichText::new("This usually takes about a minute. You can keep using your PC while it runs.").color(p.muted));
             ui.add_space(S5);

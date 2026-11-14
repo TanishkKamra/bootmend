@@ -263,6 +263,7 @@ pub struct App {
     /// The Windows accent last read, and when, while the person has accent sync on.
     win_accent: Option<theme::AccentShades>,
     accent_read: Option<Instant>,
+    motion_read: Option<Instant>,
 }
 
 impl App {
@@ -307,6 +308,7 @@ impl App {
             mica,
             win_accent: None,
             accent_read: None,
+            motion_read: None,
         };
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
@@ -368,6 +370,18 @@ impl App {
         if now != self.win_accent {
             self.win_accent = now;
             theme::set_accent(ctx, now.as_ref());
+        }
+    }
+
+    /// Follows Windows' Animation effects setting, read at most once a second.
+    fn sync_motion(&mut self, ctx: &egui::Context) {
+        if self.motion_read.is_some_and(|t| t.elapsed().as_secs() < 1) {
+            return;
+        }
+        self.motion_read = Some(Instant::now());
+        let on = system::animations_on();
+        if on != theme::motion(ctx) {
+            theme::set_motion(ctx, on);
         }
     }
 
@@ -792,7 +806,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(S3);
             ui.label(ico(icon::PC, 20.0).color(p.accent));
-            ui.label(RichText::new("Bootmend").size(19.0).family(theme::semibold()));
+            ui.label(RichText::new("Bootmend").text_style(theme::title()));
         });
         ui.add_space(S5);
         let do_first = self.findings.iter().filter(|f| f.level == rules::Level::DoFirst).count();
@@ -827,7 +841,7 @@ impl App {
         let p = pal(ui.ctx());
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new(title).text_style(egui::TextStyle::Heading));
+                widgets::page_title(ui, title);
                 if !subtitle.is_empty() {
                     ui.label(RichText::new(subtitle).color(p.muted));
                 }
@@ -867,7 +881,8 @@ impl App {
         let mut decision: Option<bool> = None;
         let m = egui::Modal::new(egui::Id::new("confirm")).show(ctx, |ui| {
             ui.set_width(440.0);
-            ui.label(RichText::new(&title).text_style(theme::h2()));
+            let t = ui.label(RichText::new(&title).text_style(theme::h2()));
+            widgets::heading_role(ui, &t, 2, &title);
             ui.add_space(S2);
             for b in &body {
                 ui.label(b);
@@ -1000,6 +1015,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.sync_accent(ctx);
+        self.sync_motion(ctx);
         self.snap_step(ctx);
         let p = pal(ctx);
 
@@ -1043,5 +1059,6 @@ impl eframe::App for App {
         }
         self.confirm_dialog(ctx);
         self.toasts_ui(ctx);
+        widgets::focus_ring(ctx);
     }
 }

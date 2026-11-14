@@ -331,7 +331,7 @@ fn row(ui: &mut Ui, item: &Item, on: &mut bool, enabled: bool, done: Option<&Res
         ui.spacing_mut().icon_width_inner = 10.0;
         let ws = &mut ui.visuals_mut().widgets;
         for w in [&mut ws.inactive, &mut ws.hovered, &mut ws.active, &mut ws.noninteractive] {
-            w.corner_radius = egui::CornerRadius::same(3);
+            w.corner_radius = egui::CornerRadius::same(theme::CONTROL_RADIUS);
         }
         changed = ui.add_enabled(enabled, egui::Checkbox::new(on, RichText::new(item.title).family(theme::semibold()))).changed();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
