@@ -6,7 +6,7 @@
 
 windows
 
-Native Windows 10 and 11 desktop app (Rust, eframe/egui 0.31), one exe with no installer. Not a web page: there is no browser, no hosted font, no CSS.
+Native Windows 10 and 11 desktop app (Rust, eframe/egui 0.36), one exe with no installer. Not a web page: there is no browser, no hosted font, no CSS.
 
 ## Users
 

@@ -26,15 +26,52 @@ fn decode(bytes: &[u8]) -> Result<ColorImage, png::DecodingError> {
     Ok(ColorImage::from_rgba_unmultiplied([info.width as usize, info.height as usize], &buf[..info.buffer_size()]))
 }
 
-fn layers(ctx: &egui::Context) -> Option<Layers> {
-    let id = egui::Id::new("bootmend-keystone");
+/// Area-averages a square image down to `px` a side, the way an icon is drawn for one size:
+/// every source pixel counts in proportion to how much of each target pixel it covers. Never
+/// scales up.
+fn shrink(img: &ColorImage, px: usize) -> ColorImage {
+    let n = img.size[0];
+    if px >= n {
+        return img.clone();
+    }
+    let scale = n as f32 / px as f32;
+    // For each target row or column: the source ones it overlaps, and by how much.
+    let taps: Vec<Vec<(usize, f32)>> = (0..px)
+        .map(|t| {
+            let (a, b) = (t as f32 * scale, (t + 1) as f32 * scale);
+            (a.floor() as usize..(b.ceil() as usize).min(n)).map(|s| (s, ((s + 1) as f32).min(b) - (s as f32).max(a))).filter(|&(_, w)| w > 0.0).collect()
+        })
+        .collect();
+    let area = scale * scale;
+    let mut out = Vec::with_capacity(px * px);
+    for ty in &taps {
+        for tx in &taps {
+            let mut sum = [0.0_f32; 4];
+            for &(sy, wy) in ty {
+                for &(sx, wx) in tx {
+                    // Colour32 is premultiplied, so a plain weighted sum keeps clear pixels clear.
+                    let c = img.pixels[sy * n + sx].to_array();
+                    for (acc, v) in sum.iter_mut().zip(c) {
+                        *acc += v as f32 * wx * wy;
+                    }
+                }
+            }
+            let [r, g, b, a] = sum.map(|v| (v / area).round().min(255.0) as u8);
+            out.push(Color32::from_rgba_premultiplied(r, g, b, a));
+        }
+    }
+    ColorImage::new([px, px], out)
+}
+
+/// The mark's layers drawn for one size in physical pixels, so the screen shows them pixel for
+/// pixel instead of blurring a 256 px texture down to 24.
+fn layers(ctx: &egui::Context, px: usize) -> Option<Layers> {
+    let id = egui::Id::new(("bootmend-keystone", px));
     if let Some(l) = ctx.data(|d| d.get_temp::<Option<Layers>>(id)) {
         return l;
     }
-    // Mipmaps keep the mark clean at sidebar size, a tenth of the drawn size.
-    let opts = TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..TextureOptions::LINEAR };
     let load = |name: &str, bytes: &[u8]| match decode(bytes) {
-        Ok(img) => Some(ctx.load_texture(name, img, opts)),
+        Ok(img) => Some(ctx.load_texture(format!("{name}-{px}"), shrink(&img, px), TextureOptions::LINEAR)),
         Err(e) => {
             eprintln!("the {name} layer of the logo didn't load, so the mark is hidden: {e}");
             None
@@ -55,13 +92,20 @@ fn layers(ctx: &egui::Context) -> Option<Layers> {
 /// sits above its seat (negative sinks it a touch, for the landing) and its opacity. A fade
 /// between two positions draws two.
 pub fn paint(ui: &Ui, rect: Rect, keys: &[(f32, f32)]) {
-    let Some(l) = layers(ui.ctx()) else { return };
+    // Whole physical pixels, so each texel lands on one screen pixel.
+    let ppp = ui.ctx().pixels_per_point();
+    let px = (rect.width() * ppp).round().max(1.0) as usize;
+    let Some(l) = layers(ui.ctx(), px) else { return };
+    let min = (rect.min.to_vec2() * ppp).round() / ppp;
+    let rect = Rect::from_min_size(min.to_pos2(), egui::Vec2::splat(px as f32 / ppp));
     let stones = if ui.visuals().dark_mode { &l.stones_dark } else { &l.stones_light };
     let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     let painter = ui.painter();
     painter.image(stones.id(), rect, uv, Color32::WHITE);
     for &(lift, opacity) in keys {
         let up = lift * rect.height() / 48.0;
+        // Raised or seated, the keystone sits on whole pixels; in flight it moves smoothly.
+        let up = if lift == RAISED || lift == 0.0 { (up * ppp).round() / ppp } else { up };
         painter.image(l.keystone.id(), rect.translate(egui::vec2(0.0, -up)), uv, Color32::WHITE.gamma_multiply(opacity));
     }
 }
@@ -105,6 +149,28 @@ mod tests {
             assert_eq!(img.size, [256, 256]);
             assert!(img.pixels.iter().any(|p| p.a() == 0), "the background must be transparent");
         }
+    }
+
+    #[test]
+    fn shrinking_averages_each_target_pixel_over_the_area_it_covers() {
+        // A 4x4 image, left half opaque white and right half clear, shrunk to 2x2 and to 1x1.
+        let px: Vec<Color32> = (0..16).map(|i| if i % 4 < 2 { Color32::WHITE } else { Color32::TRANSPARENT }).collect();
+        let img = ColorImage::new([4, 4], px);
+        let two = shrink(&img, 2);
+        assert_eq!(two.size, [2, 2]);
+        assert_eq!(two.pixels, vec![Color32::WHITE, Color32::TRANSPARENT, Color32::WHITE, Color32::TRANSPARENT]);
+        let one = shrink(&img, 1);
+        assert!((127..=128).contains(&one.pixels[0].a()), "half covered is half opaque, got {}", one.pixels[0].a());
+        // 4 to 3 splits source pixels between two targets; nothing is lost or invented.
+        let three = shrink(&ColorImage::filled([4, 4], Color32::WHITE), 3);
+        assert!(three.pixels.iter().all(|&c| c == Color32::WHITE));
+    }
+
+    #[test]
+    fn the_logo_is_drawn_from_a_texture_its_exact_size() {
+        let img = decode(include_bytes!("../../assets/keystone/keystone.png")).unwrap();
+        assert_eq!(shrink(&img, 24).size, [24, 24]);
+        assert_eq!(shrink(&img, 999).size, [256, 256], "never scaled up past the artwork");
     }
 
     #[test]

@@ -86,21 +86,22 @@ Contrast (checked 2026-11-12 with `design-playbook/scripts/contrast.mjs`; accent
 
 ### Type
 
-- **Body:** Segoe UI Variable, Windows 11's UI font (`SegUIVar.ttf`), with Segoe UI as the fallback on Windows 10. egui can't pick a weight from a variable font, so it draws the font's default instance, regular text weight.
-- **Headings and labels that need weight:** classic Segoe UI Semibold (`seguisb.ttf`).
+- **Segoe UI Variable** (`SegUIVar.ttf`), Windows 11's UI font, cut by weight and optical size per role the way the Fluent type ramp does: Small (opsz 8) for captions, Text (opsz 10.5) for body and Body Strong, Display (opsz 36) semibold for Subtitle and up. One file is read once and shared by every cut.
+- Windows 10 has no Segoe UI Variable, so it gets classic Segoe UI and Segoe UI Semibold.
 - Consolas for raw values, and Segoe Fluent Icons.
 - All are loaded from `%WINDIR%\Fonts`, with egui's own fonts as the fallback.
 
-| Style | Size | Use |
-|---|---|---|
-| Small | 12.5 | Captions, timestamps, file paths |
-| Body / Button | 14.5 | Everything else |
-| title | 16 semibold | Card titles (one suggestion, one upgrade) |
-| h2 | 18 semibold | Section headings |
-| Heading | 26 semibold | Page title |
-| big | 30 semibold | The one number on a card (space to free, stability score) |
+| Style | Size | Cut | Use |
+|---|---|---|---|
+| Small | 12 | Small regular | Captions, timestamps, file paths |
+| Body / Button | 14 | Text regular | Everything else |
+| title | 14 | Text semibold | Card and row titles (Body Strong) |
+| lede | 18 | Text regular | The line that leads into a page (Body Large) |
+| h2 | 20 | Display semibold | Section headings (Subtitle) |
+| Heading | 28 | Display semibold | Page title (Title) |
+| big | 40 | Display semibold | Home's verdict (Title Large) |
 
-Body is 14.5 px, not the 16 px a website would use. That matches Windows' own 14 px body text in Settings and Fluent apps, at the same viewing distance.
+**Sharpness.** egui 0.36 hints glyphs with the font's own TrueType instructions, so stems land on whole pixels. Light mode draws text with a 0.75 coverage gamma, which matches Windows' own text in pixel footprint and darkness (measured against Edge's DirectWrite rendering of the same strings). Subpixel positioning stays on: turning it off sharpens stems a little but makes letter spacing uneven. The Keystone is shrunk to the exact physical size it's drawn at and placed on whole pixels, instead of being mipmapped down from 256 px.
 
 ### Spacing, radius, size
 

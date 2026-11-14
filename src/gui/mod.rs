@@ -1113,15 +1113,21 @@ impl eframe::App for App {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// Runs before every frame, and also while the window is hidden whenever something asks
+    /// for a repaint, such as a check finishing.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.sync_accent(ctx);
         self.sync_motion(ctx);
         self.snap_step(ctx);
-        let p = pal(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let p = pal(&ctx);
 
         if self.checking.is_some() || self.snap.is_none() || self.force_welcome || self.check_error.is_some() && self.snap.is_none() {
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(S6 as i8))).show(ctx, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(S6 as i8))).show(ui, |ui| {
                 if self.checking.is_some() {
                     self.checking_screen(ui);
                 } else {
@@ -1129,14 +1135,14 @@ impl eframe::App for App {
                 }
             });
         } else {
-            egui::SidePanel::left("nav")
+            egui::Panel::left("nav")
                 .resizable(false)
-                .exact_width(208.0)
+                .exact_size(208.0)
                 .frame(
                     egui::Frame::new().fill(if self.mica { egui::Color32::TRANSPARENT } else { p.sidebar }).inner_margin(egui::Margin::symmetric(S2 as i8, 0)),
                 )
-                .show(ctx, |ui| self.sidebar(ui));
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ctx, |ui| {
+                .show(ui, |ui| self.sidebar(ui));
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
                 let mut sa = egui::ScrollArea::vertical().auto_shrink(false);
                 if std::mem::take(&mut self.ui.scroll_top) {
                     sa = sa.vertical_scroll_offset(0.0);
@@ -1158,9 +1164,9 @@ impl eframe::App for App {
                 }
             });
         }
-        self.confirm_dialog(ctx);
-        self.toasts_ui(ctx);
-        widgets::focus_ring(ctx);
+        self.confirm_dialog(&ctx);
+        self.toasts_ui(&ctx);
+        widgets::focus_ring(&ctx);
     }
 }
 

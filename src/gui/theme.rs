@@ -2,8 +2,9 @@
 //! contrast (see DESIGN.md). The app follows the Windows light or dark setting, and can take
 //! its accent from Windows too.
 
-use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Theme, Visuals};
-use std::sync::Arc;
+use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak, Stroke, TextStyle, Theme, Visuals};
+use eframe::epaint::text::VariationCoords;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Pal {
@@ -88,7 +89,7 @@ fn palettes_id() -> egui::Id {
 }
 
 pub fn pal(ctx: &egui::Context) -> Pal {
-    let dark = ctx.style().visuals.dark_mode;
+    let dark = ctx.global_style().visuals.dark_mode;
     let ps = ctx.data(|d| d.get_temp::<Palettes>(palettes_id())).unwrap_or(Palettes { light: LIGHT, dark: DARK });
     if dark {
         ps.dark
@@ -158,7 +159,7 @@ pub fn with_windows_accent(base: &Pal, s: &AccentShades, dark: bool) -> Option<P
 
 /// Whether the Windows accent can be used in the theme on screen now.
 pub fn accent_fits(ctx: &egui::Context, s: &AccentShades) -> bool {
-    let dark = ctx.style().visuals.dark_mode;
+    let dark = ctx.global_style().visuals.dark_mode;
     with_windows_accent(if dark { &DARK } else { &LIGHT }, s, dark).is_some()
 }
 
@@ -201,8 +202,17 @@ pub fn set_motion(ctx: &egui::Context, on: bool) {
     ctx.all_styles_mut(|st| st.animation_time = time);
 }
 
+/// Body Strong: semibold at the Text optical size.
 pub fn semibold() -> FontFamily {
     FontFamily::Name("semibold".into())
+}
+/// Subtitle and up: semibold at the Display optical size, drawn tighter for large sizes.
+pub fn display() -> FontFamily {
+    FontFamily::Name("display".into())
+}
+/// Caption: regular at the Small optical size, opened up to stay legible at 12 px.
+fn caption() -> FontFamily {
+    FontFamily::Name("caption".into())
 }
 pub fn icons() -> FontFamily {
     FontFamily::Name("icons".into())
@@ -227,42 +237,77 @@ pub fn lede() -> TextStyle {
 /// Title 28 and Title Large 40. Semibold is for titles only.
 fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
     [
-        (big(), FontId::new(40.0, semibold())),
-        (TextStyle::Heading, FontId::new(28.0, semibold())),
-        (h2(), FontId::new(20.0, semibold())),
+        (big(), FontId::new(40.0, display())),
+        (TextStyle::Heading, FontId::new(28.0, display())),
+        (h2(), FontId::new(20.0, display())),
         (lede(), FontId::new(18.0, FontFamily::Proportional)),
         (title(), FontId::new(14.0, semibold())),
         (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
         (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+        (TextStyle::Small, FontId::new(12.0, caption())),
         (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
     ]
     .into()
 }
 
-fn load(name: &str) -> Option<FontData> {
+fn read(name: &str) -> Option<Vec<u8>> {
     let dir = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
-    std::fs::read(dir.join("Fonts").join(name)).ok().map(FontData::from_owned)
+    std::fs::read(dir.join("Fonts").join(name)).ok()
 }
 
-/// Use Windows' own fonts so the app feels native; fall back to egui's built-in ones.
-pub fn fonts(ctx: &egui::Context) {
+fn load(names: &[&str]) -> Option<FontData> {
+    names.iter().find_map(|n| read(n)).map(FontData::from_owned)
+}
+
+/// Segoe UI Variable, read once and shared by every cut taken from it.
+fn segoe_variable() -> Option<&'static [u8]> {
+    static FONT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    FONT.get_or_init(|| read("SegUIVar.ttf")).as_deref()
+}
+
+/// Windows' own fonts, so the app reads like the rest of Windows, over egui's built-in ones.
+fn definitions() -> FontDefinitions {
     let mut f = FontDefinitions::default();
-    let mut add = |key: &str, file: &[&str], fam: FontFamily| {
-        if let Some(d) = file.iter().find_map(|n| load(n)) {
+    let mut families: Vec<(FontFamily, &str)> = Vec::new();
+    if let Some(var) = segoe_variable() {
+        // Windows 11 takes every role from this one file, at the weight and optical size the
+        // Fluent type ramp gives it.
+        let cut = |wght: f32, opsz: f32| {
+            let coords = VariationCoords::new([("wght", wght), ("opsz", opsz)]);
+            FontData::from_static(var).tweak(FontTweak { coords, ..Default::default() })
+        };
+        for (key, wght, opsz, fam) in [
+            ("segoe-text", 400.0, 10.5, FontFamily::Proportional),
+            ("segoe-small", 400.0, 8.0, caption()),
+            ("segoe-text-sb", 600.0, 10.5, semibold()),
+            ("segoe-display-sb", 600.0, 36.0, display()),
+        ] {
+            f.font_data.insert(key.into(), Arc::new(cut(wght, opsz)));
+            families.push((fam, key));
+        }
+    } else {
+        // Windows 10: classic Segoe UI, which has no optical sizes.
+        for (key, names) in [("segoe", &["segoeui.ttf"][..]), ("segoe-sb", &["seguisb.ttf", "segoeuib.ttf"][..])] {
+            if let Some(d) = load(names) {
+                f.font_data.insert(key.into(), Arc::new(d));
+            }
+        }
+        families.extend([(FontFamily::Proportional, "segoe"), (caption(), "segoe"), (semibold(), "segoe-sb"), (display(), "segoe-sb")]);
+    }
+    for (key, names) in [("consolas", &["consola.ttf"][..]), ("fluent", &["SegoeIcons.ttf", "segmdl2.ttf"][..])] {
+        if let Some(d) = load(names) {
             f.font_data.insert(key.into(), Arc::new(d));
+        }
+    }
+    families.extend([(FontFamily::Monospace, "consolas"), (icons(), "fluent")]);
+    for (fam, key) in families {
+        if f.font_data.contains_key(key) {
             f.families.entry(fam).or_default().insert(0, key.into());
         }
-    };
-    // Segoe UI Variable is Windows 11's own UI font. egui can't pick a weight from a variable
-    // font, so it gives the regular text weight and headings keep classic Segoe UI Semibold.
-    add("segoe", &["SegUIVar.ttf", "segoeui.ttf"], FontFamily::Proportional);
-    add("consolas", &["consola.ttf"], FontFamily::Monospace);
-    add("segoe-sb", &["seguisb.ttf", "segoeuib.ttf"], semibold());
-    add("fluent", &["SegoeIcons.ttf", "segmdl2.ttf"], icons());
-    // Every named family needs a fallback chain so missing glyphs still render.
+    }
+    // Every named family falls back on the body chain so a missing glyph still renders.
     let fallback = f.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    for fam in [semibold(), icons()] {
+    for fam in [semibold(), display(), caption(), icons()] {
         let e = f.families.entry(fam).or_default();
         for k in &fallback {
             if !e.contains(k) {
@@ -270,11 +315,21 @@ pub fn fonts(ctx: &egui::Context) {
             }
         }
     }
-    ctx.set_fonts(f);
+    f
+}
+
+pub fn fonts(ctx: &egui::Context) {
+    ctx.set_fonts(definitions());
 }
 
 fn visuals(p: &Pal, dark: bool) -> Visuals {
     let mut v = if dark { Visuals::dark() } else { Visuals::light() };
+    if !dark {
+        // Dark text on a light page: thicken the anti-aliased edge the way Windows' own text
+        // rendering does, so 14 px stems are as solid as in Settings. Measured against Windows:
+        // body text covers the same pixels at the same mean darkness.
+        v.text_options.color_transfer_function = eframe::epaint::FontColorTransferFunction::Gamma(0.75);
+    }
     v.panel_fill = p.bg;
     v.window_fill = p.surface;
     v.extreme_bg_color = p.surface;
@@ -319,7 +374,11 @@ fn visuals(p: &Pal, dark: bool) -> Visuals {
 
 pub fn apply(ctx: &egui::Context) {
     fonts(ctx);
-    ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::System);
+    ctx.options_mut(|o| {
+        o.theme_preference = egui::ThemePreference::System;
+        // Windows apps close with Alt+F4; egui's Ctrl+Q would end a fix half done.
+        o.quit_shortcuts.clear();
+    });
     for theme in [Theme::Light, Theme::Dark] {
         ctx.style_mut_of(theme, |st| {
             st.text_styles = text_styles();
@@ -391,6 +450,31 @@ mod tests {
     }
 
     #[test]
+    fn each_role_gets_the_optical_size_windows_gives_it() {
+        // Windows 11 sets Segoe UI Variable per role: Small for captions, Text for body copy and
+        // Body Strong, Display for Subtitle and up.
+        let s = text_styles();
+        for st in [big(), TextStyle::Heading, h2()] {
+            assert_eq!(s[&st].family, display(), "{st:?}");
+        }
+        assert_eq!(s[&TextStyle::Small].family, caption());
+        assert_eq!(s[&title()].family, semibold());
+        for st in [lede(), TextStyle::Body, TextStyle::Button] {
+            assert_eq!(s[&st].family, FontFamily::Proportional, "{st:?}");
+        }
+    }
+
+    #[test]
+    fn every_family_in_use_has_a_font_and_a_fallback() {
+        let f = definitions();
+        for fam in [FontFamily::Proportional, FontFamily::Monospace, semibold(), display(), caption(), icons()] {
+            let chain = &f.families[&fam];
+            assert!(chain.len() >= 2, "{fam:?} needs a font and something to fall back on");
+            assert!(chain.iter().all(|k| f.font_data.contains_key(k)), "{fam:?} names a font that isn't loaded");
+        }
+    }
+
+    #[test]
     fn every_text_size_is_on_the_windows_ramp() {
         // Caption 12, Body 14, Body Large 18, Subtitle 20, Title 28, Title Large 40. Code keeps
         // Consolas at 13, the size Visual Studio uses, because the ramp has no code size.
@@ -423,10 +507,10 @@ mod tests {
         assert!(motion(&ctx), "Windows starts with Animation effects on");
         set_motion(&ctx, false);
         assert!(!motion(&ctx));
-        assert_eq!(ctx.style().animation_time, 0.0, "egui's own animations stop too");
+        assert_eq!(ctx.global_style().animation_time, 0.0, "egui's own animations stop too");
         set_motion(&ctx, true);
         assert!(motion(&ctx));
-        assert!(ctx.style().animation_time > 0.0);
+        assert!(ctx.global_style().animation_time > 0.0);
     }
 
     #[test]

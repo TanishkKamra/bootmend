@@ -478,15 +478,17 @@ mod tests {
     /// (a 2 px stroke in the text colour) was painted.
     fn frame(ctx: &egui::Context, events: Vec<egui::Event>) -> bool {
         let input = egui::RawInput { events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))), ..Default::default() };
-        let out = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.add_space(40.0);
                 secondary(ui, "Check again");
             });
-            focus_ring(ctx);
+            focus_ring(ui.ctx());
         });
         let ink = pal(ctx).ink;
-        out.shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.stroke.width == 2.0 && r.stroke.color == ink))
+        let ring = out.shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.stroke.width == 2.0 && r.stroke.color == ink));
+        out.drop_without_applying_deltas();
+        ring
     }
 
     fn key(key: egui::Key) -> egui::Event {
