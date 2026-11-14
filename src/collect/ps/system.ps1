@@ -38,6 +38,7 @@ Try-Section 'os' {
   $win10 = $os.Caption -match 'Windows 10'
   # Windows 10 consumer ESU sign-up: 3 = this device enrolled, 5 = enrolled through a Microsoft account.
   $esu = $(if ($win10) { Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows\ConsumerESU' } else { $null })
+  $mm = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
   $R.os = [ordered]@{
     Edition = $os.Caption; Version = $cv.DisplayVersion; Build = "$($cv.CurrentBuild).$($cv.UBR)"; Architecture = $os.OSArchitecture
     InsiderChannel = "$($sh.BranchName) $($sh.Ring)".Trim(); Installed = (D $os.InstallDate); LastBoot = $os.LastBootUpTime.ToString('yyyy-MM-dd HH:mm')
@@ -47,6 +48,11 @@ Try-Section 'os' {
     VBS = $(switch ($dg.VirtualizationBasedSecurityStatus) { 0 { 'Off' } 1 { 'Enabled, not running' } 2 { 'Running' } default { $null } })
     MemoryIntegrity = $(if ($null -eq $dg) { $null } elseif ($dg.SecurityServicesRunning -contains 2) { 'On' } elseif ($dg.SecurityServicesConfigured -contains 2) { 'Enabled, not running' } else { 'Off' })
     VbsAvailable = $(if ($null -eq $dg) { $null } else { $dg.AvailableSecurityProperties -contains 1 })
+    # Start-up options (bcdedit and msconfig), Driver Verifier's list of drivers under test, and
+    # Microsoft's vulnerable driver blocklist (0 = switched off; missing = Windows' default, on).
+    StartOptions = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control').SystemStartOptions
+    Verifier = [bool]("$($mm.VerifyDrivers)".Trim())
+    DriverBlocklist = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config').VulnerableDriverBlocklistEnable
     EsuState = $esu.ESUEligibility
     EsuLicensed = $(if ($win10) { [bool]($lics | Where-Object { $_.Name -match 'ESU' -and $_.LicenseStatus -eq 1 }) } else { $null })
     PendingReboot = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')

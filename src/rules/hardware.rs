@@ -7,8 +7,63 @@ const HW: Area = Area::Hardware;
 
 pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
     drives(s, f);
+    disk_errors(s, f);
     battery(s, f);
     devices(s, f);
+}
+
+/// Storage errors in Windows' System log over 90 days, on drives inside the PC.
+fn disk_errors(s: &Snapshot, f: &mut Vec<Finding>) {
+    // A failing drive already has its own Do first to-do.
+    if f.iter().any(|x| x.id.starts_with("drive-failing")) {
+        return;
+    }
+    let usb: Vec<i64> = s.storage.a("disks").into_iter().filter(|d| d.s("Bus").as_deref() == Some("USB")).filter_map(|d| d.i("Number")).collect();
+    let volumes = s.storage.a("volumes");
+    let (mut serious, mut retries, mut details) = (0, 0, vec![]);
+    for e in s.storage.a("diskErrors") {
+        let (Some(source), Some(id), Some(n)) = (e.s("Source"), e.i("Id"), e.i("Count")) else { continue };
+        // Ntfs names a drive letter. A letter missing from the fixed drives is a memory stick or card.
+        let disk = match e.s("Volume") {
+            Some(l) => match volumes.iter().find(|v| v.s("Letter").is_some_and(|x| x.trim_end_matches(':').eq_ignore_ascii_case(&l))) {
+                Some(v) => v.i("Disk"),
+                None => continue,
+            },
+            None => e.i("Disk"),
+        };
+        if disk.is_some_and(|d| usb.contains(&d)) {
+            continue;
+        }
+        let source = source.to_lowercase();
+        let (bad, what) = match (source.as_str(), id) {
+            ("disk", 7) => (true, "Damaged areas (bad blocks)"),
+            ("disk", 52) => (true, "The drive warned it may fail"),
+            (x, 55) if x.contains("ntfs") => (true, "File system damage"),
+            // Also logged when a drive is pulled out mid-write, so these need repeating.
+            (x, 50 | 140) if x.contains("ntfs") => (false, "Writes that didn't reach the drive"),
+            ("disk", 11 | 15) => (false, "Controller errors"),
+            ("disk", 51 | 153) => (false, "Reads or writes that had to be retried"),
+            (_, 129) => (false, "The drive stopped responding and was reset"),
+            _ => continue,
+        };
+        if bad {
+            serious += n;
+        } else {
+            retries += n;
+        }
+        details.push(format!("{what}: {}{}", plural(n as usize, "time", "times"), disk.map(|d| format!(" (disk {d})")).unwrap_or_default()));
+    }
+    // One retry is often a hiccup; three or more is a pattern (our judgement).
+    if serious > 0 || retries >= 3 {
+        f.push(
+            Finding::new("disk-errors", HW, Level::WorthDoing, "Windows logged errors reading or writing a drive")
+                .why("In the last 90 days Windows had trouble with a drive inside this PC. A loose cable, a driver problem or a drive starting to wear out can all cause it.")
+                .step("Back up anything important first.")
+                .step("Then check the drive: in File Explorer, right-click it, choose Properties, Tools, Check. It scans first and asks before repairing anything.")
+                .step("If the errors keep coming, update the storage driver from the PC or motherboard maker's site, or on a desktop, reseat the drive's cable.")
+                .details(details),
+        );
+    }
 }
 
 fn drives(s: &Snapshot, f: &mut Vec<Finding>) {

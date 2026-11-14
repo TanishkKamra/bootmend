@@ -24,11 +24,102 @@ pub fn crashed_app(c: &serde_json::Value) -> Option<String> {
     }))
 }
 
+/// The graphics driver freezing and being restarted by Windows, counted over 30 days.
+fn gpu_resets(s: &Snapshot, f: &mut Vec<Finding>) {
+    // Virtual screens (Parsec, remote desktop) log these too, with no card to fix.
+    let real = s.system.a("gpus").into_iter().filter_map(|g| g.s("Name")).any(|n| {
+        let n = n.to_lowercase();
+        !super::speed::VIRTUAL_GPUS.iter().any(|v| n.contains(v))
+    });
+    if !real {
+        return;
+    }
+    let r = s.health.g("gpuResets");
+    let today = chrono::Local::now().date_naive();
+    // One freeze can show up in both lists within the same minute, so times are counted once.
+    let mut times: Vec<String> = r
+        .strs("Tdr")
+        .into_iter()
+        .chain(r.strs("Watchdog"))
+        .filter(|t| t.get(..10).and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).is_some_and(|d| (today - d).num_days() <= 30))
+        .collect();
+    times.sort();
+    times.dedup();
+    // Resets come in bursts, so they count by day: one bad evening is a one-off, three different
+    // days in a month is a pattern (our judgement).
+    let mut days: Vec<&str> = times.iter().filter_map(|t| t.get(..10)).collect();
+    days.dedup();
+    if days.len() >= 3 {
+        f.push(
+            Finding::new("gpu-resets", STAB, Level::WorthDoing, format!("The graphics driver stopped responding on {} of the last 30 days", days.len()))
+                .why("Each time, the screen freezes or goes black for a moment while Windows restarts the driver. Games and video apps can crash with it.")
+                .step("Install the latest driver from the graphics card's maker: the NVIDIA app, AMD Software or Intel's Driver & Support Assistant.")
+                .step("If the graphics card or memory is overclocked, set it back to default.")
+                .step("If it keeps happening, check the card's power cable and that its fans and vents aren't blocked.")
+                .details(times.iter().rev().take(5).map(|t| format!("Stopped responding: {t}"))),
+        );
+    }
+}
+
+/// Start-up settings meant for developers and troubleshooting, left on.
+fn boot_options(s: &Snapshot, f: &mut Vec<Finding>) {
+    let os = s.system.g("os");
+    let threads = s.system.g("cpu").i("Threads");
+    let mut found = vec![];
+    for t in os.s("StartOptions").unwrap_or_default().to_uppercase().split_whitespace() {
+        let (k, v) = t.split_once('=').unwrap_or((t, ""));
+        let what = match k {
+            "TESTSIGNING" => "Test mode is on, so drivers nobody has signed can load (bcdedit /set testsigning off)",
+            "NOINTEGRITYCHECKS" => "Driver signature checks are off (bcdedit /set nointegritychecks off)",
+            "DEBUG" => "Kernel debugging is on (bcdedit /debug off)",
+            "NOEXECUTE" if v == "ALWAYSOFF" => "Data Execution Prevention is off (bcdedit /set nx OptIn)",
+            "MAXMEM" | "TRUNCATEMEMORY" => "Windows is told to use less memory than the PC has (msconfig, Boot, Advanced options)",
+            "NUMPROC" if threads.is_some_and(|n| v.parse::<i64>().is_ok_and(|p| p < n)) => {
+                "Windows is told to use fewer processor cores than the PC has (msconfig, Boot, Advanced options)"
+            }
+            k if k.starts_with("SAFEBOOT") => "Windows is set to start in safe mode (msconfig, Boot, Safe boot)",
+            _ => continue,
+        };
+        found.push(what.to_string());
+    }
+    if os.b("Verifier") == Some(true) {
+        found.push("Driver Verifier is on: it makes drivers fail on purpose to test them, which causes blue screens (verifier /reset)".into());
+    }
+    if !found.is_empty() {
+        f.push(
+            Finding::new("boot-test-mode", STAB, Level::WorthDoing, "Windows is still set up for testing")
+                .why("Settings meant for developers and troubleshooting are still on. They can slow the PC, cause blue screens or let unsafe drivers load.")
+                .step("If you didn't turn these on yourself, each one below names where it's switched off. The commands go in a Command Prompt opened with Run as administrator; restart afterwards.")
+                .details(found),
+        );
+    }
+}
+
+fn pagefile(s: &Snapshot, f: &mut Vec<Finding>) {
+    let perf = s.health.g("perf");
+    if !perf.g("Pagefiles").as_array().is_some_and(|a| a.is_empty()) {
+        return;
+    }
+    let ram = perf.f("RamTotalGB").unwrap_or(0.0);
+    let lost = s.health.i("dumpFailures").unwrap_or(0);
+    let level = if ram < 16.0 || lost > 0 { Level::WorthDoing } else { Level::NiceToHave };
+    let mut x = Finding::new("no-pagefile", STAB, level, "Windows has no page file")
+        .why("A page file gives Windows room to spare when memory runs short, and it's where Windows saves the details of a crash. Without one, big apps can stop with out-of-memory errors, and blue screens can't be looked into.")
+        .step("Search Start for \"Adjust the appearance and performance of Windows\", open Advanced, then Virtual memory, Change, and tick Automatically manage paging file size for all drives. Restart afterwards.");
+    if lost > 0 {
+        x = x.detail(format!("{} couldn't be saved in the last 90 days", plural(lost as usize, "crash report", "crash reports")));
+    }
+    f.push(x);
+}
+
 pub fn hardware_stress_codes(code: u32) -> bool {
     matches!(code, 0x124 | 0x101 | 0x7F)
 }
 
 pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
+    gpu_resets(s, f);
+    boot_options(s, f);
+    pagefile(s, f);
     let h = &s.health;
     let mut codes: BTreeMap<u32, usize> = BTreeMap::new();
     for b in h.a("bugchecks") {

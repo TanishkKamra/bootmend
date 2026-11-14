@@ -530,4 +530,95 @@ mod tests {
         assert_eq!(os("Activated", ""), (None, None));
         assert_eq!(os("Activated", "Dev External"), (None, Some(Level::NiceToHave)));
     }
+
+    #[test]
+    fn disk_errors_count_on_internal_drives() {
+        let errors = |list: serde_json::Value| {
+            let mut s = base();
+            s.storage = json!({"disks": [{"Number": 0, "Bus": "NVMe"}, {"Number": 1, "Bus": "USB"}], "volumes": [{"Letter": "C:", "Disk": 0}, {"Letter": "D:", "Disk": 1}], "diskErrors": list});
+            level_of(&evaluate(&s), "disk-errors")
+        };
+        assert_eq!(errors(json!([{"Source": "disk", "Id": 51, "Count": 1, "Disk": 0}])), None, "one hiccup");
+        assert_eq!(errors(json!([{"Source": "disk", "Id": 51, "Count": 3, "Disk": 0}])), Some(Level::WorthDoing));
+        assert_eq!(
+            errors(json!([{"Source": "stornvme", "Id": 129, "Count": 2, "Disk": null}, {"Source": "disk", "Id": 153, "Count": 1, "Disk": 0}])),
+            Some(Level::WorthDoing)
+        );
+        assert_eq!(errors(json!([{"Source": "disk", "Id": 7, "Count": 1, "Disk": 0}])), Some(Level::WorthDoing), "a bad block");
+        assert_eq!(errors(json!([{"Source": "Ntfs", "Id": 55, "Count": 1, "Disk": null}])), Some(Level::WorthDoing), "file system damage");
+        assert_eq!(errors(json!([{"Source": "disk", "Id": 7, "Count": 9, "Disk": 1}])), None, "USB drives come and go");
+        let ntfs = |id: i64, n: i64, vol: &str| errors(json!([{"Source": "Microsoft-Windows-Ntfs", "Id": id, "Count": n, "Disk": null, "Volume": vol}]));
+        assert_eq!(ntfs(55, 1, "C"), Some(Level::WorthDoing), "damage on the system drive");
+        assert_eq!(ntfs(140, 2, "C"), None, "lost writes need repeating");
+        assert_eq!(ntfs(140, 3, "C"), Some(Level::WorthDoing));
+        assert_eq!(ntfs(140, 9, "E"), None, "a memory stick pulled out");
+        assert_eq!(ntfs(55, 1, "D"), None, "a USB drive");
+    }
+
+    #[test]
+    fn graphics_driver_resets_repeat_before_they_count() {
+        let resets = |tdr: Vec<String>, watchdog: Vec<String>, gpu: &str| {
+            let mut s = base();
+            s.system["gpus"] = json!([{ "Name": gpu, "DriverDate": ago(30) }]);
+            s.health = json!({ "gpuResets": { "Tdr": tdr, "Watchdog": watchdog } });
+            level_of(&evaluate(&s), "gpu-resets")
+        };
+        let gpu = "AMD Radeon RX 6750 XT";
+        assert_eq!(resets(vec![ago(2), ago(40)], vec![ago(3), ago(5)], gpu), Some(Level::WorthDoing));
+        assert_eq!(resets(vec![ago(2), ago(40)], vec![ago(45)], gpu), None, "only one in 30 days");
+        let evening: Vec<String> = ["21:23", "21:24", "21:25"].iter().map(|t| format!("{} {t}", ago(2))).collect();
+        assert_eq!(resets(vec![], evening, gpu), None, "one bad evening is not a pattern");
+        assert_eq!(resets(vec![ago(1), ago(2), ago(3)], vec![], "Parsec Virtual Display Adapter"), None, "no real graphics card");
+    }
+
+    #[test]
+    fn leftover_test_settings_in_the_boot_options() {
+        let boot = |opts: &str, verifier: bool| {
+            let mut s = base();
+            s.system["os"]["StartOptions"] = json!(opts);
+            s.system["os"]["Verifier"] = json!(verifier);
+            s.system["cpu"] = json!({ "Threads": 12 });
+            level_of(&evaluate(&s), "boot-test-mode")
+        };
+        assert_eq!(boot(" NOEXECUTE=OPTOUT  NUMPROC=12  HYPERVISORLAUNCHTYPE=AUTO  NOVGA", false), None, "Windows writes these itself");
+        assert_eq!(boot(" TESTSIGNING  NOEXECUTE=OPTOUT", false), Some(Level::WorthDoing));
+        assert_eq!(boot(" NOEXECUTE=OPTOUT  NUMPROC=4", false), Some(Level::WorthDoing), "a third of the processor");
+        assert_eq!(boot(" NOEXECUTE=ALWAYSOFF", false), Some(Level::WorthDoing));
+        assert_eq!(boot(" NOEXECUTE=OPTOUT", true), Some(Level::WorthDoing), "Driver Verifier left on");
+    }
+
+    #[test]
+    fn a_missing_page_file_matters_most_with_little_memory() {
+        let page = |files: serde_json::Value, ram: f64, dump_failures: i64| {
+            let mut s = base();
+            s.health = json!({ "perf": { "Pagefiles": files, "RamTotalGB": ram }, "dumpFailures": dump_failures });
+            level_of(&evaluate(&s), "no-pagefile")
+        };
+        assert_eq!(page(json!([]), 8.0, 0), Some(Level::WorthDoing));
+        assert_eq!(page(json!([]), 32.0, 3), Some(Level::WorthDoing), "crash reports can't be saved");
+        assert_eq!(page(json!([]), 32.0, 0), Some(Level::NiceToHave));
+        assert_eq!(page(json!(["C:\\pagefile.sys 4096 MB"]), 8.0, 0), None);
+        let mut s = base();
+        s.health = json!({});
+        assert_eq!(level_of(&evaluate(&s), "no-pagefile"), None, "no data, no guess");
+    }
+
+    #[test]
+    fn slow_cable_links_and_trim() {
+        let link = |speed: &str, media: &str| {
+            let mut s = base();
+            s.network = json!({"adapters": [{"Device": "Realtek PCIe GbE Family Controller", "Speed": speed, "Status": "Up", "MediaType": media}]});
+            level_of(&evaluate(&s), "link-slow")
+        };
+        assert_eq!(link("100 Mbps", "802.3"), Some(Level::NiceToHave));
+        assert_eq!(link("1 Gbps", "802.3"), None);
+        assert_eq!(link("100 Mbps", "Native 802.11"), None, "Wi-Fi speeds vary");
+        let trim = |media: &str| {
+            let mut s = base();
+            s.storage = json!({"trim": {"Off": true}, "disks": [{"Number": 0, "IsSystem": true, "Media": media}]});
+            level_of(&evaluate(&s), "trim-off")
+        };
+        assert_eq!(trim("SSD"), Some(Level::NiceToHave));
+        assert_eq!(trim("HDD"), None);
+    }
 }

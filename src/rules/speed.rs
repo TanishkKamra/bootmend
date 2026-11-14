@@ -6,10 +6,11 @@ use crate::util::J;
 const SPD: Area = Area::Speed;
 /// Screens made by software (remote desktop and game streaming tools, virtual machines), not a
 /// graphics card, so their drivers' age means nothing.
-const VIRTUAL_GPUS: &[&str] = &["parsec", "virtual", "iddcx", "iddsample", "remote display", "hyper-v", "vmware"];
+pub(super) const VIRTUAL_GPUS: &[&str] = &["parsec", "virtual", "iddcx", "iddsample", "remote display", "hyper-v", "vmware"];
 
 pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
     memory(s, f);
+    links(s, f);
     storage(s, f);
     startup(s, f);
     misc(s, f);
@@ -65,6 +66,35 @@ fn memory(s: &Snapshot, f: &mut Vec<Finding>) {
                     ),
             );
         }
+    }
+}
+
+fn links(s: &Snapshot, f: &mut Vec<Finding>) {
+    // Wired ports that only do 100 Mbps say so in their name; any other is held back by its cable,
+    // plug or router port.
+    for a in s.network.a("adapters") {
+        let device = a.s("Device").unwrap_or_default();
+        let lower = device.to_lowercase();
+        let wired = a.s("MediaType").is_some_and(|m| m.contains("802.3"));
+        let slow = matches!(a.s("Speed").as_deref(), Some("100 Mbps" | "10 Mbps"));
+        let fast_only = ["10/100", "fast ethernet", "fe family", "100m"].iter().any(|k| lower.contains(k));
+        if wired && slow && !fast_only && a.s("Status").as_deref() == Some("Up") {
+            f.push(
+                Finding::new("link-slow", SPD, Level::NiceToHave, format!("Your network cable runs at {}", a.s("Speed").unwrap_or_default()))
+                    .why("Network ports and routers today run at 1 Gbps, ten times faster. An old or damaged cable, or a loose plug, usually holds them back. It only matters if your internet or home network is faster than 100 Mbps.")
+                    .step("Try another cable (marked Cat 5e or newer) and another port on the router.")
+                    .detail(format!("Network card: {device}")),
+            );
+            break;
+        }
+    }
+    let ssd = s.storage.a("disks").into_iter().any(|d| d.b("IsSystem") == Some(true) && d.s("Media").as_deref() == Some("SSD"));
+    if ssd && s.storage.g("trim").b("Off") == Some(true) {
+        f.push(
+            Finding::new("trim-off", SPD, Level::NiceToHave, "TRIM is off for the SSD")
+                .why("TRIM lets Windows tell the SSD which space is free, which keeps it fast and helps it last. Windows turns it on by default; old tuning guides switch it off.")
+                .step("Search Start for Command Prompt, choose Run as administrator, and type: fsutil behavior set DisableDeleteNotify 0"),
+        );
     }
 }
 

@@ -20,6 +20,22 @@ Try-Section 'ataSmart' {
   $R.ataSmart = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_ATAPISmartData | ForEach-Object { [ordered]@{ Instance = $_.InstanceName; Data = @($_.VendorSpecific | ForEach-Object { [int]$_ }) } })
   $R.failurePredict = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus | ForEach-Object { [ordered]@{ Instance = $_.InstanceName; PredictFailure = [bool]$_.PredictFailure; Reason = $_.Reason } })
 }
+Try-Section 'trim' {
+  # 1 means Windows no longer tells SSDs which space is free (fsutil behavior DisableDeleteNotify).
+  $R.trim = [ordered]@{ Off = ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem').DisableDeleteNotification -eq 1) }
+}
+Try-Section 'diskErrors' {
+  # Storage errors and warnings in the System log over 90 days, grouped. The disk number comes from
+  # "Harddisk1" or "Disk 1" in the message; Ntfs names a drive letter instead.
+  $want = @{ disk = 7, 11, 15, 51, 52, 153; ntfs = 50, 55, 140; 'microsoft-windows-ntfs' = 50, 55, 140 }
+  $R.diskErrors = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7, 11, 15, 50, 51, 52, 55, 129, 140, 153; Level = 1, 2, 3; StartTime = (Get-Date).AddDays(-90) } -MaxEvents 3000 | Where-Object {
+      $p = $_.ProviderName.ToLower(); ($_.Id -eq 129 -and $p -match '^(stornvme|storahci|iastor\w*|storport)$') -or ($want[$p] -contains $_.Id) } | ForEach-Object {
+      $m = "$($_.Message)"
+      [pscustomobject]@{ Source = $_.ProviderName; Id = $_.Id; Date = $_.TimeCreated
+        Disk = $(if ($m -match '(?:Harddisk|Disk )(\d+)') { [int]$matches[1] } else { $null }); Volume = $(if ($m -match '(?:volume|VolumeId:)\s*([A-Z]):') { $matches[1].ToUpper() } else { $null }) } } |
+    Group-Object Source, Id, Disk, Volume | ForEach-Object { $f = $_.Group[0]
+      [ordered]@{ Source = $f.Source; Id = $f.Id; Count = $_.Count; Last = ($_.Group | Sort-Object Date -Descending | Select-Object -First 1).Date.ToString('yyyy-MM-dd'); Disk = $f.Disk; Volume = $f.Volume } })
+}
 Try-Section 'backup' {
   # Where Desktop, Documents and Pictures live, and whether OneDrive is signed in and running to copy them.
   $usf = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
