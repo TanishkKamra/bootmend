@@ -206,11 +206,16 @@ impl App {
     fn actions(&mut self, ui: &mut Ui, f: &Finding) {
         let fixes: Vec<&Fix> = f.actions.iter().filter_map(|a| if let Action::Fix(x) = a { Some(x) } else { None }).collect();
         if fixes.len() > 1 {
+            let mut blocked = false;
             for fx in &fixes {
                 ui.horizontal(|ui| {
-                    self.fix_button(ui, fx, &f.title);
+                    blocked |= self.fix_button_as(ui, fx, &f.title, true);
                     ui.add(egui::Label::new(fix_target(fx)).truncate());
                 });
+            }
+            // Said once under the list rather than on every row.
+            if blocked {
+                ui.horizontal(widgets::admin_note);
             }
             ui.add_space(S2);
         }
@@ -244,21 +249,24 @@ impl App {
     }
 
     fn fix_button(&mut self, ui: &mut Ui, fx: &Fix, title: &str) {
-        self.fix_button_as(ui, fx, title, true);
+        if self.fix_button_as(ui, fx, title, true) {
+            widgets::admin_note(ui);
+        }
     }
 
-    /// `primary: false` for long lists, where a filled button on every row would shout.
-    fn fix_button_as(&mut self, ui: &mut Ui, fx: &Fix, title: &str, primary: bool) {
+    /// `primary: false` for long lists, where a filled button on every row would shout. Returns
+    /// whether it's greyed out for want of administrator rights, so the caller can say so.
+    fn fix_button_as(&mut self, ui: &mut Ui, fx: &Fix, title: &str, primary: bool) -> bool {
         let p = pal(ui.ctx());
         if self.fixed(fx) {
             ui.label(ico(icon::CHECK, 14.0).color(p.green));
             ui.label(RichText::new("Done").color(p.green));
-            return;
+            return false;
         }
         if self.busy.contains(&format!("fix:{fx:?}")) {
             ui.add(egui::Spinner::new().color(p.accent));
             muted(ui, "Working on it");
-            return;
+            return false;
         }
         let blocked = fx.needs_admin() && !self.elevated;
         let r = if primary { widgets::primary_enabled(ui, fx.label(), !blocked) } else { widgets::secondary_enabled(ui, fx.label(), !blocked) };
@@ -266,6 +274,7 @@ impl App {
         if r.clicked() {
             self.ask(Pending::Fix(fx.clone(), title.to_string()));
         }
+        blocked
     }
 
     fn restore_point_button(&mut self, ui: &mut Ui) {
@@ -276,6 +285,9 @@ impl App {
         }
         let r = widgets::secondary_enabled(ui, "Save a restore point", self.elevated);
         let r = if self.elevated { r } else { r.on_disabled_hover_text("Needs administrator rights. Restart Bootmend as administrator first.") };
+        if !self.elevated {
+            widgets::admin_note(ui);
+        }
         if r.clicked() {
             self.ask(Pending::RestorePoint);
         }
@@ -298,6 +310,11 @@ impl App {
         } else {
             r
         };
+        if !cdb {
+            widgets::off_reason(ui, icon::INFO, "Needs Microsoft's debugging tools");
+        } else if !self.elevated {
+            widgets::admin_note(ui);
+        }
         if r.clicked() {
             self.ask(Pending::AnalyzeDumps);
         }
@@ -753,7 +770,13 @@ impl App {
                 "Services run without a window. These aren't part of Windows. Setting one to start only when needed is safe for most updaters and helpers.",
             );
             ui.add_space(S2);
-            for (i, sv) in snap.software.a("services").iter().enumerate() {
+            let services = snap.software.a("services");
+            // Said once over the list rather than beside every greyed-out button.
+            if !self.elevated && services.iter().any(|sv| s(sv, "StartMode") == "Auto") {
+                ui.horizontal(widgets::admin_note);
+                ui.add_space(S2);
+            }
+            for (i, sv) in services.iter().enumerate() {
                 let (name, disp) = (s(sv, "Name"), s(sv, "Display"));
                 if i > 0 {
                     ui.separator();
@@ -1058,6 +1081,7 @@ impl App {
                         let r = widgets::icon_button(ui, icon::UNDO, "Undo", !blocked);
                         if blocked {
                             r.clone().on_disabled_hover_text("Needs administrator rights, like the original change.");
+                            widgets::admin_note(ui);
                         }
                         if r.clicked() {
                             self.ask(Pending::Undo(i, h.title.clone()));

@@ -104,6 +104,32 @@ pub fn secondary_enabled(ui: &mut Ui, text: &str, enabled: bool) -> Response {
     ui.add_enabled(enabled, egui::Button::new(text).min_size(egui::vec2(0.0, 32.0)))
 }
 
+/// Said beside a button that's greyed out for want of administrator rights.
+pub const NEEDS_ADMIN: &str = "Needs administrator rights";
+
+/// Why the greyed-out button beside it can't be used, said in the open so nobody has to hover
+/// to find out. The icon and words stay in reading order whichever way the row is filled.
+pub fn off_reason(ui: &mut Ui, ic: &str, text: &str) {
+    let w = off_reason_width(ui, text);
+    let muted = pal(ui.ctx()).muted;
+    ui.allocate_ui_with_layout(egui::vec2(w, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = S1;
+        let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, ic, egui::FontId::new(14.0, theme::icons()), muted);
+        ui.label(RichText::new(text).small().color(muted));
+    });
+}
+
+pub fn admin_note(ui: &mut Ui) {
+    off_reason(ui, icon::ADMIN, NEEDS_ADMIN);
+}
+
+/// How wide `off_reason` is, so a row can leave room for it.
+pub fn off_reason_width(ui: &Ui, text: &str) -> f32 {
+    let g = egui::WidgetText::from(RichText::new(text).small()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Small);
+    14.0 + S1 + g.size().x + 1.0
+}
+
 /// A secondary button with a leading icon.
 pub fn icon_button(ui: &mut Ui, ic: &str, text: &str, enabled: bool) -> Response {
     let mut job = egui::text::LayoutJob::default();

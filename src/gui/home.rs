@@ -344,7 +344,10 @@ impl App {
         let compact = avail < COMPACT;
         // The mark, the gap the layout puts after it, and the space before the words.
         let indent = 20.0 + ui.spacing().item_spacing.x + S4;
-        let text_w = if compact { avail - indent } else { (avail - indent - 230.0).max(160.0) };
+        // A fix greyed out for want of administrator rights says so beside it, which takes room.
+        let blocked = !done && !self.elevated && !leftovers && matches!(fixes.as_slice(), [fx] if fx.needs_admin());
+        let action_w = 230.0 + if blocked { widgets::off_reason_width(ui, widgets::NEEDS_ADMIN) + ui.spacing().item_spacing.x } else { 0.0 };
+        let text_w = if compact { avail - indent } else { (avail - indent - action_w).max(160.0) };
         let title = egui::WidgetText::from(RichText::new(&f.title).family(theme::semibold())).into_galley(
             ui,
             Some(egui::TextWrapMode::Wrap),
@@ -467,8 +470,15 @@ impl App {
                 });
             } else {
                 let blocked = fx.needs_admin() && !self.elevated;
+                // Filled from the right, the reason goes in first so it lands right of the button.
+                if blocked && rtl {
+                    widgets::admin_note(ui);
+                }
                 let r = widgets::secondary_enabled(ui, "Fix it for me", !blocked).on_hover_text(fx.label());
                 let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart Bootmend as administrator first.") } else { r };
+                if blocked && !rtl {
+                    widgets::admin_note(ui);
+                }
                 if r.clicked() {
                     self.ask(Pending::Fix((*fx).clone(), f.title.clone()));
                 }
