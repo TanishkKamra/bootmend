@@ -22,7 +22,46 @@ fn check_on(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
     windows11_version(s, today, f);
     licence(s, f);
     updates(s, today, f);
+    update_block(s, f);
     restore(s, today, f);
+    recovery(s, f);
+}
+
+/// The policy key Windows Update's settings live under, as reg.exe writes it.
+const UPDATE_POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate";
+
+/// Policies that send updates to another server (WSUS) or hide Windows Update. On a home PC these
+/// come from "tweaking" tools; work and school PCs are their IT department's call.
+fn update_block(s: &Snapshot, f: &mut Vec<Finding>) {
+    if super::security::joined(s) {
+        return;
+    }
+    let p = s.system.g("winupdate").g("Policy");
+    let (mut settings, mut details) = (Vec::new(), Vec::new());
+    if p.i("UseWUServer") == Some(1) {
+        settings.extend(["WUServer", "WUStatusServer"].into_iter().filter(|n| p.s(n).is_some()).map(String::from));
+        settings.push(r"AU\UseWUServer".to_string());
+        details.push(format!("Updates are sent to: {}", p.s("WUServer").unwrap_or_else(|| "no server named".into())));
+    }
+    if p.i("SetDisableUXWUAccess") == Some(1) {
+        settings.push("SetDisableUXWUAccess".to_string());
+        details.push("Windows Update's Check for updates button is switched off".to_string());
+    }
+    if !settings.is_empty() {
+        // Hiding the page leaves background updates running; only a redirect stops fixes arriving.
+        let why = if p.i("UseWUServer") == Some(1) {
+            "A system policy sends Windows to another server for updates, so security fixes from Microsoft may not arrive. \"Tweaking\" tools often set this."
+        } else {
+            "A system policy hides Windows Update's buttons, so you can't check for or install updates yourself. \"Tweaking\" tools often set this."
+        };
+        f.push(
+            Finding::new("updates-blocked", SEC, Level::WorthDoing, "Windows Update is blocked by a setting")
+                .why(why)
+                .step("If this PC belongs to a school or company, ask them first. Otherwise, remove the block so Windows gets updates from Microsoft again.")
+                .details(details)
+                .act(Action::Fix(Fix::RemoveUpdateBlock { key: UPDATE_POLICY.into(), settings })),
+        );
+    }
 }
 
 fn date(s: &str) -> Option<NaiveDate> {
@@ -351,6 +390,20 @@ fn restore(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
             }
         }
         None => {}
+    }
+}
+
+/// Windows Recovery's state from its own status file (ReAgent.xml): 0 is switched off. Microsoft
+/// doesn't document the file, hence the best-guess label.
+fn recovery(s: &Snapshot, f: &mut Vec<Finding>) {
+    if s.system.g("recovery").i("InstallState") == Some(0) {
+        f.push(
+            Finding::new("recovery-off", Area::Stability, Level::WorthDoing, "Windows can't repair itself if it fails to start")
+                .why("Windows' recovery tools are switched off. If Windows ever fails to start, it can't run Startup Repair, go back to a restore point or reset itself, and you'd need a USB stick to rescue it.")
+                .step("Switch them back on. It takes a few seconds and changes nothing else.")
+                .conf(Confidence::BestGuess)
+                .act(Action::Fix(Fix::EnableRecovery)),
+        );
     }
 }
 

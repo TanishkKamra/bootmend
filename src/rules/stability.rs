@@ -184,11 +184,95 @@ pub fn hardware_stress_codes(code: u32) -> bool {
     matches!(code, 0x124 | 0x101 | 0x7F)
 }
 
+/// Windows' own record of damage to its files (DISM CheckHealth). Only read with administrator rights.
+fn image_health(s: &Snapshot, f: &mut Vec<Finding>) {
+    let state = s.health.s("imageHealth");
+    let x = match state.as_deref() {
+        Some("Repairable") => Finding::new("windows-damaged", STAB, Level::WorthDoing, "Some of Windows' own files are damaged")
+            .why("Windows has noted damage to its own files. It can make updates fail and cause odd errors, and Windows can usually repair it itself.")
+            .step("Search Start for Terminal, right-click it and choose Run as administrator.")
+            .step("Type DISM /Online /Cleanup-Image /RestoreHealth and press Enter. It needs the internet and can take 10 to 30 minutes.")
+            .step("Then type sfc /scannow, press Enter, and restart when it finishes."),
+        Some("NonRepairable") => Finding::new("windows-damaged", STAB, Level::WorthDoing, "Some of Windows' own files are damaged")
+            .why("Windows has noted damage to its own files that it can't repair by itself. It can make updates fail and cause odd errors.")
+            .step("Back up your important files first.")
+            .step("Then reset Windows and choose Keep my files. It puts a fresh copy of Windows in place; you'll need to reinstall your apps afterwards.")
+            .open("Open Recovery settings", "ms-settings:recovery"),
+        _ => return,
+    };
+    f.push(x.detail(format!("Windows' health check says: {}", state.unwrap_or_default())));
+}
+
+/// Intel's fixes for 13th and 14th Gen desktop processors that ask for too much voltage and wear out:
+/// 0x12B stops the damage, and Intel's newest advice is 0x12F or later.
+fn intel_microcode(s: &Snapshot, f: &mut Vec<Finding>) {
+    let cpu = s.system.g("cpu");
+    let Some(name) = cpu.s("Name") else { return };
+    let Some(c) = Regex::new(r"\bi[579]-1[34]\d{3}([A-Z]*)\b").ok().and_then(|re| re.captures(&name)) else { return };
+    // Only Raptor Lake's own chip (CPUID B0671, which Windows shows as model 183) is affected. Some
+    // i5s under these names are Alder Lake chips, whose microcode is numbered far below 0x12B.
+    if !cpu.s("Identifier").is_some_and(|id| id.contains("Family 6 Model 183 ")) {
+        return;
+    }
+    // K, KF and KS run at 125 W and are named by Intel. 65 W chips without a letter, or with F, are
+    // affected only in part. T (35 W) and the laptop letters (H, HX, U, P) are not.
+    let conf = match &c[1] {
+        "K" | "KF" | "KS" => Confidence::Measured,
+        "" | "F" => Confidence::BestGuess,
+        _ => return,
+    };
+    // Windows keeps an Intel revision in bytes 4 to 7 of an 8-byte value, lowest byte first.
+    let bytes: Option<Vec<u8>> = cpu.g("Microcode").as_array().map(|a| a.iter().filter_map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok())).collect());
+    let Some(rev) = bytes.filter(|b| b.len() == 8).map(|b| u32::from_le_bytes([b[4], b[5], b[6], b[7]])).filter(|r| *r != 0) else { return };
+    let (level, title, why) = if rev < 0x12B {
+        (
+            Level::DoFirst,
+            "Your processor needs a BIOS update to prevent damage",
+            "Some Intel 13th and 14th Gen processors ask for too much voltage, which slowly damages them and causes crashes. A BIOS update with Intel's fix stops it. Damage already done can't be undone, so the sooner the better.",
+        )
+    } else if rev < 0x12F {
+        (
+            Level::WorthDoing,
+            "A newer BIOS fix is out for your processor",
+            "This PC has Intel's main fix for the voltage problem in 13th and 14th Gen processors. Intel has since added one more, for PCs left running lightly for days at a time.",
+        )
+    } else {
+        return;
+    };
+    let mut x = Finding::new("intel-microcode", STAB, level, title)
+        .why(why)
+        .step("Download the newest BIOS from your PC or motherboard maker's support page and follow their steps. Pick one that mentions Intel microcode 0x12F or later.")
+        .step("Keep the PC plugged in and don't switch it off while the BIOS updates.")
+        .detail(format!("Processor: {}", name.trim()))
+        .detail(format!("Microcode now: 0x{rev:X}. Intel's fix is 0x12B, and its newest advice is 0x12F or later."))
+        .conf(conf);
+    if conf == Confidence::BestGuess {
+        x = x.detail("Intel hasn't listed exactly which 65 W chips are affected.");
+    }
+    f.push(x);
+}
+
+/// Windows signs in to a temporary profile when it can't load the usual one, and deletes it at sign-out.
+fn temp_profile(s: &Snapshot, f: &mut Vec<Finding>) {
+    if s.system.g("profile").b("Temporary") == Some(true) {
+        f.push(
+            Finding::new("temp-profile", STAB, Level::DoFirst, "You're signed in with a temporary profile")
+                .why("Windows couldn't load your usual account, so it signed you in to a temporary one. Anything you save to the desktop or Documents now is deleted when you sign out.")
+                .step("Copy anything you've saved since signing in to a USB stick or cloud storage, and save nothing important until this is sorted.")
+                .step("Restart the PC. That often brings your usual account back.")
+                .step("If it doesn't, ask someone technical to repair the profile. Your old files are usually still in C:\\Users."),
+        );
+    }
+}
+
 pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
     gpu_resets(s, f);
     boot_options(s, f);
     pagefile(s, f);
     crash_files(s, f);
+    image_health(s, f);
+    intel_microcode(s, f);
+    temp_profile(s, f);
     let h = &s.health;
     let mut codes: BTreeMap<u32, usize> = BTreeMap::new();
     for b in h.a("bugchecks") {
@@ -287,6 +371,21 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
             let mut x = Finding::new(format!("appcrash-{exe}"), STAB, Level::WorthDoing, format!("{name} crashed {n} times this month"))
                 .why("Repeated crashes of one app are usually fixed by updating or reinstalling it.")
                 .step("Update the app. If that doesn't help, uninstall it and install it again from the maker's site.")
+                .open("Open installed apps", "ms-settings:appsfeatures");
+            if name != exe {
+                x = x.detail(format!("Program file: {exe}"));
+            }
+            f.push(x);
+        }
+    }
+
+    // Same bar as crashes: one app freezing 5 or more times in 30 days (our judgement).
+    for c in h.a("appHangs") {
+        let (Some(name), Some(exe), Some(n)) = (crashed_app(c), c.s("App"), c.i("Count")) else { continue };
+        if n >= 5 {
+            let mut x = Finding::new(format!("appfreeze-{exe}"), STAB, Level::WorthDoing, format!("{name} froze {n} times this month"))
+                .why("It stopped responding and had to be closed. Updating the app usually helps. If not, a driver or running low on memory may be behind it.")
+                .step("Update the app. If it still freezes, uninstall it and install it again from the maker's site.")
                 .open("Open installed apps", "ms-settings:appsfeatures");
             if name != exe {
                 x = x.detail(format!("Program file: {exe}"));

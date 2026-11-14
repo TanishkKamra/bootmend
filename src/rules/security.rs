@@ -24,7 +24,7 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
 }
 
 /// Work and school PCs: their IT department manages these settings.
-fn joined(s: &Snapshot) -> bool {
+pub(super) fn joined(s: &Snapshot) -> bool {
     s.system.g("device").b("Joined") == Some(true)
 }
 

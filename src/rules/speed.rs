@@ -68,6 +68,32 @@ fn memory(s: &Snapshot, f: &mut Vec<Finding>) {
             );
         }
     }
+    // Windows' own warnings that it ran out of memory in the last 30 days. Once can be a one-off;
+    // twice is a pattern (our judgement).
+    let low = s.health.a("lowMemory");
+    if low.len() >= 2 {
+        let mut apps: Vec<(String, usize)> = Vec::new();
+        for exe in low.iter().flat_map(|e| e.strs("Apps")) {
+            let stem = exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(&exe);
+            let mut name = super::security::friendly_app(stem);
+            if let Some(c) = name.get(..1) {
+                name = c.to_uppercase() + &name[1..];
+            }
+            match apps.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, count)) => *count += 1,
+                None => apps.push((name, 1)),
+            }
+        }
+        apps.sort_by_key(|a| std::cmp::Reverse(a.1));
+        f.push(
+            Finding::new("low-memory", SPD, Level::WorthDoing, format!("Windows ran low on memory {} this month", plural(low.len(), "time", "times")))
+                .why("Programs used up all the memory Windows could hand out. When that happens, apps slow down, freeze or close without warning.")
+                .step("Close programs and browser tabs you aren't using.")
+                .step("If the same program tops the list every time, update or reinstall it. It may be holding on to memory it doesn't need.")
+                .step("If it keeps happening with only your usual apps open, more memory would help.")
+                .details(apps.iter().take(5).map(|(n, c)| format!("{n} was among the biggest users {}", plural(*c, "time", "times")))),
+        );
+    }
 }
 
 fn links(s: &Snapshot, f: &mut Vec<Finding>) {

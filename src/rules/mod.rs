@@ -899,4 +899,206 @@ mod tests {
             "only the adapter with the unknown server"
         );
     }
+
+    #[test]
+    fn devices_are_sorted_by_what_is_wrong() {
+        let mut s = base();
+        s.system["problemDevices"] = json!([
+            {"Name": "Microsoft Device Association Root Enumerator", "Class": "SoftwareDevice", "Code": 22, "Bus": "SWD"},
+            {"Name": "USB stick", "Class": "DiskDrive", "Code": 47, "Bus": "USBSTOR"},
+            {"Name": "Card reader", "Class": "SDHost", "Code": 14, "Bus": "PCI"},
+            {"Name": "Onboard sound", "Class": "MEDIA", "Code": 29, "Bus": "PCI"}
+        ]);
+        let f = evaluate(&s);
+        assert!(
+            !f.iter().any(|x| x.id.starts_with("devices") || x.id == "drivers-chipset"),
+            "switched off, ejected or waiting for a restart is not broken: {:?}",
+            f.iter().map(|x| &x.id).collect::<Vec<_>>()
+        );
+        s.system["problemDevices"] = json!([
+            {"Name": "SM Bus Controller", "Class": null, "Code": 28, "Bus": "PCI", "Cc": "0C05"},
+            {"Name": "PCI Simple Communications Controller", "Class": null, "Code": 28, "Bus": "PCI", "Cc": "0780"},
+            {"Name": "Unknown device", "Class": null, "Code": 28, "Bus": "ACPI"},
+            {"Name": "PCI Device", "Class": null, "Code": 28, "Bus": "PCI", "Cc": "1300"},
+            {"Name": "Network Controller", "Class": null, "Code": 28, "Bus": "PCI", "Cc": "0280"},
+            {"Name": "Wireless headset", "Class": null, "Code": 28, "Bus": "BTHENUM"},
+            {"Name": "Unknown USB Device (Device Descriptor Request Failed)", "Class": "USB", "Code": 43, "Bus": "USB"}
+        ]);
+        let f = evaluate(&s);
+        let chipset = f.iter().find(|x| x.id == "drivers-chipset").expect("motherboard parts without a driver");
+        assert_eq!((chipset.level, chipset.details.len()), (Level::WorthDoing, 4));
+        let none = f.iter().find(|x| x.id == "devices-no-driver").expect("other devices without a driver");
+        assert_eq!((none.level, none.details.len()), (Level::WorthDoing, 2));
+        assert!(none.title.starts_with("2 devices"), "{}", none.title);
+        let broken = f.iter().find(|x| x.id == "devices").expect("a driver that fails");
+        assert_eq!((broken.level, broken.details.len()), (Level::WorthDoing, 1));
+    }
+
+    #[test]
+    fn updates_sent_to_another_server_or_hidden_by_a_policy() {
+        const KEY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate";
+        let blocked = |policy: serde_json::Value, joined: bool| {
+            let mut s = base();
+            s.system["winupdate"] = json!({ "Policy": policy });
+            s.system["device"]["Joined"] = json!(joined);
+            evaluate(&s).into_iter().find(|x| x.id == "updates-blocked")
+        };
+        let x =
+            blocked(json!({"WUServer": "http://127.0.0.1:8530", "WUStatusServer": "http://127.0.0.1:8530", "UseWUServer": 1}), false).expect("sent elsewhere");
+        assert_eq!(x.level, Level::WorthDoing);
+        let settings = vec!["WUServer".to_string(), "WUStatusServer".into(), r"AU\UseWUServer".into()];
+        assert_eq!(x.actions, [Action::Fix(Fix::RemoveUpdateBlock { key: KEY.into(), settings })]);
+        assert!(x.details.iter().any(|d| d.contains("127.0.0.1")), "{:?}", x.details);
+        assert!(x.summary.contains("security fixes"), "{}", x.summary);
+        assert!(blocked(json!({"WUServer": "http://wsus", "UseWUServer": 0}), false).is_none(), "a server named but not used");
+        assert!(blocked(json!({"WUServer": "http://wsus", "UseWUServer": 1}), true).is_none(), "work and school PCs are their IT's call");
+        let x = blocked(json!({"SetDisableUXWUAccess": 1}), false).expect("hidden");
+        assert_eq!(x.actions, [Action::Fix(Fix::RemoveUpdateBlock { key: KEY.into(), settings: vec!["SetDisableUXWUAccess".into()] })]);
+        // Hiding the page leaves background updates running (Microsoft's own description), so it
+        // mustn't claim fixes stop arriving.
+        assert!(x.summary.contains("yourself") && !x.summary.contains("security fixes"), "{}", x.summary);
+        assert!(blocked(json!({"SetDisableUXWUAccess": 0}), false).is_none());
+        assert!(blocked(json!(null), false).is_none());
+    }
+
+    #[test]
+    fn damaged_windows_files_need_a_repair() {
+        let state = |v: serde_json::Value| {
+            let mut s = base();
+            s.health = json!({ "imageHealth": v });
+            level_of(&evaluate(&s), "windows-damaged")
+        };
+        assert_eq!(state(json!("Repairable")), Some(Level::WorthDoing));
+        assert_eq!(state(json!("NonRepairable")), Some(Level::WorthDoing));
+        assert_eq!(state(json!("Healthy")), None);
+        assert_eq!(state(json!(null)), None, "only read with administrator rights");
+    }
+
+    #[test]
+    fn intel_13th_and_14th_gen_desktops_need_the_microcode_fix() {
+        let check_die = |id: serde_json::Value, name: &str, microcode: serde_json::Value| {
+            let mut s = base();
+            s.system["cpu"] = json!({ "Name": name, "Identifier": id, "Microcode": microcode });
+            evaluate(&s).into_iter().find(|x| x.id == "intel-microcode")
+        };
+        // Raptor Lake's own chip (CPUID B0671), the one Intel's fix is for.
+        let check = |name: &str, microcode: serde_json::Value| check_die(json!("Intel64 Family 6 Model 183 Stepping 1"), name, microcode);
+        // Windows keeps an Intel revision in bytes 4 to 7 of an 8-byte value, lowest byte first.
+        let rev = |r: u32| {
+            let b = r.to_le_bytes();
+            json!([0, 0, 0, 0, b[0], b[1], b[2], b[3]])
+        };
+        let x = check("13th Gen Intel(R) Core(TM) i9-13900K", rev(0x11F)).expect("before the fix");
+        assert_eq!((x.level, x.confidence), (Level::DoFirst, Confidence::Measured));
+        assert!(x.details.iter().any(|d| d.contains("0x11F")), "{:?}", x.details);
+        assert_eq!(check("Intel(R) Core(TM) i7-14700KF", rev(0x12B)).map(|x| x.level), Some(Level::WorthDoing), "Intel's newest advice is 0x12F");
+        assert!(check("Intel(R) Core(TM) i7-14700K", rev(0x12F)).is_none());
+        assert!(check("Intel(R) Core(TM) i9-14900KS", rev(0x130)).is_none());
+        assert_eq!(check("13th Gen Intel(R) Core(TM) i5-13400F", rev(0x104)).map(|x| x.confidence), Some(Confidence::BestGuess), "some 65 W chips");
+        for name in [
+            "13th Gen Intel(R) Core(TM) i7-13700H",
+            "13th Gen Intel(R) Core(TM) i9-13980HX",
+            "13th Gen Intel(R) Core(TM) i3-13100",
+            "12th Gen Intel(R) Core(TM) i9-12900K",
+            "Intel(R) Core(TM) i9-14900T",
+        ] {
+            assert!(check(name, rev(0x104)).is_none(), "{name} is not affected");
+        }
+        assert!(check("AMD Ryzen 5 3600 6-Core Processor", json!([0x35, 0x10, 0x70, 0x08])).is_none());
+        assert!(check("13th Gen Intel(R) Core(TM) i9-13900K", json!(null)).is_none(), "unread: no guess");
+        // Some 13th and 14th Gen i5s are Alder Lake chips under the new name. They aren't affected,
+        // and their own microcode (0x35 and up) is numbered far below 0x12B.
+        let i5 = "13th Gen Intel(R) Core(TM) i5-13400F";
+        assert!(check_die(json!("Intel64 Family 6 Model 191 Stepping 2"), i5, rev(0x35)).is_none(), "Alder Lake chip");
+        assert!(check_die(json!("Intel64 Family 6 Model 151 Stepping 2"), i5, rev(0x35)).is_none(), "Alder Lake chip");
+        assert!(check_die(json!(null), i5, rev(0x104)).is_none(), "unknown chip: no guess");
+        assert!(check("13th Gen Intel(R) Core(TM) i9-13900K", rev(0)).is_none(), "unread: no guess");
+    }
+
+    #[test]
+    fn a_failed_memory_test_is_do_first() {
+        let test = |id: i64| {
+            let mut s = base();
+            s.health = json!({ "memoryTest": {"Id": id, "Date": "2026-11-01 09:00"} });
+            level_of(&evaluate(&s), "memory-test-failed")
+        };
+        assert_eq!(test(1202), Some(Level::DoFirst));
+        assert_eq!(test(1102), Some(Level::DoFirst));
+        assert_eq!(test(1201), None, "the latest test passed");
+        assert_eq!(test(1101), None);
+    }
+
+    #[test]
+    fn running_low_on_memory_more_than_once() {
+        let low = |n: usize| {
+            let mut s = base();
+            let events: Vec<_> = (0..n).map(|i| json!({"Date": format!("2026-11-0{} 10:00", i + 1), "Apps": ["chrome.exe", "Teams.exe"]})).collect();
+            s.health = json!({ "lowMemory": events });
+            evaluate(&s).into_iter().find(|x| x.id == "low-memory")
+        };
+        assert!(low(1).is_none(), "once can be a one-off");
+        let x = low(3).expect("a pattern");
+        assert_eq!(x.level, Level::WorthDoing);
+        assert!(x.title.contains("3 times"), "{}", x.title);
+        assert!(x.details.iter().any(|d| d.contains("Chrome")), "{:?}", x.details);
+    }
+
+    #[test]
+    fn apps_that_keep_freezing() {
+        let mut s = base();
+        s.health = json!({ "appHangs": [{"App": "WhatsApp.Root.exe", "Name": "WhatsApp", "Count": 6}, {"App": "x.exe", "Count": 4}] });
+        let f = evaluate(&s);
+        let x = f.iter().find(|x| x.id == "appfreeze-WhatsApp.Root.exe").expect("six freezes");
+        assert_eq!(x.level, Level::WorthDoing);
+        assert!(x.title.starts_with("WhatsApp froze 6 times"), "{}", x.title);
+        assert!(!f.iter().any(|x| x.id == "appfreeze-x.exe"), "four is under the bar");
+    }
+
+    #[test]
+    fn windows_recovery_switched_off() {
+        let re = |state: serde_json::Value| {
+            let mut s = base();
+            s.system["recovery"] = json!({ "InstallState": state });
+            evaluate(&s).into_iter().find(|x| x.id == "recovery-off")
+        };
+        let x = re(json!(0)).expect("switched off");
+        assert_eq!((x.level, x.confidence), (Level::WorthDoing, Confidence::BestGuess));
+        assert!(x.actions.contains(&Action::Fix(Fix::EnableRecovery)));
+        assert!(re(json!(1)).is_none());
+        assert!(re(json!(null)).is_none(), "no status file: no guess");
+    }
+
+    #[test]
+    fn drive_firmware_with_known_faults() {
+        let fw = |model: &str, firmware: &str, size: f64, build: &str| {
+            let mut s = base();
+            s.system["os"]["Build"] = json!(build);
+            s.storage = json!({ "disks": [{"Number": 1, "Model": model, "Firmware": firmware, "SizeGB": size}] });
+            evaluate(&s).into_iter().find(|x| x.id == "ssd-firmware-1")
+        };
+        let x = fw("Samsung SSD 990 PRO 2TB", "0B2QJXD7", 1863.0, "26100.1").expect("wears out fast");
+        assert_eq!((x.level, x.confidence), (Level::DoFirst, Confidence::Measured));
+        assert!(fw("Samsung SSD 990 PRO 2TB", "1B2QJXD7", 1863.0, "26100.1").is_none());
+        assert_eq!(fw("Samsung SSD 980 PRO 1TB", "3B2QGXA7", 931.5, "19045.1").map(|x| x.level), Some(Level::DoFirst));
+        assert!(fw("Samsung SSD 980 PRO 1TB", "5B2QGXA7", 931.5, "19045.1").is_none());
+        let x = fw("WD_BLACK SN770 2TB", "731100WD", 1863.0, "26100.2033").expect("blue screens on 24H2");
+        assert_eq!((x.level, x.confidence), (Level::WorthDoing, Confidence::BestGuess));
+        assert!(fw("WD_BLACK SN770 2TB", "731130WD", 1863.0, "26100.1").is_none());
+        assert!(fw("WD_BLACK SN770 1TB", "731100WD", 931.5, "26100.1").is_none(), "only the 2 TB drives");
+        assert!(fw("WD_BLACK SN770 2TB", "731100WD", 1863.0, "22631.4000").is_none(), "only on 24H2 and later");
+        assert!(fw("WD Blue SN580 2TB", "281040WD", 1863.0, "26200.1").is_some());
+        assert!(fw("WD Blue SN5000 2TB", "291010WD", 1863.0, "26200.1").is_some());
+        assert!(fw("WD Blue SN5000 2TB", "291020WD", 1863.0, "26200.1").is_none());
+    }
+
+    #[test]
+    fn a_temporary_profile_is_do_first() {
+        let p = |temp: bool| {
+            let mut s = base();
+            s.system["profile"] = json!({ "Temporary": temp });
+            level_of(&evaluate(&s), "temp-profile")
+        };
+        assert_eq!(p(true), Some(Level::DoFirst));
+        assert_eq!(p(false), None);
+    }
 }

@@ -40,6 +40,22 @@ Try-Section 'stability' {
   $R.appCrashes = @(Get-WinEvent -FilterHashtable @{LogName = 'Application'; Id = 1000; ProviderName = 'Application Error'; StartTime = (Get-Date).AddDays(-30) } -MaxEvents 500 | ForEach-Object { [pscustomobject]@{ App = $_.Properties[0].Value; Path = $_.Properties[10].Value } } | Group-Object App | Sort-Object Count -Descending | Select-Object -First 10 | ForEach-Object {
       $p = $_.Group[0].Path; $vi = $(if ($p -and (Test-Path -LiteralPath $p)) { (Get-Item -LiteralPath $p).VersionInfo } else { $null })
       [ordered]@{ App = $_.Name; Name = $(if ($vi.FileDescription) { $vi.FileDescription.Trim() } elseif ($vi.ProductName) { $vi.ProductName.Trim() } else { $null }); Count = $_.Count } })
+  # Apps that stopped responding and were closed (Application Hang 1002: file name 0, full path 5).
+  $R.appHangs = @(Get-WinEvent -FilterHashtable @{LogName = 'Application'; Id = 1002; ProviderName = 'Application Hang'; StartTime = (Get-Date).AddDays(-30) } -MaxEvents 500 | ForEach-Object { [pscustomobject]@{ App = $_.Properties[0].Value; Path = $_.Properties[5].Value } } | Group-Object App | Sort-Object Count -Descending | Select-Object -First 10 | ForEach-Object {
+      $p = $_.Group[0].Path; $vi = $(if ($p -and (Test-Path -LiteralPath $p)) { (Get-Item -LiteralPath $p).VersionInfo } else { $null })
+      [ordered]@{ App = $_.Name; Name = $(if ($vi.FileDescription) { $vi.FileDescription.Trim() } elseif ($vi.ProductName) { $vi.ProductName.Trim() } else { $null }); Count = $_.Count } })
+  # The latest Windows Memory Diagnostic result: 1101 or 1201 passed, 1102 or 1202 found errors.
+  $R.memoryTest = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-MemoryDiagnostics-Results'; Id = 1101, 1102, 1201, 1202; StartTime = $since } -MaxEvents 1 |
+    ForEach-Object { [ordered]@{ Date = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm'); Id = $_.Id } }
+  # Windows running out of memory to hand out (Resource Exhaustion Detector 2004). The message names
+  # the programs using the most as "chrome.exe (1234)"; file names aren't translated.
+  $R.lowMemory = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Resource-Exhaustion-Detector'; Id = 2004; StartTime = (Get-Date).AddDays(-30) } -MaxEvents 100 | ForEach-Object {
+      [ordered]@{ Date = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm'); Apps = @([regex]::Matches("$($_.Message)", '([^\s,:;()]+\.exe) \(\d+\)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique) } })
+}
+Try-Section 'imageHealth' {
+  # Whether Windows has flagged damage to its own files (DISM CheckHealth). It reads a flag rather
+  # than scanning, and needs administrator rights.
+  if ($IsAdmin) { $R.imageHealth = "$((Repair-WindowsImage -Online -CheckHealth).ImageHealthState)" }
 }
 Try-Section 'boot' {
   function EvData($e) { $h = @{}; ([xml]$e.ToXml()).Event.EventData.Data | ForEach-Object { $h[$_.Name] = $_.'#text' }; $h }

@@ -63,7 +63,9 @@ Try-Section 'os' {
 Try-Section 'cpu' {
   $c = Get-CimInstance Win32_Processor | Select-Object -First 1
   $R.cpu = [ordered]@{ Name = (Clean $c.Name); Maker = $c.Manufacturer; Cores = $c.NumberOfCores; Threads = $c.NumberOfLogicalProcessors; RatedMHz = $c.MaxClockSpeed; CurrentMHz = $c.CurrentClockSpeed
-    L2KB = $c.L2CacheSize; L3KB = $c.L3CacheSize; Socket = $c.SocketDesignation; Identifier = $c.Caption; VirtualizationFirmware = $c.VirtualizationFirmwareEnabled; LoadPct = $c.LoadPercentage }
+    L2KB = $c.L2CacheSize; L3KB = $c.L3CacheSize; Socket = $c.SocketDesignation; Identifier = $c.Caption; VirtualizationFirmware = $c.VirtualizationFirmwareEnabled; LoadPct = $c.LoadPercentage
+    # The processor's loaded microcode, as raw bytes; read in Rust.
+    Microcode = @((Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0').'Update Revision' | ForEach-Object { [int]$_ }) }
 }
 
 Try-Section 'memory' {
@@ -118,7 +120,14 @@ Try-Section 'hardware' {
   $R.input = @((Get-PnpDevice -Class Keyboard -PresentOnly | ForEach-Object { "Keyboard: $($_.FriendlyName)" }) + (Get-PnpDevice -Class Mouse -PresentOnly | ForEach-Object { "Pointer: $($_.FriendlyName)" }) | Select-Object -Unique)
   $R.usbControllers = @(Get-CimInstance Win32_USBController | ForEach-Object { $_.Name } | Select-Object -Unique)
   $R.bluetooth = @(Get-PnpDevice -Class Bluetooth -PresentOnly | Where-Object { $_.FriendlyName -notmatch 'Enumerator|RFCOMM|LE Generic|Device Identification|Avrcp|Hands-Free|Audio Gateway' } | ForEach-Object { $_.FriendlyName } | Select-Object -Unique)
-  $R.problemDevices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.Status -eq 'Error' -or $_.ConfigManagerErrorCode -ne 0 } | ForEach-Object { [ordered]@{ Name = $_.FriendlyName; Class = $_.Class; Code = [int]$_.ConfigManagerErrorCode } })
+  # Bus is where Windows found the device (PCI, ACPI, USB...). For a PCI device with no driver, its
+  # class code ("PCI\CC_0C05") tells a motherboard part from an add-on card in any language.
+  $R.problemDevices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.Status -eq 'Error' -or $_.ConfigManagerErrorCode -ne 0 } | ForEach-Object {
+      $code = [int]$_.ConfigManagerErrorCode
+      # Indexing, not Select-Object -First, which in Windows PowerShell 5.1 can stop this outer loop too.
+      $id = $(if ($code -eq 28 -and $_.InstanceId -like 'PCI\*') { @(@((Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_CompatibleIds).Data) -match '^PCI\\CC_[0-9A-F]{4}$')[0] } else { $null })
+      $cc = $(if ($id) { $id.Substring(7) } else { $null })
+      [ordered]@{ Name = $_.FriendlyName; Class = $_.Class; Code = $code; Bus = ($_.InstanceId -split '\\')[0]; Cc = $cc } })
 }
 $R.isAdmin = $IsAdmin
 Try-Section 'winupdate' {
@@ -139,6 +148,7 @@ Try-Section 'winupdate' {
   $staged = $(if ($R.os.PendingReboot) { Get-WinEvent -FilterHashtable @{ LogName = 'Setup'; ProviderName = 'Microsoft-Windows-Servicing'; Id = 4; StartTime = $os.LastBootUpTime } | Sort-Object TimeCreated | Select-Object -First 1 } else { $null })
   $waiting = @($(if ($first) { [DateTime]::SpecifyKind($first.Date, 'Utc').ToLocalTime() }), $staged.TimeCreated) | Where-Object { $_ } | Sort-Object | Select-Object -First 1
   $pol = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+  $wu = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
   $R.winupdate = [ordered]@{
     LastInstalled = $(if ($ok) { $ok.Date.ToString('yyyy-MM-dd') } else { $null }); LastInstalledTitle = $(if ($ok) { $ok.Title } else { $null })
     Failed = $failed
@@ -146,6 +156,23 @@ Try-Section 'winupdate' {
     PausedSince = $(if ($ux.PauseUpdatesStartTime) { D $ux.PauseUpdatesStartTime } else { $null })
     RestartWaitingSince = $(if ($waiting) { $waiting.ToString('yyyy-MM-dd') } else { $null })
     AutoUpdateOff = ($pol.NoAutoUpdate -eq 1)
+    # Policies that send updates to another server (WSUS) or hide Windows Update.
+    Policy = [ordered]@{ WUServer = $wu.WUServer; WUStatusServer = $wu.WUStatusServer; UseWUServer = $pol.UseWUServer; SetDisableUXWUAccess = $wu.SetDisableUXWUAccess }
   }
+}
+Try-Section 'recovery' {
+  # Windows Recovery's own status file. reagentc /info says the same but needs administrator rights
+  # and answers in the PC's language. InstallState 0 is switched off.
+  [xml]$x = Get-Content -Raw "$env:WINDIR\System32\Recovery\ReAgent.xml"
+  $st = $x.WindowsRE.InstallState.state
+  $R.recovery = [ordered]@{ InstallState = $(if ("$st" -match '^\d+$') { [int]$st } else { $null }) }
+}
+Try-Section 'profile' {
+  # Windows marks the profile Temporary (status bit 1) and signs in to C:\Users\TEMP (or TEMP.<name>)
+  # when it can't load the usual one. The folder name alone isn't enough: an account can be called Temp.
+  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $st = (Get-CimInstance Win32_UserProfile -Filter "SID='$sid'").Status
+  $leaf = Split-Path $env:USERPROFILE -Leaf
+  $R.profile = [ordered]@{ Temporary = ((($st -band 1) -ne 0) -or (($leaf -match '^TEMP(\..+)?$') -and ($leaf -notlike "$env:USERNAME*"))) }
 }
 Emit

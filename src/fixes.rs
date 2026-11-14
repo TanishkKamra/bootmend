@@ -67,6 +67,13 @@ pub enum Fix {
         key: String,
         settings: Vec<String>,
     },
+    EnableRecovery,
+    /// Update policies that send updates to another server or hide Windows Update. `key` as reg.exe
+    /// writes it; a setting in a subkey is named "AU\UseWUServer".
+    RemoveUpdateBlock {
+        key: String,
+        settings: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -120,6 +127,8 @@ impl Fix {
             Fix::TurnOffProxy { .. } => "Turn off the proxy",
             Fix::DnsAutomatic { .. } => "Use automatic DNS",
             Fix::RemoveBrowserPolicies { .. } => "Remove the locked settings",
+            Fix::EnableRecovery => "Switch on Windows Recovery",
+            Fix::RemoveUpdateBlock { .. } => "Unblock Windows Update",
         }
     }
 
@@ -149,6 +158,8 @@ impl Fix {
             Fix::TurnOffProxy { .. } => "Web traffic will go straight to the internet again. If a VPN or another tool stops working, switch the proxy back on from History. Restart your browser afterwards.".into(),
             Fix::DnsAutomatic { adapter, servers } => format!("{adapter} will use the DNS servers your router hands out. To go back to {}, undo this from History.", servers.join(", ")),
             Fix::RemoveBrowserPolicies { browser, .. } => format!("The locked settings will be removed from {browser}, after saving a copy so you can put them back from History. Restart {browser} afterwards."),
+            Fix::EnableRecovery => "Windows' recovery tools will be switched back on, so it can repair itself or reset if it ever fails to start. You can switch them off again from History.".into(),
+            Fix::RemoveUpdateBlock { .. } => "The settings blocking Windows Update will be removed, after saving a copy so you can put them back from History. Windows then gets updates from Microsoft again.".into(),
         }
     }
 
@@ -157,7 +168,7 @@ impl Fix {
         match self {
             Fix::DisableStartup { approved_key, .. } | Fix::EnableStartup { approved_key, .. } => approved_key.starts_with("HKLM"),
             Fix::TurnOffProxy { winhttp, .. } => !winhttp.is_empty(),
-            Fix::RemoveBrowserPolicies { key, .. } => key.starts_with("HKLM"),
+            Fix::RemoveBrowserPolicies { key, .. } | Fix::RemoveUpdateBlock { key, .. } => key.starts_with("HKLM"),
             _ => true,
         }
     }
@@ -293,26 +304,35 @@ impl Fix {
                 let list = servers.iter().map(|x| ps_quote(x)).collect::<Vec<_>>().join(",");
                 (format!("Set-DnsClientServerAddress -InterfaceAlias {a} -ResetServerAddresses"), format!("Set-DnsClientServerAddress -InterfaceAlias {a} -ServerAddresses {list}"))
             }
-            Fix::RemoveBrowserPolicies { browser, key, settings } => {
-                let hive = key.split('\\').next().unwrap_or_default();
-                let f = ps_quote(&backup_file(&format!("policies-{browser}-{hive}"), "reg"));
-                let (reg, path) = (ps_quote(key), ps_quote(&format!("Registry::{key}")));
-                let names = settings.iter().map(|x| ps_quote(x)).collect::<Vec<_>>().join(", ");
-                // A policy is a value on the browser's key, or a subkey (lists, Firefox's groups).
-                let apply = format!(
-                    r#"{NATIVE}$f = {f}
+            Fix::RemoveBrowserPolicies { browser, key, settings } => remove_policies(&format!("policies-{browser}"), key, settings),
+            Fix::EnableRecovery => (
+                format!("{NATIVE}if (Native {{ reagentc.exe /enable }}) {{ throw 'Windows could not switch its recovery tools back on' }}"),
+                format!("{NATIVE}if (Native {{ reagentc.exe /disable }}) {{ throw 'Windows could not switch its recovery tools off' }}"),
+            ),
+            Fix::RemoveUpdateBlock { key, settings } => remove_policies("policies-windowsupdate", key, settings),
+        }
+    }
+}
+
+/// Saves a copy of a policy key, then removes the named settings from it: values, or subkeys (lists,
+/// Firefox's groups). A name with a backslash is in a subkey ("AU\UseWUServer"). Undo imports the copy.
+fn remove_policies(what: &str, key: &str, settings: &[String]) -> (String, String) {
+    let hive = key.split('\\').next().unwrap_or_default();
+    let f = ps_quote(&backup_file(&format!("{what}-{hive}"), "reg"));
+    let (reg, path) = (ps_quote(key), ps_quote(&format!("Registry::{key}")));
+    let names = settings.iter().map(|x| ps_quote(x)).collect::<Vec<_>>().join(", ");
+    let apply = format!(
+        r#"{NATIVE}$f = {f}
 if (Native {{ reg.exe export {reg} $f /y }}) {{ throw 'Could not save a copy of the settings first, so nothing was changed' }}
 $p = {path}
 foreach ($n in @({names})) {{
-  if (Test-Path -LiteralPath "$p\$n") {{ Remove-Item -LiteralPath "$p\$n" -Recurse }}
-  if ((Get-ItemProperty -LiteralPath $p).PSObject.Properties.Name -contains $n) {{ Remove-ItemProperty -LiteralPath $p -Name $n }}
+  $i = $n.LastIndexOf('\'); $k = $(if ($i -ge 0) {{ "$p\$($n.Substring(0, $i))" }} else {{ $p }}); $v = $n.Substring($i + 1)
+  if (Test-Path -LiteralPath "$k\$v") {{ Remove-Item -LiteralPath "$k\$v" -Recurse }}
+  if ((Get-ItemProperty -LiteralPath $k).PSObject.Properties.Name -contains $v) {{ Remove-ItemProperty -LiteralPath $k -Name $v }}
 }}"#
-                );
-                let undo = format!("{NATIVE}$f = {f}\nif (Native {{ reg.exe import $f }}) {{ throw 'Could not put the settings back from the saved copy' }}");
-                (apply, undo)
-            }
-        }
-    }
+    );
+    let undo = format!("{NATIVE}$f = {f}\nif (Native {{ reg.exe import $f }}) {{ throw 'Could not put the settings back from the saved copy' }}");
+    (apply, undo)
 }
 
 /// Where a copy of settings is kept before they are removed, so undo can put them back.
@@ -484,6 +504,16 @@ mod tests {
         assert!(u.contains(backup) && u.contains("ReadAllLines") && u.contains("PagingFiles"), "puts back the exact page files: {u}");
         let (a, u) = Fix::EnableCrashFiles.scripts();
         assert!(a.contains("CrashDumpEnabled -Value 7") && u.contains("CrashDumpEnabled -Value 0"), "{a} / {u}");
+        let (a, u) = Fix::EnableRecovery.scripts();
+        assert!(a.contains("reagentc.exe /enable") && a.contains("throw") && u.contains("reagentc.exe /disable"), "{a} / {u}");
+        let w = Fix::RemoveUpdateBlock {
+            key: r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate".into(),
+            settings: vec!["WUServer".into(), r"AU\UseWUServer".into()],
+        };
+        let (a, u) = w.scripts();
+        let backup = a.lines().find(|l| l.starts_with("$f = ")).expect("backup path");
+        assert!(a.contains("export") && a.contains(r"'AU\UseWUServer'") && u.contains("import") && u.contains(backup), "{a} / {u}");
+        assert!(w.needs_admin());
         for fx in [Fix::EnableCloudProtection, Fix::EnableTrim, Fix::EnableDriverBlocklist] {
             let (a, u) = fx.scripts();
             assert!(!a.is_empty() && !u.is_empty() && a != u, "{fx:?}");
@@ -518,6 +548,11 @@ mod tests {
                 browser: "Chrome".into(),
                 key: r"HKLM\SOFTWARE\Policies\Google\Chrome".into(),
                 settings: vec!["HomepageLocation".into()],
+            },
+            Fix::EnableRecovery,
+            Fix::RemoveUpdateBlock {
+                key: r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate".into(),
+                settings: vec!["WUServer".into(), r"AU\UseWUServer".into()],
             },
         ]
     }
@@ -569,6 +604,35 @@ mod tests {
         assert_eq!(state(), "http://x.example|1|True");
         let backup = apply.lines().find_map(|l| l.strip_prefix("$f = ")).unwrap().trim_matches('\'').to_string();
         run_ps(r"Remove-Item -Path 'HKCU:\Software\bootmend-selftest' -Recurse").unwrap();
+        std::fs::remove_file(backup).unwrap();
+    }
+
+    /// Removes update-blocking values, one of them in a subkey, from a throwaway key under HKCU, then puts them back.
+    #[test]
+    #[ignore = "writes to the registry; run with --ignored"]
+    fn update_block_fix_and_undo_on_a_scratch_key() {
+        let setup = r#"$k = 'HKCU:\Software\bootmend-selftest-wu\WindowsUpdate'; New-Item "$k\AU" -Force | Out-Null; Set-ItemProperty $k -Name WUServer -Value 'http://127.0.0.1:8530'; Set-ItemProperty $k -Name Keep -Value 1; Set-ItemProperty "$k\AU" -Name UseWUServer -Value 1 -Type DWord; Set-ItemProperty "$k\AU" -Name AUOptions -Value 4 -Type DWord"#;
+        run_ps(setup).unwrap();
+        let state = || {
+            let o = powershell(
+                r#"$k = 'HKCU:\Software\bootmend-selftest-wu\WindowsUpdate'; '{0}|{1}|{2}|{3}' -f (Get-ItemProperty $k).WUServer, (Get-ItemProperty $k).Keep, (Get-ItemProperty "$k\AU").UseWUServer, (Get-ItemProperty "$k\AU").AUOptions"#,
+                Duration::from_secs(60),
+            )
+            .unwrap();
+            o.stdout.trim().to_string()
+        };
+        assert_eq!(state(), "http://127.0.0.1:8530|1|1|4");
+        let f = Fix::RemoveUpdateBlock {
+            key: r"HKCU\Software\bootmend-selftest-wu\WindowsUpdate".into(),
+            settings: vec!["WUServer".into(), r"AU\UseWUServer".into()],
+        };
+        let (apply, undo) = f.scripts();
+        run_ps(&apply).unwrap();
+        assert_eq!(state(), "|1||4", "only the blocking values go");
+        run_ps(&undo).unwrap();
+        assert_eq!(state(), "http://127.0.0.1:8530|1|1|4");
+        let backup = apply.lines().find_map(|l| l.strip_prefix("$f = ")).unwrap().trim_matches('\'').to_string();
+        run_ps(r"Remove-Item -Path 'HKCU:\Software\bootmend-selftest-wu' -Recurse").unwrap();
         std::fs::remove_file(backup).unwrap();
     }
 }
