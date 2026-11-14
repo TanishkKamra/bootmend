@@ -1,22 +1,16 @@
 //! Small building blocks shared by every page.
 
-use super::theme::{self, pal, Pal, CONTROL_RADIUS, RADIUS, S2, S3, S4};
+use super::theme::{self, pal, Pal, CONTROL_RADIUS, RADIUS, S1, S2, S3, S4};
 use crate::rules::Level;
 use eframe::egui::{self, Color32, CornerRadius, Margin, Response, RichText, Sense, Stroke, Ui};
 use egui_extras::{Column, TableBuilder};
 
 pub mod icon {
     pub const HOME: &str = "\u{E80F}";
-    pub const BULB: &str = "\u{EA80}";
     pub const PC: &str = "\u{E7F8}";
-    pub const DRIVE: &str = "\u{EDA2}";
     pub const NETWORK: &str = "\u{E968}";
     pub const SHIELD: &str = "\u{EA18}";
-    pub const APPS: &str = "\u{E71D}";
-    pub const POWER: &str = "\u{E7E8}";
-    pub const CRASH: &str = "\u{E783}";
     pub const CHANGES: &str = "\u{E81C}";
-    pub const SCAN: &str = "\u{E721}";
     pub const UNDO: &str = "\u{E7A7}";
     pub const REPORT: &str = "\u{E8A5}";
     pub const LOCK: &str = "\u{E72E}";
@@ -28,8 +22,9 @@ pub mod icon {
     pub const FOLDER: &str = "\u{E8B7}";
     pub const ADMIN: &str = "\u{E7EF}";
     pub const CLEAN: &str = "\u{E74D}";
-    pub const ACTIVITY: &str = "\u{E9D9}";
     pub const SETTINGS: &str = "\u{E713}";
+    pub const REPAIR: &str = "\u{E90F}";
+    pub const HISTORY: &str = "\u{E81C}";
 }
 
 pub fn ico(ch: &str, size: f32) -> RichText {
@@ -115,6 +110,57 @@ pub fn icon_button(ui: &mut Ui, ic: &str, text: &str, enabled: bool) -> Response
     job.append(ic, 0.0, egui::TextFormat { font_id: egui::FontId::new(14.0, theme::icons()), color, valign: egui::Align::Center, ..Default::default() });
     job.append(text, S2, egui::TextFormat { font_id: egui::TextStyle::Button.resolve(ui.style()), color, valign: egui::Align::Center, ..Default::default() });
     ui.add_enabled(enabled, egui::Button::new(job).min_size(egui::vec2(0.0, 32.0)))
+}
+
+/// A button with no frame until the pointer is on it, for quiet actions beside a title.
+pub fn subtle_button(ui: &mut Ui, ic: &str, text: &str) -> Response {
+    let p = pal(ui.ctx());
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        for (v, wash) in [(&mut w.inactive, 0.0), (&mut w.hovered, 0.06), (&mut w.active, 0.09)] {
+            v.weak_bg_fill = p.ink.gamma_multiply(wash);
+            v.bg_stroke = Stroke::NONE;
+        }
+        icon_button(ui, ic, text, true)
+    })
+    .inner
+}
+
+/// Tabs across the top of a place, like Windows' selector bar: the current tab in the text
+/// colour with a short accent bar under it, the others muted. Returns the tab clicked.
+pub fn selector_bar(ui: &mut Ui, labels: &[&str], current: usize) -> Option<usize> {
+    let p = pal(ui.ctx());
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (i, label) in labels.iter().enumerate() {
+            let on = i == current;
+            // Measured in semibold so a tab never changes width when it's picked.
+            let wide = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::new(14.0, theme::semibold()), p.ink);
+            let (rect, r) = ui.allocate_exact_size(egui::vec2(wide.size().x + 2.0 * S3, 40.0), Sense::click());
+            r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, *label));
+            ui.ctx().accesskit_node_builder(r.id, |b| {
+                b.set_role(egui::accesskit::Role::Tab);
+                b.set_selected(on);
+            });
+            let painter = ui.painter();
+            if r.hovered() && !on {
+                painter.rect_filled(rect.shrink2(egui::vec2(0.0, S1)), CornerRadius::same(CONTROL_RADIUS), p.ink.gamma_multiply(0.05));
+            }
+            let font = egui::FontId::new(14.0, if on { theme::semibold() } else { egui::FontFamily::Proportional });
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, *label, font, if on || r.hovered() { p.ink } else { p.muted });
+            if on {
+                let bar = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.bottom() - 1.5), egui::vec2(16.0, 3.0));
+                painter.rect_filled(bar, CornerRadius::same(u8::MAX), p.accent);
+            }
+            if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                picked = Some(i);
+            }
+        }
+    });
+    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().rect_filled(line, CornerRadius::ZERO, p.line);
+    picked
 }
 
 /// An on/off switch, like the ones in Windows Settings. The caller shows "On"/"Off" beside it,
@@ -207,6 +253,14 @@ pub fn page_title(ui: &mut Ui, title: &str) -> Response {
     let r = ui.label(RichText::new(title).text_style(egui::TextStyle::Heading));
     heading_role(ui, &r, 1, title);
     r
+}
+
+/// A heading inside a section, such as a part of one card.
+pub fn subsection(ui: &mut Ui, title: &str) {
+    ui.add_space(S3);
+    let r = ui.label(RichText::new(title).text_style(theme::title()));
+    heading_role(ui, &r, 3, title);
+    ui.add_space(S1);
 }
 
 pub fn section(ui: &mut Ui, title: &str) {
@@ -344,19 +398,19 @@ pub fn bar(ui: &mut Ui, name: &str, fraction: f32, fill: Color32) {
 /// A clickable row in the sidebar.
 pub fn nav_item(ui: &mut Ui, ic: &str, text: &str, selected: bool, badge: Option<usize>) -> Response {
     let p = pal(ui.ctx());
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::click());
-    let bg = if selected {
-        p.accent_soft
-    } else if resp.hovered() {
-        // A faint wash of the text colour, as Windows uses, so hover shows on any sidebar fill,
-        // Mica included.
-        p.ink.gamma_multiply(0.07)
-    } else {
-        Color32::TRANSPARENT
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), Sense::click());
+    // A faint wash of the text colour, as Windows uses, so it shows on any sidebar fill, Mica
+    // included.
+    let wash = match (selected, resp.hovered()) {
+        (true, true) => 0.09,
+        (true, false) => 0.06,
+        (false, true) => 0.04,
+        (false, false) => 0.0,
     };
+    let bg = p.ink.gamma_multiply(wash);
     ui.painter().rect_filled(rect, CornerRadius::same(CONTROL_RADIUS), bg);
     if selected {
-        let bar = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 9.0), egui::vec2(3.0, 16.0));
+        let bar = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 10.0), egui::vec2(3.0, 16.0));
         ui.painter().rect_filled(bar, CornerRadius::same(u8::MAX), p.accent);
     }
     let y = rect.center().y;
@@ -406,7 +460,8 @@ mod tests {
         assert!(!frame(&ctx, vec![]), "no ring before anything has focus");
         frame(&ctx, vec![key(egui::Key::Tab)]);
         assert!(frame(&ctx, vec![]), "Tab gives the button focus and a ring");
-        let click = egui::Event::PointerButton { pos: egui::pos2(5.0, 5.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
+        let click =
+            egui::Event::PointerButton { pos: egui::pos2(5.0, 5.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
         frame(&ctx, vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0)), click]);
         assert!(!frame(&ctx, vec![]), "a click hides the ring");
     }

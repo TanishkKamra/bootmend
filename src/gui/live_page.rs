@@ -108,7 +108,6 @@ impl App {
     }
 
     pub(super) fn net_check(&mut self, ui: &mut Ui) {
-        section(ui, "Connection check");
         let busy = self.busy.contains("net");
         let mut start = false;
         card(ui, |ui| {

@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- Renders one layer of the Keystone mark at 256 px on a transparent background, for the app's
+     own drawing: the stones (light or dark) and the keystone, seated. The app raises the keystone
+     itself, so it can animate the drop. Pick the layer with the hash: #stones-light,
+     #stones-dark or #keystone. Render with headless Edge:
+     msedge --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1
+       --default-background-color=00000000 --window-size=256,256
+       --screenshot=assets/keystone/<layer>.png "file:///.../design/logo/layers.html#<layer>" -->
+<meta charset="utf-8">
+<style>html,body{margin:0;background:transparent}svg{display:block}</style>
+<svg id="m" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="256" height="256">
+  <defs>
+    <linearGradient id="graph" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#474B54"/><stop offset="1" stop-color="#1D1F24"/></linearGradient>
+    <linearGradient id="silver" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F4F5F7"/><stop offset="1" stop-color="#B4BAC4"/></linearGradient>
+    <linearGradient id="acc" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6A92FF"/><stop offset="1" stop-color="#2F5BEA"/></linearGradient>
+    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="48" height="48">
+      <rect width="48" height="48" fill="#fff"/>
+      <path d="M18.66 27.62L8.14 19.98M29.34 27.62L39.86 19.98M4.4 31.5H16.6M31.4 31.5H43.6" stroke="#000" stroke-width="1.6"/>
+      <path d="M16.08 11.40A21.6 21.6 0 0 1 31.92 11.40L26.42 25.36A6.6 6.6 0 0 0 21.58 25.36Z" fill="#000"/>
+    </mask>
+  </defs>
+  <g id="stones" transform="translate(24 0) scale(1.08 1) translate(-24 0)">
+    <g mask="url(#cut)">
+      <path d="M5.40 31.50A18.6 18.6 0 0 1 42.60 31.50L31.60 31.50A7.6 7.6 0 0 0 16.40 31.50Z"/>
+      <path d="M5.4 31.5H16.4V44H5.4Z M31.6 31.5H42.6V44H31.6Z"/>
+    </g>
+  </g>
+  <g id="keystone" fill="url(#acc)" transform="translate(24 0) scale(1.08 1) translate(-24 0)">
+    <path d="M18.89 11.75A20.4 20.4 0 0 1 29.11 11.75L25.75 24.72A7 7 0 0 0 22.25 24.72Z"/>
+  </g>
+</svg>
+<script>
+  const layer = location.hash.slice(1) || 'stones-light';
+  const stones = document.getElementById('stones'), key = document.getElementById('keystone');
+  if (layer === 'keystone') stones.remove(); else key.remove();
+  stones.setAttribute('fill', layer === 'stones-dark' ? 'url(#silver)' : 'url(#graph)');
+</script>

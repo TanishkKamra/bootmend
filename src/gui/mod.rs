@@ -1,6 +1,7 @@
 //! The desktop window: navigation, background jobs and confirmations.
 
 mod cleanup_page;
+mod keystone;
 mod live_page;
 mod pages;
 mod schedule_ui;
@@ -24,94 +25,131 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
-use theme::{pal, S2, S3, S4, S5, S6};
+use theme::{pal, S1, S2, S3, S4, S5, S6};
 use widgets::{ico, icon};
 
+/// The places in the sidebar. Settings sits at its foot, the way Windows apps place it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Page {
-    Overview,
-    Suggestions,
-    ThisPc,
-    Storage,
-    Network,
-    Security,
-    Software,
-    Startup,
-    Crashes,
-    Cleanup,
-    Live,
-    Changes,
-    Scan,
+pub enum Place {
+    Home,
+    TuneUp,
+    MyPc,
     History,
-    Report,
     Settings,
-    Privacy,
-    About,
 }
 
-impl Page {
-    pub const ALL: [Page; 18] = [
-        Page::Overview,
-        Page::Suggestions,
-        Page::ThisPc,
-        Page::Storage,
-        Page::Network,
-        Page::Security,
-        Page::Software,
-        Page::Startup,
-        Page::Crashes,
-        Page::Cleanup,
-        Page::Live,
-        Page::Changes,
-        Page::Scan,
-        Page::History,
-        Page::Report,
-        Page::Settings,
-        Page::Privacy,
-        Page::About,
-    ];
+impl Place {
+    pub const MAIN: [Place; 4] = [Place::Home, Place::TuneUp, Place::MyPc, Place::History];
     pub fn title(self) -> &'static str {
         match self {
-            Page::Overview => "Overview",
-            Page::Suggestions => "Suggestions",
-            Page::ThisPc => "This PC",
-            Page::Storage => "Storage",
-            Page::Network => "Network",
-            Page::Security => "Security",
-            Page::Software => "Apps & extensions",
-            Page::Startup => "Startup & background",
-            Page::Crashes => "Crashes",
-            Page::Cleanup => "Free up space",
-            Page::Live => "What's running",
-            Page::Changes => "Changes",
-            Page::Scan => "Virus check",
-            Page::History => "History & undo",
-            Page::Report => "Save a report",
-            Page::Settings => "Settings",
-            Page::Privacy => "Privacy",
-            Page::About => "About",
+            Place::Home => "Home",
+            Place::TuneUp => "Tune-up",
+            Place::MyPc => "My PC",
+            Place::History => "History",
+            Place::Settings => "Settings",
         }
     }
     fn icon(self) -> &'static str {
         match self {
-            Page::Overview => icon::HOME,
-            Page::Suggestions => icon::BULB,
-            Page::ThisPc => icon::PC,
-            Page::Storage => icon::DRIVE,
-            Page::Network => icon::NETWORK,
-            Page::Security => icon::SHIELD,
-            Page::Software => icon::APPS,
-            Page::Startup => icon::POWER,
-            Page::Crashes => icon::CRASH,
-            Page::Cleanup => icon::CLEAN,
-            Page::Live => icon::ACTIVITY,
-            Page::Changes => icon::CHANGES,
-            Page::Scan => icon::SCAN,
-            Page::History => icon::UNDO,
-            Page::Report => icon::REPORT,
-            Page::Settings => icon::SETTINGS,
-            Page::Privacy => icon::LOCK,
-            Page::About => icon::INFO,
+            Place::Home => icon::HOME,
+            Place::TuneUp => icon::REPAIR,
+            Place::MyPc => icon::PC,
+            Place::History => icon::HISTORY,
+            Place::Settings => icon::SETTINGS,
+        }
+    }
+    /// The tabs across the top of the place, in order. A place with one view has none.
+    pub fn tabs(self) -> &'static [Page] {
+        match self {
+            Place::Home | Place::Settings => &[],
+            Place::TuneUp => &[Page::Cleanup, Page::Startup, Page::Live, Page::NetCheck],
+            Place::MyPc => &[Page::ThisPc, Page::Storage, Page::Security, Page::Software, Page::Network, Page::Crashes],
+            Place::History => &[Page::History, Page::Changes, Page::Trends, Page::Saved],
+        }
+    }
+    fn first(self) -> Page {
+        match self {
+            Place::Home => Page::Home,
+            Place::Settings => Page::Settings,
+            _ => self.tabs()[0],
+        }
+    }
+}
+
+/// One view: a tab inside a place, or the whole of a place that has no tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Page {
+    Home,
+    Suggestions,
+    Report,
+    Cleanup,
+    Startup,
+    Live,
+    NetCheck,
+    ThisPc,
+    Storage,
+    Security,
+    Software,
+    Network,
+    Crashes,
+    History,
+    Changes,
+    Trends,
+    Saved,
+    Settings,
+}
+
+impl Page {
+    pub const ALL: [Page; 18] = [
+        Page::Home,
+        Page::Suggestions,
+        Page::Report,
+        Page::Cleanup,
+        Page::Startup,
+        Page::Live,
+        Page::NetCheck,
+        Page::ThisPc,
+        Page::Storage,
+        Page::Security,
+        Page::Software,
+        Page::Network,
+        Page::Crashes,
+        Page::History,
+        Page::Changes,
+        Page::Trends,
+        Page::Saved,
+        Page::Settings,
+    ];
+    pub fn place(self) -> Place {
+        match self {
+            Page::Home | Page::Suggestions | Page::Report => Place::Home,
+            Page::Cleanup | Page::Startup | Page::Live | Page::NetCheck => Place::TuneUp,
+            Page::ThisPc | Page::Storage | Page::Security | Page::Software | Page::Network | Page::Crashes => Place::MyPc,
+            Page::History | Page::Changes | Page::Trends | Page::Saved => Place::History,
+            Page::Settings => Place::Settings,
+        }
+    }
+    /// The tab's name, or the view's own name for Home's inner views.
+    pub fn title(self) -> &'static str {
+        match self {
+            Page::Home => "Home",
+            Page::Suggestions => "Suggestions",
+            Page::Report => "Save a report",
+            Page::Cleanup => "Free up space",
+            Page::Startup => "Startup apps",
+            Page::Live => "What's running",
+            Page::NetCheck => "Connection check",
+            Page::ThisPc => "Hardware",
+            Page::Storage => "Storage",
+            Page::Security => "Security",
+            Page::Software => "Apps",
+            Page::Network => "Network",
+            Page::Crashes => "Crashes",
+            Page::History => "Fixes",
+            Page::Changes => "Since last check",
+            Page::Trends => "Over time",
+            Page::Saved => "Saved checks",
+            Page::Settings => "Settings",
         }
     }
     fn slug(self) -> String {
@@ -217,6 +255,8 @@ pub struct UiState {
     pub last_report: Option<PathBuf>,
     pub show_reads: bool,
     pub scroll_top: bool,
+    /// The tab last open in each place, so going back to a place returns to it.
+    pub last_tab: HashMap<Place, Page>,
     /// What sorts the What's running table: 0 processor, 1 memory, 2 drive.
     pub live_sort: usize,
 }
@@ -281,7 +321,7 @@ impl App {
         let (tx, rx) = channel();
         let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this-pc".into());
         let mut app = App {
-            page: Page::Overview,
+            page: Page::Home,
             snap: None,
             findings: vec![],
             changes: vec![],
@@ -415,7 +455,14 @@ impl App {
 
     fn go(&mut self, p: Page) {
         self.page = p;
+        self.ui.last_tab.insert(p.place(), p);
         self.ui.scroll_top = true;
+    }
+
+    /// Opens a place at the tab last used there. Home always opens on its plan.
+    fn go_place(&mut self, pl: Place) {
+        let p = if pl == Place::Home { Page::Home } else { self.ui.last_tab.get(&pl).copied().unwrap_or(pl.first()) };
+        self.go(p);
     }
 
     fn spawn(&self, ctx: &egui::Context, work: impl FnOnce() -> Job + Send + 'static) {
@@ -655,7 +702,7 @@ impl App {
                 Some(Ok(s)) => {
                     self.checking = None;
                     self.set_snapshot(s);
-                    self.go(Page::Overview);
+                    self.go(Page::Home);
                 }
                 Some(Err(e)) => {
                     self.checking = None;
@@ -801,63 +848,61 @@ impl App {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        let p = pal(ui.ctx());
-        ui.add_space(S5);
+        ui.add_space(S4);
         ui.horizontal(|ui| {
             ui.add_space(S3);
-            ui.label(ico(icon::PC, 20.0).color(p.accent));
+            keystone::mark(ui, 24.0);
+            ui.add_space(S1);
             ui.label(RichText::new("Bootmend").text_style(theme::title()));
         });
         ui.add_space(S5);
         let do_first = self.findings.iter().filter(|f| f.level == rules::Level::DoFirst).count();
-        let groups: [(&str, &[Page]); 4] = [
-            ("", &[Page::Overview, Page::Suggestions]),
-            ("Details", &[Page::ThisPc, Page::Storage, Page::Network, Page::Security, Page::Software, Page::Startup, Page::Crashes]),
-            ("Tools", &[Page::Cleanup, Page::Live, Page::Changes, Page::Scan, Page::History, Page::Report]),
-            ("This app", &[Page::Settings, Page::Privacy, Page::About]),
-        ];
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            for (label, pages) in groups {
-                if !label.is_empty() {
-                    ui.add_space(S3);
-                    ui.horizontal(|ui| {
-                        ui.add_space(S3);
-                        ui.label(RichText::new(label).small().color(p.muted));
-                    });
-                }
-                for pg in pages {
-                    let badge = (*pg == Page::Suggestions).then_some(do_first);
-                    if widgets::nav_item(ui, pg.icon(), pg.title(), self.page == *pg, badge).clicked() {
-                        self.go(*pg);
-                    }
-                }
+        let here = self.page.place();
+        ui.spacing_mut().item_spacing.y = S1;
+        for pl in Place::MAIN {
+            let badge = (pl == Place::Home).then_some(do_first);
+            if widgets::nav_item(ui, pl.icon(), pl.title(), here == pl, badge).clicked() {
+                self.go_place(pl);
             }
-            ui.add_space(S4);
+        }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add_space(S3);
+            let pl = Place::Settings;
+            if widgets::nav_item(ui, pl.icon(), pl.title(), here == pl, None).clicked() {
+                self.go_place(pl);
+            }
         });
     }
 
+    /// The page title, the place's quiet actions, its tabs and a line on what this view shows.
     fn header(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str) {
         let p = pal(ui.ctx());
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
+        let place = self.page.place();
+        // Below about 700 px of content, the actions move under the title instead of crowding it.
+        if ui.available_width() >= 700.0 {
+            ui.horizontal(|ui| {
                 widgets::page_title(ui, title);
-                if !subtitle.is_empty() {
-                    ui.label(RichText::new(subtitle).color(p.muted));
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.header_actions(ui, place, true));
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::icon_button(ui, icon::REFRESH, "Check again", true).on_hover_text("Run all checks again. Takes about a minute.").clicked() {
-                    self.start_check();
-                }
-                if let Some(s) = &self.snap {
-                    widgets::small(ui, format!("Checked {}", crate::util::when_words(&s.taken, chrono::Local::now().date_naive())));
-                }
-            });
-        });
+        } else {
+            widgets::page_title(ui, title);
+            ui.horizontal_wrapped(|ui| self.header_actions(ui, place, false));
+        }
+        let tabs = place.tabs();
+        if let Some(cur) = tabs.iter().position(|t| *t == self.page) {
+            ui.add_space(S2);
+            let labels: Vec<&str> = tabs.iter().map(|t| t.title()).collect();
+            if let Some(i) = widgets::selector_bar(ui, &labels, cur) {
+                self.go(tabs[i]);
+            }
+        }
+        if !subtitle.is_empty() {
+            ui.add_space(S3);
+            ui.label(RichText::new(subtitle).color(p.muted));
+        }
         ui.add_space(S4);
         // Only where the missing details would show up; elsewhere the note is noise.
-        if !self.elevated && !self.ui.banner_closed && matches!(self.page, Page::Overview | Page::Security | Page::Crashes | Page::Storage) {
+        if !self.elevated && !self.ui.banner_closed && matches!(self.page, Page::Home | Page::Security | Page::Crashes | Page::Storage) {
             let mut close = false;
             let mut elevate = false;
             widgets::note(ui, p.blue, p.blue_bg, icon::ADMIN, |ui| {
@@ -872,6 +917,40 @@ impl App {
             }
             self.ui.banner_closed |= close;
             ui.add_space(S4);
+        }
+    }
+
+    /// Home and My PC show when the check ran and can run it again; Home can also save a report.
+    /// `rtl` is true when the actions sit at the right edge, so they're added right to left.
+    fn header_actions(&mut self, ui: &mut egui::Ui, place: Place, rtl: bool) {
+        if !matches!(place, Place::Home | Place::MyPc) {
+            return;
+        }
+        let when = self.snap.as_ref().map(|s| format!("Checked {}", crate::util::when_words(&s.taken, chrono::Local::now().date_naive())));
+        let checked = |ui: &mut egui::Ui| {
+            if let Some(w) = &when {
+                widgets::small(ui, w.clone());
+            }
+        };
+        let again = |ui: &mut egui::Ui| {
+            widgets::subtle_button(ui, icon::REFRESH, "Check again").on_hover_text("Run every check again. Takes about a minute.").clicked()
+        };
+        let report = |ui: &mut egui::Ui| place == Place::Home && widgets::subtle_button(ui, icon::REPORT, "Save a report").clicked();
+        let (run, save) = if rtl {
+            let run = again(ui);
+            let save = report(ui);
+            checked(ui);
+            (run, save)
+        } else {
+            checked(ui);
+            let save = report(ui);
+            (again(ui), save)
+        };
+        if run {
+            self.start_check();
+        }
+        if save {
+            self.go(Page::Report);
         }
     }
 
@@ -1030,7 +1109,7 @@ impl eframe::App for App {
         } else {
             egui::SidePanel::left("nav")
                 .resizable(false)
-                .exact_width(232.0)
+                .exact_width(208.0)
                 .frame(
                     egui::Frame::new().fill(if self.mica { egui::Color32::TRANSPARENT } else { p.sidebar }).inner_margin(egui::Margin::symmetric(S2 as i8, 0)),
                 )
@@ -1060,5 +1139,33 @@ impl eframe::App for App {
         self.confirm_dialog(ctx);
         self.toasts_ui(ctx);
         widgets::focus_ring(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Page, Place};
+
+    #[test]
+    fn every_view_has_one_home_and_every_tab_points_back_to_it() {
+        for place in Place::MAIN.into_iter().chain([Place::Settings]) {
+            assert_eq!(place.first().place(), place, "{place:?} opens on a view of its own");
+            for tab in place.tabs() {
+                assert_eq!(tab.place(), place, "{tab:?} sits under {place:?}");
+            }
+        }
+        for page in Page::ALL {
+            let place = page.place();
+            let reachable = place.first() == page || place.tabs().contains(&page) || matches!(page, Page::Suggestions | Page::Report);
+            assert!(reachable, "{page:?} can't be reached from the sidebar or a tab");
+        }
+    }
+
+    #[test]
+    fn screenshot_names_are_unique() {
+        let mut slugs: Vec<String> = Page::ALL.iter().map(|p| p.slug()).collect();
+        slugs.sort();
+        slugs.dedup();
+        assert_eq!(slugs.len(), Page::ALL.len());
     }
 }

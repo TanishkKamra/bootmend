@@ -87,33 +87,42 @@ impl App {
         let Some(snap) = self.snap.clone() else { return };
         let page = self.page;
         let subtitle = match page {
-            Page::Overview => format!("{} · {}", model(&snap), if snap.elevated { "checked as administrator" } else { "checked without administrator rights" }),
+            Page::Home => format!("{} · {}", model(&snap), if snap.elevated { "checked as administrator" } else { "checked without administrator rights" }),
             Page::Suggestions => "Sorted by what matters most. Nothing changes unless you press a button.".into(),
+            Page::Report => "A copy of this check you can keep or send to someone helping you.".into(),
+            Page::Cleanup => "See what's taking up space before anything is removed.".into(),
+            Page::Startup => "Apps that open by themselves when you sign in.".into(),
+            Page::Live => "Which apps are using the processor, memory and drive at this moment.".into(),
+            Page::NetCheck => "How fast this connection is, and where any delay comes from.".into(),
             Page::ThisPc => "What's inside, as Windows reports it.".into(),
             Page::Storage => "Drive health, wear and free space.".into(),
+            Page::Security => "Virus protection, the firewall and who can reach this PC.".into(),
+            Page::Software => "Installed apps, browser extensions and what runs in the background.".into(),
             Page::Network => "Network adapters and what accepts connections.".into(),
-            Page::Security => "Virus protection, firewall and access settings.".into(),
-            Page::Software => "Installed apps and browser extensions.".into(),
-            Page::Startup => "What runs when Windows starts, and in the background.".into(),
             Page::Crashes => "Blue screens, sudden shutdowns and hardware errors from the last 90 days.".into(),
-            Page::Cleanup => "See what's taking up space before anything is removed.".into(),
-            Page::Live => "Which apps are using the processor, memory and drive at this moment.".into(),
+            Page::History => "Every change Bootmend made, and how to undo it.".into(),
             Page::Changes => match &self.prev_taken {
                 Some(t) => format!("Compared with the check on {t}."),
                 None => "What's different since the last check.".into(),
             },
-            Page::Scan => "Run Windows Security's own scanner from here.".into(),
-            Page::History => "Every change Bootmend made, and how to undo it.".into(),
-            Page::Report => "A copy of this check you can keep or send to someone helping you.".into(),
-            Page::Settings => "How Bootmend looks.".into(),
-            Page::Privacy => "What Bootmend reads, keeps and sends.".into(),
-            Page::About => String::new(),
+            Page::Trends => "How this PC has changed from one check to the next.".into(),
+            Page::Saved => "Each check is kept on this PC, so the next one can show what changed.".into(),
+            Page::Settings => String::new(),
         };
-        let title = if page == Page::Overview { "Your PC at a glance" } else { page.title() };
+        let title = match page {
+            Page::Home => "Your PC at a glance",
+            Page::Suggestions | Page::Report => page.title(),
+            _ => page.place().title(),
+        };
         self.header(ui, title, &subtitle);
         match page {
-            Page::Overview => self.overview(ui, &snap),
+            Page::Home => self.overview(ui, &snap),
             Page::Suggestions => self.suggestions(ui),
+            Page::Report => self.report_page(ui, &snap),
+            Page::Cleanup => self.cleanup_page(ui),
+            Page::Startup => self.startup_apps(ui, &snap),
+            Page::Live => self.live_page(ui),
+            Page::NetCheck => self.net_check(ui),
             Page::ThisPc => this_pc(ui, &snap),
             Page::Storage => {
                 if widgets::icon_button(ui, icon::CLEAN, "Free up space", true).clicked() {
@@ -122,23 +131,18 @@ impl App {
                 ui.add_space(S2);
                 storage(ui, &snap)
             }
-            Page::Cleanup => self.cleanup_page(ui),
-            Page::Live => self.live_page(ui),
-            Page::Network => {
-                self.net_check(ui);
-                network(ui, &snap)
-            }
             Page::Security => self.security(ui, &snap),
-            Page::Software => self.software(ui, &snap),
-            Page::Startup => self.startup(ui, &snap),
+            Page::Software => {
+                self.software(ui, &snap);
+                self.background(ui, &snap);
+            }
+            Page::Network => network(ui, &snap),
             Page::Crashes => self.crashes(ui, &snap),
-            Page::Changes => self.changes_page(ui),
-            Page::Scan => self.scan_page(ui, &snap),
             Page::History => self.history_page(ui),
-            Page::Report => self.report_page(ui, &snap),
+            Page::Changes => self.changes_page(ui),
+            Page::Trends => self.trends_ui(ui),
+            Page::Saved => self.saved_checks(ui),
             Page::Settings => self.settings_page(ui),
-            Page::Privacy => self.privacy(ui),
-            Page::About => about(ui),
         }
     }
 
@@ -274,7 +278,6 @@ impl App {
                 }
             }
         });
-        self.trends_ui(ui);
     }
 
     // ---------- Suggestions ----------
@@ -503,6 +506,8 @@ impl App {
                 ],
             );
         });
+        section(ui, "Virus check");
+        self.scan_page(ui, snap);
         section(ui, "Skip list");
         card(ui, |ui| {
             let paths = d.strs("ExclusionPaths");
@@ -842,7 +847,7 @@ impl App {
 
     // ---------- Startup ----------
 
-    fn startup(&mut self, ui: &mut Ui, snap: &Arc<Snapshot>) {
+    fn startup_apps(&mut self, ui: &mut Ui, snap: &Arc<Snapshot>) {
         let p = pal(ui.ctx());
         section(ui, "Opens when you sign in");
         card(ui, |ui| {
@@ -901,6 +906,16 @@ impl App {
                 }
             }
         });
+        let delays: Vec<Vec<String>> =
+            snap.health.a("bootDelays").iter().map(|d| vec![s(d, "Name"), s(d, "Kind"), num(d.f("AvgSec"), " s").unwrap_or_default(), s(d, "Times")]).collect();
+        if !delays.is_empty() {
+            section(ui, "What slowed recent starts");
+            card(ui, |ui| table(ui, "delays", &["Item", "Kind", "Average delay", "Times"], &delays));
+        }
+    }
+
+    /// Services and scheduled tasks that aren't part of Windows.
+    fn background(&mut self, ui: &mut Ui, snap: &Arc<Snapshot>) {
         section(ui, "Background services from other makers");
         card(ui, |ui| {
             muted(
@@ -927,12 +942,6 @@ impl App {
         let tasks: Vec<Vec<String>> = snap.software.a("tasks").iter().map(|t| vec![s(t, "Name"), s(t, "Action"), s(t, "Author"), s(t, "Path")]).collect();
         section(ui, "Scheduled tasks from other makers");
         card(ui, |ui| table(ui, "tasks", &["Name", "Runs", "Made by", "Folder"], &tasks));
-        let delays: Vec<Vec<String>> =
-            snap.health.a("bootDelays").iter().map(|d| vec![s(d, "Name"), s(d, "Kind"), num(d.f("AvgSec"), " s").unwrap_or_default(), s(d, "Times")]).collect();
-        if !delays.is_empty() {
-            section(ui, "What slowed recent starts");
-            card(ui, |ui| table(ui, "delays", &["Item", "Kind", "Average delay", "Times"], &delays));
-        }
     }
 
     // ---------- Crashes ----------
@@ -1178,7 +1187,7 @@ impl App {
             });
             ui.add_space(S2);
         }
-        section(ui, "Results");
+        widgets::subsection(ui, "Results");
         if snap.scans.is_empty() {
             muted(ui, "No checks run from Bootmend yet.");
         }
@@ -1248,24 +1257,32 @@ impl App {
             });
             ui.add_space(S2);
         }
-        self.schedule_setting(ui);
-        section(ui, "Saved checks");
+    }
+
+    fn saved_checks(&mut self, ui: &mut Ui) {
+        let list = self.snap.as_ref().and_then(|s| crate::snapshot::list(&s.host).ok()).unwrap_or_default();
+        let today = chrono::Local::now().date_naive();
         card(ui, |ui| {
-            let n = self.snap.as_ref().and_then(|s| crate::snapshot::list(&s.host).ok()).map(|v| v.len()).unwrap_or(0);
-            muted(ui, format!("Bootmend keeps {} on this PC so it can show what changed between them.", plural(n, "check", "checks")));
+            muted(ui, format!("Bootmend keeps {} on this PC so it can show what changed between them.", plural(list.len(), "check", "checks")));
             ui.add_space(S2);
-            ui.horizontal(|ui| {
-                if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
-                    match crate::util::data_dir("") {
-                        Ok(d) => {
-                            if let Err(e) = shell_open(&d.to_string_lossy()) {
-                                self.toast(format!("{e:#}"), false);
-                            }
+            for path in list.iter().rev() {
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                // Saved checks are named by when they started, as 20261112-201500.
+                let stamp = chrono::NaiveDateTime::parse_from_str(&stem, "%Y%m%d-%H%M%S").map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or(stem);
+                let words = crate::util::when_words(&stamp, today);
+                ui.label(format!("{}{}", words[..1].to_uppercase(), &words[1..]));
+            }
+            ui.add_space(S2);
+            if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
+                match crate::util::data_dir("") {
+                    Ok(d) => {
+                        if let Err(e) = shell_open(&d.to_string_lossy()) {
+                            self.toast(format!("{e:#}"), false);
                         }
-                        Err(e) => self.toast(format!("{e:#}"), false),
                     }
+                    Err(e) => self.toast(format!("{e:#}"), false),
                 }
-            });
+            }
         });
     }
 
@@ -1319,9 +1336,16 @@ impl App {
         });
     }
 
-    // ---------- Privacy ----------
+    // ---------- Settings ----------
 
     fn settings_page(&mut self, ui: &mut Ui) {
+        self.schedule_setting(ui);
+        self.appearance(ui);
+        self.privacy(ui);
+        about(ui);
+    }
+
+    fn appearance(&mut self, ui: &mut Ui) {
         let p = pal(ui.ctx());
         section(ui, "Appearance");
         card(ui, |ui| {
@@ -1367,31 +1391,25 @@ impl App {
             ui.add(egui::Label::new(t).wrap());
             ui.add_space(S2);
         };
-        section(ui, "The short version");
+        section(ui, "Privacy");
         card(ui, |ui| {
             para(ui, "Bootmend works entirely on this PC. There's no account, no analytics, no ads and no \"cloud scan\". Nothing Bootmend finds is sent to us or anyone else.");
             para(ui, "It only reads, until you press a fix button. Every fix explains itself first and can be undone from History.");
-        });
-        section(ui, "What it reads");
-        card(ui, |ui| {
+            widgets::subsection(ui, "What it reads");
             for r in super::screens::READS {
                 ui.horizontal_top(|ui| {
                     ui.label(RichText::new("•").color(p.muted));
                     ui.add(egui::Label::new(r).wrap());
                 });
             }
-        });
-        section(ui, "When it uses the internet");
-        card(ui, |ui| {
+            widgets::subsection(ui, "When it uses the internet");
             para(ui, "Only when you press one of these, and each asks first:");
             para(ui, "• Check for app updates: winget, Windows' own app installer, compares your apps with Microsoft's public app catalog.");
             para(ui, "• Read crash files: Microsoft's debugger downloads matching debugging files from Microsoft. The crash files stay here.");
             para(ui, "• Update an app: winget downloads it from the app's publisher.");
             para(ui, "• Test my connection: test data is downloaded from and uploaded to Cloudflare's public speed test. Cloudflare sees this connection's internet address, as with any website.");
             para(ui, "Saving a PDF uses Microsoft Edge to print the report, and virus checks are run by Windows Security. Both follow their own settings, as they always do.");
-        });
-        section(ui, "What it keeps, and where");
-        card(ui, |ui| {
+            widgets::subsection(ui, "What it keeps, and where");
             para(ui, "Each check is saved as a file in your user folder (AppData\\Local\\Bootmend), so it can show what changed next time. The undo history lives there too. Nothing else is stored.");
             ui.horizontal(|ui| {
                 if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
@@ -1827,8 +1845,9 @@ fn network(ui: &mut Ui, snap: &Snapshot) {
 }
 
 fn about(ui: &mut Ui) {
+    section(ui, "About");
     card(ui, |ui| {
-        ui.label(RichText::new(format!("Bootmend {}", env!("CARGO_PKG_VERSION"))).text_style(theme::h2()));
+        ui.label(RichText::new(format!("Bootmend {}", env!("CARGO_PKG_VERSION"))).text_style(theme::title()));
         ui.add_space(S2);
         ui.add(egui::Label::new("Bootmend checks a Windows PC and explains, in plain words, what's worth fixing. It reads what Windows already knows about itself, runs no background service, and leaves no trace beyond its own saved checks.").wrap());
         ui.add_space(S2);

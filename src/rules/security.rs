@@ -93,7 +93,7 @@ fn device_access(s: &Snapshot, f: &mut Vec<Finding>) {
             .details(odd.iter().map(|d| format!("{} used the {} on {}: {}", d.app, d.what.to_lowercase(), d.last_used, d.path.clone().unwrap_or_default())))
             .open("Open camera settings", "ms-settings:privacy-webcam")
             .open("Open microphone settings", "ms-settings:privacy-microphone")
-            .act(Action::Goto(Page::Scan)),
+            .act(Action::Goto(Page::Security)),
     );
 }
 
@@ -183,7 +183,7 @@ fn defender(s: &Snapshot, f: &mut Vec<Finding>) {
             if !events.is_empty() {
                 x = x.detail(format!("Last changed {}", events[0].s("Date").unwrap_or_default()));
             }
-            f.push(x.act(Action::Goto(Page::Scan)));
+            f.push(x.act(Action::Goto(Page::Security)));
         }
     }
 

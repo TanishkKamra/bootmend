@@ -1,7 +1,7 @@
-//! Regular check-ups (offered once the first check and its fixes are done) and the "Over time" charts.
+//! Check-up settings (offered once the first check and its fixes are done) and the "Over time" charts.
 
 use super::theme::{self, pal, S1, S2, S3, S4};
-use super::widgets::{self, card, muted, section, small};
+use super::widgets::{self, card, icon, muted, section, small};
 use super::{App, Job};
 use crate::rules::{Action, Level};
 use crate::schedule::{self, Every};
@@ -72,13 +72,7 @@ impl App {
                 }
             });
             ui.add_space(S1);
-            small(
-                ui,
-                format!(
-                    "Check-ups start at {}. You can change the time and pace later on the History & undo page.",
-                    schedule::hour_label(self.settings.schedule_hour)
-                ),
-            );
+            small(ui, format!("Check-ups start at {}. You can change the time and pace later in Settings.", schedule::hour_label(self.settings.schedule_hour)));
         });
         match pick {
             Some(Every::Off) => {
@@ -92,10 +86,7 @@ impl App {
 
     /// The setting on the History page; shown once the offer has been made.
     pub(super) fn schedule_setting(&mut self, ui: &mut Ui) {
-        if !self.settings.schedule_asked && self.settings.schedule == Every::Off {
-            return;
-        }
-        section(ui, "Regular check-ups");
+        section(ui, "Check-ups");
         let busy = self.busy.contains("schedule");
         let mut pick = None;
         let mut hour = self.settings.schedule_hour;
@@ -157,9 +148,11 @@ impl App {
             self.spawn(&ui.ctx().clone(), move || Job::Trends(trends::load(&host)));
         }
         if self.trends.is_empty() {
+            if !self.busy.contains("trends") {
+                widgets::empty(ui, icon::HISTORY, "Not enough checks yet", "After a few check-ups, this shows how this PC changes from one to the next.");
+            }
             return;
         }
-        section(ui, "Over time");
         muted(ui, format!("From the last {} saved checks.", self.trends.iter().map(|t| t.points.len()).max().unwrap_or(0)));
         ui.add_space(S2);
         let cols = if ui.available_width() > 820.0 { 2 } else { 1 };
