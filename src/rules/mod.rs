@@ -514,4 +514,20 @@ mod tests {
         work.system["device"]["Joined"] = json!(true);
         assert_eq!(level_of(&evaluate(&work), "lsa-off"), None, "work PCs are managed by their IT");
     }
+
+    #[test]
+    fn activation_and_preview_builds() {
+        let os = |activation: &str, insider: &str| {
+            let mut s = base();
+            s.system["os"]["Activation"] = json!(activation);
+            s.system["os"]["InsiderChannel"] = json!(insider);
+            let f = evaluate(&s);
+            (level_of(&f, "not-activated"), level_of(&f, "insider"))
+        };
+        assert_eq!(os("Unlicensed", ""), (Some(Level::WorthDoing), None));
+        assert_eq!(os("Status 5", ""), (Some(Level::WorthDoing), None), "notification mode");
+        assert_eq!(os("Status 2", ""), (Some(Level::NiceToHave), None), "still in its grace period");
+        assert_eq!(os("Activated", ""), (None, None));
+        assert_eq!(os("Activated", "Dev External"), (None, Some(Level::NiceToHave)));
+    }
 }

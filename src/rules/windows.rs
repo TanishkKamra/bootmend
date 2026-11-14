@@ -19,12 +19,102 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
 
 fn check_on(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
     windows10(s, today, f);
+    windows11_version(s, today, f);
+    licence(s, f);
     updates(s, today, f);
     restore(s, today, f);
 }
 
 fn date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s.get(..10)?, "%Y-%m-%d").ok()
+}
+
+/// "13 October 2026".
+fn long_date(d: NaiveDate) -> String {
+    d.format("%-d %B %Y").to_string()
+}
+
+/// Windows 11 Home and Pro versions and the first day each gets no fixes, from Microsoft's lifecycle
+/// page (learn.microsoft.com/lifecycle/products/windows-11-home-and-pro, checked 14 November 2026).
+const WIN11_ENDS: &[(&str, &str)] = &[
+    ("21H2", "2023-10-11"),
+    ("22H2", "2024-10-09"),
+    ("23H2", "2025-11-12"),
+    ("24H2", "2026-10-14"),
+    ("25H2", "2027-10-13"),
+    ("26H1", "2028-03-15"),
+    ("26H2", "2028-10-10"),
+];
+
+fn windows11_version(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
+    let os = s.system.g("os");
+    let Some(edition) = os.s("Edition") else { return };
+    // Enterprise and Education run on other dates, and preview builds update themselves.
+    let home_or_pro = edition.contains("Home") || edition.contains("Pro");
+    if !edition.contains("Windows 11") || !home_or_pro || os.s("InsiderChannel").is_some_and(|c| !c.is_empty()) {
+        return;
+    }
+    let Some(version) = os.s("Version") else { return };
+    let Some(end) = WIN11_ENDS.iter().find(|(v, _)| *v == version).and_then(|(_, d)| date(d)) else { return };
+    let last = long_date(end - chrono::Duration::days(1));
+    // 90 days' warning is our call: long enough to sort out an upgrade that won't install.
+    let (level, title, why) = if today >= end {
+        (
+            Level::DoFirst,
+            format!("Windows 11 {version} no longer gets security fixes"),
+            format!("Microsoft's last fixes for this version came on {last}. Each version of Windows 11 gets fixes for about two years."),
+        )
+    } else if (end - today).num_days() <= 90 {
+        (
+            Level::WorthDoing,
+            format!("Windows 11 {version} stops getting security fixes soon"),
+            format!("Microsoft's last fixes for this version come on {last}. Each version of Windows 11 gets fixes for about two years."),
+        )
+    } else {
+        return;
+    };
+    f.push(
+        Finding::new("win11-version", SEC, level, title)
+            .why(why)
+            .step("Open Windows Update and install the newest version of Windows 11 it offers. It's free and keeps your apps and files.")
+            .step("If no new version shows up, sort out any other update problems in this list first.")
+            .detail(format!("{edition}, version {version}"))
+            .open("Open Windows Update", "ms-settings:windowsupdate"),
+    );
+}
+
+fn licence(s: &Snapshot, f: &mut Vec<Finding>) {
+    let os = s.system.g("os");
+    // Windows' licence states: 0 unlicensed, 4 not genuine, 5 reminders only; 2, 3 and 6 are grace periods.
+    let state = os.s("Activation");
+    let level = match state.as_deref() {
+        Some("Unlicensed" | "Status 4" | "Status 5") => Level::WorthDoing,
+        Some("Status 2" | "Status 3" | "Status 6") => Level::NiceToHave,
+        _ => Level::AllGood,
+    };
+    if level != Level::AllGood {
+        f.push(
+            Finding::new("not-activated", SEC, level, "Windows isn't activated")
+                .why(if level == Level::WorthDoing {
+                    "Windows can't confirm its licence, so some settings are locked and reminders keep appearing. Copies of Windows from unofficial sources often come with harmful extras."
+                } else {
+                    "Windows is in its grace period and needs to confirm its licence soon. Until then, reminders appear."
+                })
+                .step("Open Settings, System, Activation. If you changed hardware recently, the troubleshooter there usually sorts it out.")
+                .detail(format!("Licence state: {}", state.unwrap_or_default()))
+                .open("Open Activation", "ms-settings:activation"),
+        );
+    }
+    if let Some(channel) = os.s("InsiderChannel").filter(|c| !c.is_empty()) {
+        f.push(
+            Finding::new("insider", SEC, Level::NiceToHave, "This PC gets preview versions of Windows")
+                .why("Windows Insider builds bring new features early, but they're tested less and can have bugs. That's fine if you chose it.")
+                .step("To go back to normal versions, open Settings, Windows Update, Windows Insider Program, and switch on Stop getting preview builds.")
+                .detail(format!("Insider channel: {channel}"))
+                .conf(Confidence::BestGuess)
+                .open("Open Windows Insider Program", "ms-settings:windowsinsider"),
+        );
+    }
 }
 
 /// Whether Windows 11 supports this processor: `None` when the name doesn't tell us.
@@ -430,5 +520,25 @@ mod tests {
         assert!(f.iter().find(|x| x.id == "restore-old").unwrap().actions.contains(&Action::RestorePoint));
         s.security = json!({"restore": {"COn": null}});
         assert!(!run(&s, "2026-11-12").iter().any(|x| x.id.starts_with("restore")), "unknown without admin rights");
+    }
+
+    #[test]
+    fn windows_11_versions_run_out_of_fixes() {
+        let level = |edition: &str, version: &str, insider: &str, today: &str| {
+            let mut s = pc(edition, "AMD Ryzen 5 2600", Some("2.0"));
+            s.system["os"]["Version"] = json!(version);
+            s.system["os"]["InsiderChannel"] = json!(insider);
+            run(&s, today).into_iter().find(|x| x.id == "win11-version").map(|x| x.level)
+        };
+        let pro = "Microsoft Windows 11 Pro";
+        assert_eq!(level(pro, "24H2", "", "2026-11-14"), Some(Level::DoFirst), "ended 13 October 2026");
+        assert_eq!(level(pro, "24H2", "", "2026-10-13"), Some(Level::WorthDoing), "its last day");
+        assert_eq!(level(pro, "25H2", "", "2026-11-14"), None);
+        assert_eq!(level(pro, "25H2", "", "2027-07-20"), Some(Level::WorthDoing), "within 90 days of the end");
+        assert_eq!(level(pro, "25H2", "", "2027-10-13"), Some(Level::DoFirst));
+        assert_eq!(level("Microsoft Windows 11 Home", "23H2", "", "2026-11-14"), Some(Level::DoFirst));
+        assert_eq!(level("Microsoft Windows 11 Enterprise", "24H2", "", "2026-11-14"), None, "other dates apply");
+        assert_eq!(level(pro, "24H2", "Dev External", "2026-11-14"), None, "preview builds update themselves");
+        assert_eq!(level(pro, "27H1", "", "2026-11-14"), None, "newer than we know");
     }
 }
