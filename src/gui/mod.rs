@@ -1102,7 +1102,9 @@ impl App {
         let Some(c) = &self.confirm else { return };
         let (title, body, yes) = (c.title.clone(), c.body.clone(), c.yes.clone());
         let mut decision: Option<bool> = None;
-        let m = egui::Modal::new(egui::Id::new("confirm")).show(ctx, |ui| {
+        // Windows dialogs keep 24 px clear around their content.
+        let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(S5 as i8));
+        let m = egui::Modal::new(egui::Id::new("confirm")).frame(frame).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 2.0 * (S5 + S4)).min(440.0));
             let t = ui.label(RichText::new(&title).text_style(theme::h2()));
             widgets::heading_role(ui, &t, 2, &title);
@@ -1111,8 +1113,8 @@ impl App {
                 ui.label(b);
                 ui.add_space(theme::S1);
             }
-            ui.add_space(S3);
-            ui.horizontal(|ui| {
+            ui.add_space(S4);
+            widgets::right_row(ui, |ui| {
                 let y = widgets::primary(ui, &yes);
                 if ui.memory(|m| m.focused().is_none()) {
                     y.request_focus();

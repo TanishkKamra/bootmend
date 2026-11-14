@@ -130,6 +130,24 @@ pub fn off_reason_width(ui: &Ui, text: &str) -> f32 {
     14.0 + S1 + g.size().x + 1.0
 }
 
+/// Buttons against the right edge, as Windows lays out a dialog's buttons. They're added in
+/// reading order, so Tab and screen readers meet them left to right. The row's width comes from
+/// the frame before; when it changes, the frame is drawn again unseen.
+pub fn right_row(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    let id = ui.id().with("right-row");
+    let w: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space((ui.available_width() - w).max(0.0));
+        let x0 = ui.cursor().min.x;
+        add(ui);
+        let used = ui.min_rect().right() - x0;
+        if (used - w).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(id, used));
+            ui.ctx().request_discard("measuring a right-aligned row");
+        }
+    });
+}
+
 /// A secondary button with a leading icon.
 pub fn icon_button(ui: &mut Ui, ic: &str, text: &str, enabled: bool) -> Response {
     let mut job = egui::text::LayoutJob::default();
