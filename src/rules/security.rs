@@ -118,9 +118,11 @@ fn defender(s: &Snapshot, f: &mut Vec<Finding>) {
         );
     }
     if realtime {
-        if let Some(age) = d.i("SignatureAgeDays").filter(|a| *a > 7) {
+        if let Some(age) = d.i("SignatureAgeDays").filter(|a| *a >= 3) {
+            // Windows reports 65535 days when the definitions have never been updated.
+            let title = if age >= 65535 { "Virus definitions have never been updated".to_string() } else { format!("Virus definitions are {age} days old") };
             f.push(
-                Finding::new("av-stale", SEC, Level::WorthDoing, format!("Virus definitions are {age} days old"))
+                Finding::new("av-stale", SEC, Level::WorthDoing, title)
                     .why("Windows Security learns about new threats through daily updates. Old definitions miss recent ones.")
                     .step("Open Windows Update and check for updates. Definitions come through there.")
                     .open("Open Windows Update", "ms-settings:windowsupdate"),
@@ -204,7 +206,7 @@ fn defender(s: &Snapshot, f: &mut Vec<Finding>) {
         );
     } else if let Some(t) = threats.first() {
         f.push(
-            Finding::new("threats-handled", SEC, Level::NiceToHave, format!("Windows Security dealt with {} recently", plural(threats.len(), "item", "items")))
+            Finding::new("threats-handled", SEC, Level::AllGood, format!("Windows Security dealt with {} recently", plural(threats.len(), "item", "items")))
                 .why("Each one was removed or quarantined. It's worth a glance to see where they came from, so you can avoid that source.")
                 .detail(format!("Most recent: {} on {}", t.s("Name").unwrap_or_default(), t.s("Date").unwrap_or_default()))
                 .open("Open protection history", "windowsdefender://history"),
@@ -283,7 +285,7 @@ fn access(s: &Snapshot, f: &mut Vec<Finding>) {
     }
     if let Some(crd) = a.s("ChromeRemoteDesktop").filter(|c| c.starts_with("Running")) {
         f.push(
-            Finding::new("crd", SEC, Level::NiceToHave, "Chrome Remote Desktop is set up")
+            Finding::new("crd", SEC, Level::WorthDoing, "Chrome Remote Desktop is set up")
                 .why("This PC can be controlled from another device that knows the PIN. That's fine if you set it up yourself. If you didn't, remove it from Apps.")
                 .detail(format!("Service: {crd}"))
                 .open("Open installed apps", "ms-settings:appsfeatures"),
@@ -302,7 +304,7 @@ fn access(s: &Snapshot, f: &mut Vec<Finding>) {
     remote.retain(|n| *n != "Chrome Remote Desktop");
     if !remote.is_empty() {
         f.push(
-            Finding::new("remote-tools", SEC, Level::NiceToHave, format!("Remote control app found: {}", remote.join(", ")))
+            Finding::new("remote-tools", SEC, Level::WorthDoing, format!("Remote control app found: {}", remote.join(", ")))
                 .why("These apps let someone else control this PC. They are useful for helping family or for work. If you didn't install one, or you were asked to by a caller, uninstall it.")
                 .open("Open installed apps", "ms-settings:appsfeatures"),
         );
@@ -315,7 +317,7 @@ fn access(s: &Snapshot, f: &mut Vec<Finding>) {
         .collect();
     if !no_pw.is_empty() {
         f.push(
-            Finding::new("no-password", SEC, Level::NiceToHave, format!("{} can be set up without a password", plural(no_pw.len(), "account", "accounts")))
+            Finding::new("no-password", SEC, Level::WorthDoing, format!("{} can be set up without a password", plural(no_pw.len(), "account", "accounts")))
                 .why("Windows allows these local accounts to have an empty password. If any of them really has none, anyone at the keyboard can use it.")
                 .details(no_pw)
                 .conf(Confidence::BestGuess)
@@ -425,24 +427,38 @@ fn system(s: &Snapshot, f: &mut Vec<Finding>) {
     let dev = s.system.g("device");
     if dev.s("FirmwareMode").as_deref() == Some("UEFI") && dev.b("SecureBoot") == Some(false) {
         f.push(
-            Finding::new("secureboot-off", SEC, Level::NiceToHave, "Secure Boot is off")
+            Finding::new("secureboot-off", SEC, Level::WorthDoing, "Secure Boot is off")
                 .why("Secure Boot makes sure only trusted software loads before Windows starts, which blocks a rare but nasty kind of malware. Some games' anti-cheat also requires it.")
                 .step("Turning it on happens in the PC's firmware settings (BIOS). Look up your motherboard or laptop model for the exact steps.")
                 .conf(Confidence::Measured),
         );
     }
-    if s.system.g("os").s("MemoryIntegrity").as_deref() == Some("Off") {
-        f.push(
-            Finding::new("hvci-off", SEC, Level::NiceToHave, "Memory integrity is off")
+    let os = s.system.g("os");
+    match os.s("MemoryIntegrity").as_deref() {
+        // A real gap only where the hardware can run it; elsewhere it's an extra at best.
+        Some("Off") if os.b("VbsAvailable") == Some(true) => f.push(
+            Finding::new("hvci-off", SEC, Level::WorthDoing, "Memory integrity is off")
                 .why("This Windows feature stops harmful code from slipping into the heart of Windows. Older drivers sometimes block it, and Windows will tell you which.")
                 .open("Open Core isolation", "windowsdefender://coreisolation"),
-        );
+        ),
+        Some("Off") => f.push(
+            Finding::new("hvci-off", SEC, Level::NiceToHave, "Memory integrity is off")
+                .why("This Windows feature stops harmful code from slipping into the heart of Windows. It needs virtualization, which looks switched off in the firmware settings (BIOS) or isn't supported by this processor.")
+                .conf(Confidence::BestGuess)
+                .open("Open Core isolation", "windowsdefender://coreisolation"),
+        ),
+        Some("Enabled, not running") => f.push(
+            Finding::new("hvci-off", SEC, Level::NiceToHave, "Memory integrity is on but not running")
+                .why("It's switched on, but Windows couldn't start it. A restart usually finishes the job. If it stays off, an older driver is in the way, and Windows Security names it.")
+                .open("Open Core isolation", "windowsdefender://coreisolation"),
+        ),
+        _ => {}
     }
     if dev.b("HasBattery") == Some(true) {
         let sysvol = s.storage.a("volumes").into_iter().find(|v| v.s("Letter").as_deref() == Some("C:"));
         if sysvol.and_then(|v| v.s("BitLocker")).is_some_and(|b| b.starts_with("Off")) {
             f.push(
-                Finding::new("encryption-off", SEC, Level::NiceToHave, "This laptop's drive is not encrypted")
+                Finding::new("encryption-off", SEC, Level::WorthDoing, "This laptop's drive is not encrypted")
                     .why("If the laptop is lost or stolen, someone could take the drive out and read your files. Encryption prevents that, and you won't notice it day to day.")
                     .step("Open Settings, Privacy & security, Device encryption. If you don't see it, your Windows edition may only offer BitLocker.")
                     .open("Open device encryption", "ms-settings:deviceencryption"),

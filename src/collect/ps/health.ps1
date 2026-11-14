@@ -17,7 +17,11 @@ Try-Section 'stability' {
       $m = ($_.Message -replace '\s+', ' '); [ordered]@{ Date = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm'); Text = $m.Substring(0, [math]::Min(400, $m.Length)) } })
   $R.whea = @(Get-WinEvent -FilterHashtable @{LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; StartTime = $since } -MaxEvents 100 | ForEach-Object { [ordered]@{ Date = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm'); Id = $_.Id; Text = (($_.Message -split "`n")[0]).Trim() } })
   $R.minidumps = @(Get-ChildItem "$env:WINDIR\Minidump" -Filter *.dmp | Sort-Object LastWriteTime -Descending | ForEach-Object { [ordered]@{ Path = $_.FullName; Date = $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm'); KB = [math]::Round($_.Length / 1KB) } })
-  $R.appCrashes = @(Get-WinEvent -FilterHashtable @{LogName = 'Application'; Id = 1000; ProviderName = 'Application Error'; StartTime = (Get-Date).AddDays(-30) } -MaxEvents 500 | ForEach-Object { ($_.Properties[0].Value) } | Group-Object | Sort-Object Count -Descending | Select-Object -First 10 | ForEach-Object { [ordered]@{ App = $_.Name; Count = $_.Count } })
+  # Event 1000 holds the program's file name (0) and full path (10). The file's own description
+  # ("Google Chrome") reads better than "chrome.exe".
+  $R.appCrashes = @(Get-WinEvent -FilterHashtable @{LogName = 'Application'; Id = 1000; ProviderName = 'Application Error'; StartTime = (Get-Date).AddDays(-30) } -MaxEvents 500 | ForEach-Object { [pscustomobject]@{ App = $_.Properties[0].Value; Path = $_.Properties[10].Value } } | Group-Object App | Sort-Object Count -Descending | Select-Object -First 10 | ForEach-Object {
+      $p = $_.Group[0].Path; $vi = $(if ($p -and (Test-Path -LiteralPath $p)) { (Get-Item -LiteralPath $p).VersionInfo } else { $null })
+      [ordered]@{ App = $_.Name; Name = $(if ($vi.FileDescription) { $vi.FileDescription.Trim() } elseif ($vi.ProductName) { $vi.ProductName.Trim() } else { $null }); Count = $_.Count } })
 }
 Try-Section 'boot' {
   function EvData($e) { $h = @{}; ([xml]$e.ToXml()).Event.EventData.Data | ForEach-Object { $h[$_.Name] = $_.'#text' }; $h }

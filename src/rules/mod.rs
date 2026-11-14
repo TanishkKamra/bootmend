@@ -7,7 +7,7 @@ mod speed;
 mod stability;
 pub mod upgrades;
 mod windows;
-pub use stability::bugcheck_code;
+pub use stability::{bugcheck_code, crashed_app};
 pub use windows::{update_name, win11_readiness};
 
 use crate::fixes::Fix;
@@ -272,5 +272,115 @@ mod tests {
         let f = evaluate(&s);
         assert!(f.iter().any(|x| x.id == "ram-single-channel"));
         assert!(f.iter().any(|x| x.id == "ram-slow"));
+    }
+
+    fn level_of(f: &[Finding], id: &str) -> Option<Level> {
+        f.iter().find(|x| x.id == id).map(|x| x.level)
+    }
+
+    fn ago(days: i64) -> String {
+        (chrono::Local::now().date_naive() - chrono::Duration::days(days)).format("%Y-%m-%d").to_string()
+    }
+
+    #[test]
+    fn open_doors_are_worth_doing() {
+        let mut s = base();
+        s.security["access"]["ChromeRemoteDesktop"] = json!("Running / Automatic");
+        s.security["accounts"] = json!([{"Name": "Spare", "Enabled": true, "PasswordRequired": false, "Source": "Local"}]);
+        s.software = json!({"services": [{"Name": "TeamViewer"}]});
+        s.system["device"] = json!({"SecureBoot": false, "FirmwareMode": "UEFI", "HasBattery": true});
+        s.storage = json!({"volumes": [{"Letter": "C:", "SizeGB": 476, "FreeGB": 200, "BitLocker": "Off"}]});
+        let f = evaluate(&s);
+        for id in ["crd", "no-password", "remote-tools", "secureboot-off", "encryption-off"] {
+            assert_eq!(level_of(&f, id), Some(Level::WorthDoing), "{id}");
+        }
+    }
+
+    #[test]
+    fn threats_already_dealt_with_need_nothing() {
+        let mut s = base();
+        s.security["threats"] = json!([{"Name": "Trojan:Win32/Wacatac", "Date": "2026-11-01", "ActionSuccess": true}]);
+        let f = evaluate(&s);
+        assert_eq!(level_of(&f, "threats-handled"), Some(Level::AllGood));
+        assert_eq!(score(&f, Area::Security).value, 100);
+    }
+
+    #[test]
+    fn virus_definitions_go_stale_after_three_days() {
+        let stale = |days: i64| {
+            let mut s = base();
+            s.security["defender"]["SignatureAgeDays"] = json!(days);
+            evaluate(&s).into_iter().find(|x| x.id == "av-stale")
+        };
+        assert!(stale(2).is_none());
+        assert_eq!(stale(3).map(|x| x.level), Some(Level::WorthDoing));
+        let never = stale(65535).expect("65535 means never updated");
+        assert_eq!(never.level, Level::WorthDoing);
+        assert!(never.title.contains("never"), "{}", never.title);
+    }
+
+    #[test]
+    fn memory_integrity_matters_where_it_can_run() {
+        let hvci = |state: &str, vbs: Option<bool>| {
+            let mut s = base();
+            s.system["os"]["MemoryIntegrity"] = json!(state);
+            s.system["os"]["VbsAvailable"] = json!(vbs);
+            level_of(&evaluate(&s), "hvci-off")
+        };
+        assert_eq!(hvci("Off", Some(true)), Some(Level::WorthDoing));
+        assert_eq!(hvci("Off", Some(false)), Some(Level::NiceToHave), "the hardware can't run it as set up");
+        assert_eq!(hvci("Off", None), Some(Level::NiceToHave));
+        assert_eq!(hvci("Enabled, not running", Some(true)), Some(Level::NiceToHave), "a driver is in the way");
+        assert_eq!(hvci("On", Some(true)), None);
+    }
+
+    #[test]
+    fn app_crashes_count_by_app_and_by_spread() {
+        let crashes = |list: serde_json::Value| {
+            let mut s = base();
+            s.health = json!({ "appCrashes": list });
+            evaluate(&s)
+        };
+        let f = crashes(json!([{"App": "chrome.exe", "Name": "Google Chrome", "Count": 5}, {"App": "x.exe", "Count": 1}]));
+        let x = f.iter().find(|x| x.id == "appcrash-chrome.exe").expect("five crashes of one app");
+        assert_eq!(x.level, Level::WorthDoing);
+        assert!(x.title.starts_with("Google Chrome"), "{}", x.title);
+        assert!(!crashes(json!([{"App": "a.exe", "Count": 4}, {"App": "b.exe", "Count": 1}])).iter().any(|x| x.id.starts_with("appcrash")));
+        let f = crashes(json!([{"App": "VALORANT-Win64-Shipping.exe", "Name": null, "Count": 16}]));
+        let x = f.iter().find(|x| x.id.starts_with("appcrash")).unwrap();
+        assert!(x.title.starts_with("VALORANT crashed"), "no description: the file name is cleaned up: {}", x.title);
+        let f = crashes(json!([{"App": "a.exe", "Count": 6}, {"App": "b.exe", "Count": 1}, {"App": "c.exe", "Count": 1}]));
+        let all: Vec<_> = f.iter().filter(|x| x.id.starts_with("appcrash")).collect();
+        assert_eq!(all.len(), 1, "one finding for the pattern, not one per app");
+        assert_eq!(all[0].id, "appcrash-many");
+        assert_eq!(all[0].level, Level::WorthDoing);
+        assert_eq!(all[0].details.len(), 3);
+    }
+
+    #[test]
+    fn graphics_drivers_age_after_a_year_and_virtual_screens_are_skipped() {
+        let mut s = base();
+        s.system["gpus"] = json!([
+            {"Name": "NVIDIA GeForce RTX 3060", "DriverDate": ago(380)},
+            {"Name": "AMD Radeon RX 6600", "DriverDate": ago(300)},
+            {"Name": "Parsec Virtual Display Adapter", "DriverDate": ago(1500)},
+            {"Name": "Microsoft Remote Display Adapter", "DriverDate": ago(1500)}
+        ]);
+        let f = evaluate(&s);
+        let old: Vec<_> = f.iter().filter(|x| x.id.starts_with("gpu-old")).map(|x| (x.id.as_str(), x.level)).collect();
+        assert_eq!(old, [("gpu-old-NVIDIA GeForce RTX 3060", Level::WorthDoing)]);
+    }
+
+    #[test]
+    fn a_restart_left_waiting_a_week_is_worth_doing() {
+        let reboot = |since: Option<String>| {
+            let mut s = base();
+            s.system["os"]["PendingReboot"] = json!(true);
+            s.system["winupdate"] = json!({ "RestartWaitingSince": since });
+            level_of(&evaluate(&s), "reboot")
+        };
+        assert_eq!(reboot(Some(ago(7))), Some(Level::WorthDoing));
+        assert_eq!(reboot(Some(ago(2))), Some(Level::NiceToHave));
+        assert_eq!(reboot(None), Some(Level::NiceToHave), "unknown start: no louder than before");
     }
 }

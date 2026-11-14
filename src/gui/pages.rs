@@ -860,7 +860,7 @@ impl App {
                 table(ui, "whea", &["When", "Message"], &wh);
             }
         });
-        let ac: Vec<Vec<String>> = h.a("appCrashes").iter().map(|a| vec![s(a, "App"), s(a, "Count")]).collect();
+        let ac: Vec<Vec<String>> = h.a("appCrashes").iter().map(|a| vec![crate::rules::crashed_app(a).unwrap_or_default(), s(a, "Count")]).collect();
         section(ui, "App crashes this month");
         card(ui, |ui| {
             if ac.is_empty() {

@@ -6,7 +6,7 @@ Bootmend only reads until you press a button, and every change explains itself f
 
 ## What it does
 
-- **Overview and Suggestions:** a check of security, stability, speed and hardware, with suggestions sorted by what matters most and the steps to follow.
+- **Overview and Suggestions:** a check of security, stability, speed and hardware, with suggestions sorted by what matters most and the steps to follow. [docs/levels.md](docs/levels.md) explains how each one is ranked.
 - **This PC:** device details, an upgrade advisor (for example, a matching memory stick), and, on Windows 10, whether the PC can move to Windows 11.
 - **Storage:** drive health, wear and free space.
 - **Free up space:** measures caches and leftovers first, then clears only what you tick. Files an app has open are skipped.

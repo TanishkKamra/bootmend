@@ -15,6 +15,15 @@ pub fn bugcheck_code(text: &str) -> Option<u32> {
     re.captures(text).and_then(|c| u32::from_str_radix(&c[1], 16).ok())
 }
 
+/// What to call a crashed app: the program's own description, else its file name tidied up.
+pub fn crashed_app(c: &serde_json::Value) -> Option<String> {
+    let exe = c.s("App")?;
+    Some(c.s("Name").filter(|x| !x.trim().is_empty()).unwrap_or_else(|| {
+        let stem = exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(&exe);
+        super::security::friendly_app(stem)
+    }))
+}
+
 pub fn hardware_stress_codes(code: u32) -> bool {
     matches!(code, 0x124 | 0x101 | 0x7F)
 }
@@ -101,24 +110,41 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
         }
     }
 
-    for c in h.a("appCrashes") {
-        if let (Some(app), Some(n)) = (c.s("App"), c.i("Count")) {
-            if n >= 5 {
-                f.push(
-                    Finding::new(format!("appcrash-{app}"), STAB, Level::NiceToHave, format!("{app} crashed {n} times this month"))
-                        .why("Repeated crashes of one app are usually fixed by updating or reinstalling it.")
-                        .step("Update the app. If that doesn't help, uninstall it and install it again from the maker's site.")
-                        .open("Open installed apps", "ms-settings:appsfeatures"),
-                );
+    // (shown name, program file, crashes in the last 30 days)
+    let apps: Vec<(String, String, i64)> = h.a("appCrashes").into_iter().filter_map(|c| Some((crashed_app(c)?, c.s("App")?, c.i("Count")?))).collect();
+    if apps.len() >= 3 {
+        // Several different apps failing usually share one cause, so they get one to-do.
+        f.push(
+            Finding::new("appcrash-many", STAB, Level::WorthDoing, format!("{} crashed this month", plural(apps.len(), "app", "apps")))
+                .why("When several different apps crash, they often share a cause, such as an outdated driver, a security tool or a memory problem.")
+                .step("Install any waiting Windows and driver updates, then restart.")
+                .step("If the crashes continue, search Start for \"Windows Memory Diagnostic\" and run it.")
+                .details(apps.iter().map(|(name, _, n)| format!("{name}: {}", plural(*n as usize, "time", "times"))))
+                .act(Action::Goto(Page::Crashes)),
+        );
+    } else {
+        for (name, exe, n) in apps.iter().filter(|(_, _, n)| *n >= 5) {
+            let mut x = Finding::new(format!("appcrash-{exe}"), STAB, Level::WorthDoing, format!("{name} crashed {n} times this month"))
+                .why("Repeated crashes of one app are usually fixed by updating or reinstalling it.")
+                .step("Update the app. If that doesn't help, uninstall it and install it again from the maker's site.")
+                .open("Open installed apps", "ms-settings:appsfeatures");
+            if name != exe {
+                x = x.detail(format!("Program file: {exe}"));
             }
+            f.push(x);
         }
     }
 
     if s.system.g("os").b("PendingReboot") == Some(true) {
-        f.push(
-            Finding::new("reboot", STAB, Level::NiceToHave, "Restart to finish installing updates")
-                .why("Windows installed updates that only take effect after a restart. Until then, some fixes aren't active."),
-        );
+        let since = s.system.g("winupdate").s("RestartWaitingSince").and_then(|d| chrono::NaiveDate::parse_from_str(d.get(..10)?, "%Y-%m-%d").ok());
+        // After a week, fixes have sat idle through a lot of normal use.
+        let level = if since.is_some_and(|d| (chrono::Local::now().date_naive() - d).num_days() >= 7) { Level::WorthDoing } else { Level::NiceToHave };
+        let mut x = Finding::new("reboot", STAB, level, "Restart to finish installing updates")
+            .why("Windows installed updates that only take effect after a restart. Until then, some fixes aren't active.");
+        if let Some(d) = since {
+            x = x.detail(format!("Waiting since {d}"));
+        }
+        f.push(x);
     }
 }
 

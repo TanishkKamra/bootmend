@@ -23,9 +23,14 @@ Try-Section 'device' {
 }
 
 Try-Section 'os' {
-  $lic = Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" | Select-Object -First 1
+  $lics = @(Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL")
+  # Extended Security Updates come as an add-on licence beside Windows' own.
+  $lic = $lics | Where-Object { $_.Name -notmatch 'ESU' } | Select-Object -First 1
   $sh = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsSelfHost\Applicability'
   $dg = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard
+  $win10 = $os.Caption -match 'Windows 10'
+  # Windows 10 consumer ESU sign-up: 3 = this device enrolled, 5 = enrolled through a Microsoft account.
+  $esu = $(if ($win10) { Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows\ConsumerESU' } else { $null })
   $R.os = [ordered]@{
     Edition = $os.Caption; Version = $cv.DisplayVersion; Build = "$($cv.CurrentBuild).$($cv.UBR)"; Architecture = $os.OSArchitecture
     InsiderChannel = "$($sh.BranchName) $($sh.Ring)".Trim(); Installed = (D $os.InstallDate); LastBoot = $os.LastBootUpTime.ToString('yyyy-MM-dd HH:mm')
@@ -33,7 +38,10 @@ Try-Section 'os' {
     Locale = (Get-Culture).Name; TimeZone = (Get-TimeZone).DisplayName; RegisteredOwner = $cv.RegisteredOwner
     FastStartup = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power').HiberbootEnabled
     VBS = $(switch ($dg.VirtualizationBasedSecurityStatus) { 0 { 'Off' } 1 { 'Enabled, not running' } 2 { 'Running' } default { $null } })
-    MemoryIntegrity = $(if ($null -eq $dg) { $null } elseif ($dg.SecurityServicesRunning -contains 2) { 'On' } else { 'Off' })
+    MemoryIntegrity = $(if ($null -eq $dg) { $null } elseif ($dg.SecurityServicesRunning -contains 2) { 'On' } elseif ($dg.SecurityServicesConfigured -contains 2) { 'Enabled, not running' } else { 'Off' })
+    VbsAvailable = $(if ($null -eq $dg) { $null } else { $dg.AvailableSecurityProperties -contains 1 })
+    EsuState = $esu.ESUEligibility
+    EsuLicensed = $(if ($win10) { [bool]($lics | Where-Object { $_.Name -match 'ESU' -and $_.LicenseStatus -eq 1 }) } else { $null })
     PendingReboot = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') -or (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
   }
   $R.updates = @(Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 15 | ForEach-Object { [ordered]@{ Id = $_.HotFixID; Type = $_.Description; Installed = (D $_.InstalledOn) } })
@@ -110,11 +118,17 @@ Try-Section 'winupdate' {
   # Microsoft Store app updates (titles like '9NBLGGH537C2-Microsoft.XboxGameOverlay') aren't Windows updates.
   $ok = $hist | Where-Object { $_.ResultCode -eq 2 -and $_.Operation -eq 1 -and $_.Title -cnotmatch '^[0-9A-Z]{12}-' } | Select-Object -First 1
   $ux = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'
+  # The first update installed since the last restart, so a waiting restart has a start date. Update
+  # history times are UTC.
+  $boot = $os.LastBootUpTime.ToUniversalTime()
+  $first = $hist | Where-Object { $_.ResultCode -eq 2 -and $_.Operation -eq 1 -and $_.Date -gt $boot -and $_.Title -cnotmatch '^[0-9A-Z]{12}-' } | Sort-Object Date | Select-Object -First 1
   $pol = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
   $R.winupdate = [ordered]@{
     LastInstalled = $(if ($ok) { $ok.Date.ToString('yyyy-MM-dd') } else { $null }); LastInstalledTitle = $(if ($ok) { $ok.Title } else { $null })
     Failed = $failed
     PausedUntil = $(if ($ux.PauseUpdatesExpiryTime) { D $ux.PauseUpdatesExpiryTime } else { $null })
+    PausedSince = $(if ($ux.PauseUpdatesStartTime) { D $ux.PauseUpdatesStartTime } else { $null })
+    RestartWaitingSince = $(if ($first) { $first.Date.ToString('yyyy-MM-dd') } else { $null })
     AutoUpdateOff = ($pol.NoAutoUpdate -eq 1)
   }
 }

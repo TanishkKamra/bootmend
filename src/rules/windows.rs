@@ -108,13 +108,20 @@ fn windows10(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
         return;
     }
     let esu_over = date(ESU_END).is_some_and(|end| today > end);
+    let os = s.system.g("os");
+    // Windows' own sign-up state: 3 = this device, 5 = through a Microsoft account. The values are
+    // community-documented, not by Microsoft, hence the best-guess label.
+    let enrolled = matches!(os.i("EsuState"), Some(3 | 5)) || os.b("EsuLicensed") == Some(true);
     let r = win11_readiness(s);
-    let mut x = Finding::new("win10", SEC, if esu_over { Level::DoFirst } else { Level::WorthDoing }, "Windows 10 no longer gets regular security updates")
-        .why(format!(
-            "Microsoft ended support for Windows 10 on October 14, 2025. Security fixes now only reach PCs signed up for Extended Security Updates, which {} on {ESU_END_TEXT}.",
-            if esu_over { "ended" } else { "run until" }
-        ))
-        .conf(Confidence::BestGuess);
+    let level = if esu_over || !enrolled { Level::DoFirst } else { Level::WorthDoing };
+    let why = if esu_over {
+        format!("Microsoft ended support for Windows 10 on October 14, 2025, and Extended Security Updates ended on {ESU_END_TEXT}. This PC no longer gets security fixes.")
+    } else if enrolled {
+        format!("Microsoft ended support for Windows 10 on October 14, 2025. This PC is signed up for Extended Security Updates, so it gets security fixes until {ESU_END_TEXT}.")
+    } else {
+        "Microsoft ended support for Windows 10 on October 14, 2025. Security fixes now only reach PCs signed up for Extended Security Updates, and this PC doesn't seem to be, so it gets none.".to_string()
+    };
+    let mut x = Finding::new("win10", SEC, level, "Windows 10 no longer gets regular security updates").why(why).conf(Confidence::BestGuess);
     if r.missing.is_empty() {
         x = x
             .step("This PC looks ready for Windows 11, which is a free upgrade. Open Windows Update and look for the Windows 11 offer.")
@@ -128,6 +135,8 @@ fn windows10(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
         }
         x = if esu_over {
             x.step("Until you can move to a supported system, keep Windows Security on and be extra careful with downloads and email attachments.")
+        } else if enrolled {
+            x.step(format!("Extended Security Updates cover you until {ESU_END_TEXT}. Plan to move to a supported system before then."))
         } else {
             x.step(format!("Meanwhile, sign up for Extended Security Updates in Windows Update. It's free if you sync settings with a Microsoft account, or 1,000 Microsoft Rewards points, or a one-time $30, and it covers you until {ESU_END_TEXT}."))
                 .open("Open Windows Update", "ms-settings:windowsupdate")
@@ -170,10 +179,17 @@ fn updates(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
             .open("Open update history", "ms-settings:windowsupdate-history"),
         );
     }
-    if let Some(until) = w.s("PausedUntil").filter(|d| date(d).is_some_and(|d| d >= today)) {
+    if let Some((until, end)) = w.s("PausedUntil").and_then(|u| date(&u).map(|d| (u, d))).filter(|(_, d)| *d >= today) {
+        let start = w.s("PausedSince").and_then(|d| date(&d)).map_or(today, |d| d.min(today));
+        // Settings pauses for five weeks at most, so a longer pause was set by a tool or a policy.
+        let long = (end - start).num_days() > 35;
         f.push(
-            Finding::new("updates-paused", SEC, Level::NiceToHave, format!("Windows updates are paused until {until}"))
-                .why("Pausing is fine for a short while, but security fixes wait too.")
+            Finding::new("updates-paused", SEC, if long { Level::WorthDoing } else { Level::NiceToHave }, format!("Windows updates are paused until {until}"))
+                .why(if long {
+                    "This pause is longer than Windows Settings allows, so a tool or setting probably made it. Security fixes wait until it ends."
+                } else {
+                    "Pausing is fine for a short while, but security fixes wait too."
+                })
                 .step("Open Windows Update and choose Resume updates when you're ready.")
                 .open("Open Windows Update", "ms-settings:windowsupdate"),
         );
@@ -190,14 +206,22 @@ fn updates(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
     let history = w.s("LastInstalled").and_then(|d| date(&d));
     if let Some(last) = hotfix.max(history) {
         let days = (today - last).num_days();
-        if days > 60 {
+        if days >= 45 {
             f.push(
-                Finding::new("updates-old", SEC, Level::WorthDoing, format!("No Windows update installed in {days} days"))
-                    .why("Microsoft fixes security holes every month. A PC that hasn't updated in two months is missing at least two rounds of fixes.")
-                    .step("Open Windows Update and choose Check for updates. Restart when it asks.")
-                    .detail(format!("Last update installed: {last}"))
-                    .conf(Confidence::BestGuess)
-                    .open("Open Windows Update", "ms-settings:windowsupdate"),
+                Finding::new(
+                    "updates-old",
+                    SEC,
+                    if days >= 90 { Level::DoFirst } else { Level::WorthDoing },
+                    format!("No Windows update installed in {days} days"),
+                )
+                .why(format!(
+                    "Microsoft fixes security holes every month, so this PC has missed {} of them.",
+                    if days >= 90 { "several rounds" } else { "at least one round" }
+                ))
+                .step("Open Windows Update and choose Check for updates. Restart when it asks.")
+                .detail(format!("Last update installed: {last}"))
+                .conf(Confidence::BestGuess)
+                .open("Open Windows Update", "ms-settings:windowsupdate"),
             );
         }
     }
@@ -285,11 +309,55 @@ mod tests {
         let s = pc("Microsoft Windows 10 Pro", "Intel(R) Core(TM) i5-8400 CPU @ 2.80GHz", Some("2.0"));
         let f = run(&s, "2026-11-12");
         let x = f.iter().find(|x| x.id == "win10").expect("windows 10 finding");
-        assert_eq!(x.level, Level::WorthDoing, "Extended Security Updates still run until October 2027");
+        assert_eq!(x.level, Level::DoFirst, "not signed up for Extended Security Updates, so no fixes at all");
         assert!(x.steps.iter().any(|s| s.contains("free upgrade")), "{:?}", x.steps);
         assert!(win11_readiness(&s).missing.is_empty());
         let late = run(&s, "2027-10-20");
         assert_eq!(late.iter().find(|x| x.id == "win10").unwrap().level, Level::DoFirst);
+    }
+
+    #[test]
+    fn signed_up_windows_10_pc_has_until_october_2027() {
+        let level = |esu: serde_json::Value, licensed: Option<bool>, today: &str| {
+            let mut s = pc("Microsoft Windows 10 Home", "Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz", None);
+            s.system["os"]["EsuState"] = esu;
+            s.system["os"]["EsuLicensed"] = json!(licensed);
+            run(&s, today).into_iter().find(|x| x.id == "win10").map(|x| (x.level, x.steps))
+        };
+        for state in [3, 5] {
+            assert_eq!(level(json!(state), None, "2026-11-12").unwrap().0, Level::WorthDoing, "state {state} is enrolled");
+        }
+        assert_eq!(level(json!(null), Some(true), "2026-11-12").unwrap().0, Level::WorthDoing, "an ESU licence counts too");
+        assert_eq!(level(json!(2), Some(false), "2026-11-12").unwrap().0, Level::DoFirst, "eligible isn't enrolled");
+        assert_eq!(level(json!(3), None, "2027-10-20").unwrap().0, Level::DoFirst, "coverage has ended");
+        let (_, steps) = level(json!(3), None, "2026-11-12").unwrap();
+        assert!(!steps.iter().any(|s| s.contains("sign up")), "already signed up: {steps:?}");
+    }
+
+    #[test]
+    fn missed_updates_grow_more_urgent() {
+        let mut s = pc("Microsoft Windows 11 Pro", "AMD Ryzen 5 2600", Some("2.0"));
+        let mut level = |last: &str| {
+            s.system["winupdate"] = json!({ "LastInstalled": last });
+            run(&s, "2026-11-12").into_iter().find(|x| x.id == "updates-old").map(|x| x.level)
+        };
+        assert_eq!(level("2026-09-29"), None, "44 days");
+        assert_eq!(level("2026-09-28"), Some(Level::WorthDoing), "45 days");
+        assert_eq!(level("2026-08-15"), Some(Level::WorthDoing), "89 days");
+        assert_eq!(level("2026-08-14"), Some(Level::DoFirst), "90 days");
+    }
+
+    #[test]
+    fn pauses_longer_than_settings_allow_are_worth_doing() {
+        let mut s = pc("Microsoft Windows 11 Pro", "AMD Ryzen 5 2600", Some("2.0"));
+        let mut level = |since: Option<&str>, until: &str| {
+            s.system["winupdate"] = json!({ "PausedSince": since, "PausedUntil": until, "LastInstalled": "2026-11-01" });
+            run(&s, "2026-11-12").into_iter().find(|x| x.id == "updates-paused").map(|x| x.level)
+        };
+        assert_eq!(level(Some("2026-11-05"), "2026-12-10"), Some(Level::NiceToHave), "35 days, the most Settings offers");
+        assert_eq!(level(Some("2026-11-05"), "2027-03-01"), Some(Level::WorthDoing));
+        assert_eq!(level(None, "2027-03-01"), Some(Level::WorthDoing));
+        assert_eq!(level(None, "2026-11-20"), Some(Level::NiceToHave));
     }
 
     #[test]

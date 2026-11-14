@@ -4,6 +4,9 @@ use crate::snapshot::Snapshot;
 use crate::util::J;
 
 const SPD: Area = Area::Speed;
+/// Screens made by software (remote desktop and game streaming tools, virtual machines), not a
+/// graphics card, so their drivers' age means nothing.
+const VIRTUAL_GPUS: &[&str] = &["parsec", "virtual", "iddcx", "iddsample", "remote display", "hyper-v", "vmware"];
 
 pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
     memory(s, f);
@@ -161,6 +164,10 @@ fn misc(s: &Snapshot, f: &mut Vec<Finding>) {
     }
     for g in s.system.a("gpus") {
         let name = g.s("Name").unwrap_or_default();
+        let lower = name.to_lowercase();
+        if VIRTUAL_GPUS.iter().any(|v| lower.contains(v)) {
+            continue;
+        }
         if name.contains("Basic Display") || name.contains("Basic Render") {
             f.push(
                 Finding::new("gpu-basic", SPD, Level::WorthDoing, "No proper graphics driver is installed")
@@ -171,10 +178,11 @@ fn misc(s: &Snapshot, f: &mut Vec<Finding>) {
         } else if let Some(date) = g.s("DriverDate") {
             if let Ok(d) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
                 let days = (chrono::Local::now().date_naive() - d).num_days();
-                if days > 400 {
+                if days > 365 {
                     f.push(
-                        Finding::new(format!("gpu-old-{name}"), SPD, Level::NiceToHave, format!("The {name} driver is over a year old"))
-                            .why("Newer graphics drivers fix bugs and often improve game performance.")
+                        Finding::new(format!("gpu-old-{name}"), SPD, Level::WorthDoing, format!("The {name} driver is over a year old"))
+                            .why("Newer graphics drivers fix bugs and security holes, and often improve game performance.")
+                            .step("Get the latest driver from the card maker's app or website: NVIDIA app, AMD Software or Intel Driver & Support Assistant.")
                             .detail(format!("Driver date: {date}"))
                             .conf(Confidence::Measured),
                     );
