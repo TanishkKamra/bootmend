@@ -58,8 +58,12 @@ pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 pub fn note(ui: &mut Ui, fg: Color32, bg: Color32, ic: &str, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new().fill(bg).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(S4 as i8, S3 as i8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(ico(ic, 16.0).color(fg));
+        ui.horizontal_top(|ui| {
+            // The icon sits in a box one line of text tall, so it centres on the first line
+            // however many lines and buttons follow.
+            let line = ui.text_style_height(&egui::TextStyle::Body);
+            let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, line), Sense::hover());
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, ic, egui::FontId::new(16.0, theme::icons()), fg);
             ui.add_space(S2);
             ui.vertical(|ui| {
                 ui.style_mut().visuals.override_text_color = Some(fg);
