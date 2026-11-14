@@ -1092,6 +1092,36 @@ mod tests {
     }
 
     #[test]
+    fn mx500_pending_blip_is_not_a_failing_drive() {
+        // Crucial MX500s flip SMART 197 between 0 and 1 by themselves (smartmontools ticket #1227).
+        let drive = |model: &str, health: &str, attrs: &[(u8, u64)]| {
+            let mut table = vec![0u8; 512];
+            for (i, (id, raw)) in attrs.iter().enumerate() {
+                let e = 2 + i * 12;
+                table[e] = *id;
+                table[e + 5..e + 11].copy_from_slice(&raw.to_le_bytes()[..6]);
+            }
+            let mut s = base();
+            s.storage = json!({
+                "disks": [{"Number": 0, "Model": model, "Bus": "SATA", "Media": "SSD", "Health": health}],
+                "ataSmart": [{"Instance": format!(r"SCSI\Disk&Ven_&Prod_{model}\4&1"), "Data": table}]
+            });
+            s.drives = crate::collect::smart::drive_health(&s.storage);
+            let f = evaluate(&s);
+            (level_of(&f, "drive-failing-0"), s.drives[0].pending)
+        };
+        // Cleared at the source, so the "what changed" list doesn't report 0 to 1 either.
+        assert_eq!(drive("CT1000MX500SSD1", "Healthy", &[(197, 1)]), (None, None));
+        let (failing, _) = drive("CT500MX500SSD1N", "Healthy", &[(5, 3), (197, 1)]);
+        assert_eq!(failing, None, "retired blocks keep their own Worth doing to-do");
+        assert_eq!(drive("CT1000MX500SSD1", "Healthy", &[(197, 2)]), (Some(Level::DoFirst), Some(2.0)));
+        assert_eq!(drive("CT1000MX500SSD1", "Healthy", &[(197, 1), (198, 1)]).0, Some(Level::DoFirst));
+        assert_eq!(drive("CT1000MX500SSD1", "Healthy", &[(187, 1), (197, 1)]).0, Some(Level::DoFirst));
+        assert_eq!(drive("CT1000MX500SSD1", "Warning", &[(197, 1)]).0, Some(Level::DoFirst));
+        assert_eq!(drive("CT1000BX500SSD1", "Healthy", &[(197, 1)]).0, Some(Level::DoFirst), "only the MX500 is known to do this");
+    }
+
+    #[test]
     fn a_temporary_profile_is_do_first() {
         let p = |temp: bool| {
             let mut s = base();

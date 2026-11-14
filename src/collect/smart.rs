@@ -214,6 +214,12 @@ pub fn drive_health(storage: &Value) -> Vec<DriveHealth> {
                 h.reallocated = raw(5).map(|r| r as f64);
                 h.pending = raw(197).map(|r| r as f64);
                 h.uncorrectable = raw(198).map(|r| r as f64).or(h.uncorrectable);
+                // Crucial MX500s flip 197 between 0 and 1 by themselves on every firmware, and no
+                // update fixes it (smartmontools ticket #1227). A lone 1 with no uncorrectable
+                // errors isn't a pending sector; real damage shows in 187 or 198 too.
+                if model.to_ascii_uppercase().contains("MX500") && raw(197) == Some(1) && raw(187).unwrap_or(0) == 0 && h.uncorrectable.unwrap_or(0.0) == 0.0 {
+                    h.pending = None;
+                }
                 h.power_on_hours = raw(9).map(|r| (r & 0xFFFF_FFFF) as f64).or(h.power_on_hours);
                 h.temp_c = raw(194).map(|r| (r & 0xFF) as f64).filter(|t| *t > 0.0).or(h.temp_c);
                 if media == "SSD" {
