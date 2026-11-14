@@ -75,7 +75,10 @@ Every finding gets one of four levels. Home groups the to-dos by level, and the 
 | Drive errors in Windows' log | On a drive inside the PC, over 90 days: any bad block, failure warning or file system damage; 3 or more retries, resets, controller errors or lost writes (*judgement*: one is often a hiccup). USB drives and memory sticks are skipped, and a failing drive has its own Do first to-do |
 | Graphics driver stops responding | On 3 or more different days in 30 (*judgement*). Counted by day because one freeze often brings several resets within minutes. PCs with only a virtual screen are skipped |
 | Windows still set up for testing | Test signing, driver signature checks off, kernel debugging, Data Execution Prevention off, a memory or processor limit below what the PC has, safe mode, or Driver Verifier |
-| No page file | With under 16 GB of memory, or when Windows couldn't save a crash report in 90 days |
+| No page file | With under 16 GB of memory, or when Windows warned it couldn't save crash files |
+| Crash files switched off | After a crash in the last 90 days. Tuning tools sometimes switch them off |
+| No page file on the system drive | Page files only on other drives and no dedicated crash file, after a crash or a start-up warning. Windows can't save a crash file without one |
+| Crash files that couldn't be saved | A failed write in 90 days with no saved file within 5 minutes; a failure next to a saved file is one crash, partly saved (best guess: usually the drive stopped responding or the power dropped) |
 | Browser settings forced by a policy | A policy sets the home page, start-up pages, new tab page, search engine, a proxy or force-installed extensions (best guess: some security apps do this on purpose) |
 | Proxy | Web traffic goes through another computer: a proxy server, setup script or Windows' own WinHTTP proxy. One running on this PC is Nice to have |
 | DNS server we don't recognise | Set on the PC by hand, public, and not a well-known service such as Cloudflare, Google, Quad9, OpenDNS, AdGuard, NextDNS, Control D or CleanBrowsing (best guess) |
@@ -107,7 +110,9 @@ Every finding gets one of four levels. Home groups the to-dos by level, and the 
 | Preview versions of Windows | The PC is in the Windows Insider Program (best guess: it may be on purpose) |
 | Windows activation grace period | Windows still has time to confirm its licence |
 | Windows Security hasn't scanned | Over 30 days since its last quick or full scan (*judgement*: real-time protection is the main defence) |
-| No page file | With 16 GB of memory or more and no lost crash reports |
+| No page file | With 16 GB of memory or more and no warning about crash files |
+| Crash files switched off | No crash in 90 days |
+| No page file on the system drive | No crash and no start-up warning |
 | Network cable at 100 Mbps or less | A wired port that can do more is linked at 10 or 100 Mbps (*judgement*: usually the cable, plug or router port) |
 | TRIM off | On an SSD that holds Windows |
 
@@ -127,7 +132,8 @@ Another antivirus protecting the PC, threats Windows Security already removed, a
 - Windows 11 end dates: [Microsoft Learn lifecycle, Windows 11 Home and Pro](https://learn.microsoft.com/en-us/lifecycle/products/windows-11-home-and-pro) (checked 14 November 2026). The end date shown there is the first day without fixes.
 - Graphics driver timeouts (event 4101, stop codes 0x117 and 0x141): [Microsoft Learn, timeout detection and recovery](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/timeout-detection-and-recovery).
 - Drive errors in the System log: [Microsoft Learn, data corruption and disk errors](https://learn.microsoft.com/en-us/troubleshoot/windows-server/backup-and-storage/troubleshoot-data-corruption-and-disk-errors).
-- Page file and crash reports: [Microsoft Learn, introduction to the page file](https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/introduction-to-the-page-file).
+- Page file and crash files: [Microsoft Learn, introduction to the page file](https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/introduction-to-the-page-file) and [memory dump file options](https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/memory-dump-file-options) (CrashDumpEnabled 0 is none, 7 is Windows' default; a small dump needs a page file on the boot volume; checked 14 November 2026).
+- Crash files that fail to save (volmgr event 161): no Microsoft page documents the event itself. Causes from [Microsoft Q&A](https://learn.microsoft.com/en-us/answers/questions/5893224/how-to-fix-dump-file-creation-failed-due-to-error) and [Microsoft's storage team on crash dump failures](https://learn.microsoft.com/en-us/archive/blogs/storwdk/understanding-the-crashdump-test-and-debugging-failures) (checked 14 November 2026).
 - Vulnerable driver blocklist: [Microsoft Learn, recommended driver block rules](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/design/microsoft-recommended-driver-block-rules).
 - Sample submission warning: community-documented ([TheWindowsClub](https://www.thewindowsclub.com/automatic-sample-submission-is-off-in-microsoft-defender)); Microsoft publishes no list of Windows Security's warnings. Which antivirus apps are switched on comes from Security Center's `productState`, also community-documented.
 - Smart App Control: [Microsoft Support FAQ](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003). Controlled folder access: [Microsoft Learn](https://learn.microsoft.com/en-us/defender-endpoint/controlled-folder-access-overview).

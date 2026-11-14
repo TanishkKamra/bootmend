@@ -6,6 +6,11 @@ Try-Section 'perf' {
     CpuLoadPct = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average }
   $R.topMemory = @(Get-Process | Group-Object ProcessName | ForEach-Object { [pscustomobject]@{ N = $_.Name; M = ($_.Group | Measure-Object WorkingSet64 -Sum).Sum } } | Sort-Object M -Descending | Select-Object -First 12 | ForEach-Object { [ordered]@{ Name = $_.N; MB = [math]::Round($_.M / 1MB) } })
 }
+Try-Section 'crashControl' {
+  # Whether Windows saves a crash file (0 = never), and where it can write one besides the page file.
+  $cc = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl'
+  $R.crashControl = [ordered]@{ Enabled = $cc.CrashDumpEnabled; DedicatedDumpFile = "$($cc.DedicatedDumpFile)"; SystemDrive = $env:SystemDrive }
+}
 Try-Section 'stability' {
   $st = Get-CimInstance Win32_ReliabilityStabilityMetrics | Sort-Object TimeGenerated -Descending | Select-Object -First 1
   $R.stabilityIndex = $(if ($st) { [math]::Round($st.SystemStabilityIndex, 1) } else { $null })
@@ -16,9 +21,10 @@ Try-Section 'stability' {
   $R.bugchecks = @(Get-WinEvent -FilterHashtable @{LogName = 'System'; Id = 1001; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting'; StartTime = $since } -MaxEvents 200 | ForEach-Object {
       $m = ($_.Message -replace '\s+', ' '); [ordered]@{ Date = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm'); Text = $m.Substring(0, [math]::Min(400, $m.Length)) } })
   $R.whea = @(Get-WinEvent -FilterHashtable @{LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; StartTime = $since } -MaxEvents 100 | ForEach-Object { [ordered]@{ Date = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm'); Id = $_.Id; Text = (($_.Message -split "`n")[0]).Trim() } })
-  # Crash reports Windows couldn't save: volmgr 161 at the crash, 46 at start-up when there is nowhere
-  # to save one (usually no page file). 162 is the opposite, a report saved.
-  $R.dumpFailures = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'volmgr'; Id = 161, 46; StartTime = $since } -MaxEvents 200).Count
+  # Crash files: volmgr 162 is one saved, 161 one Windows failed to write while crashing, and 46 a
+  # start-up where it couldn't get ready to write one (usually no page file on the system drive).
+  $R.dumpEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'volmgr'; Id = 161, 162, 46; StartTime = $since } -MaxEvents 300 |
+      ForEach-Object { [ordered]@{ Date = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm'); Id = $_.Id } })
   # The graphics driver freezing and Windows restarting it: Display 4101, and the WATCHDOG reports
   # Windows Error Reporting sends later. Those are dated by the report's file name, because the
   # event itself is logged when the report is queued, sometimes months on.

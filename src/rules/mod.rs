@@ -593,18 +593,78 @@ mod tests {
 
     #[test]
     fn a_missing_page_file_matters_most_with_little_memory() {
-        let page = |files: serde_json::Value, ram: f64, dump_failures: i64| {
+        let page = |files: serde_json::Value, ram: f64, warned: bool| {
             let mut s = base();
-            s.health = json!({ "perf": { "Pagefiles": files, "RamTotalGB": ram }, "dumpFailures": dump_failures });
+            let events = if warned { json!([{"Date": "2026-11-01 09:00", "Id": 46}]) } else { json!([]) };
+            s.health = json!({ "perf": { "Pagefiles": files, "RamTotalGB": ram }, "dumpEvents": events });
             level_of(&evaluate(&s), "no-pagefile")
         };
-        assert_eq!(page(json!([]), 8.0, 0), Some(Level::WorthDoing));
-        assert_eq!(page(json!([]), 32.0, 3), Some(Level::WorthDoing), "crash reports can't be saved");
-        assert_eq!(page(json!([]), 32.0, 0), Some(Level::NiceToHave));
-        assert_eq!(page(json!(["C:\\pagefile.sys 4096 MB"]), 8.0, 0), None);
+        assert_eq!(page(json!([]), 8.0, false), Some(Level::WorthDoing));
+        assert_eq!(page(json!([]), 32.0, true), Some(Level::WorthDoing), "Windows warned it can't save crash files");
+        assert_eq!(page(json!([]), 32.0, false), Some(Level::NiceToHave));
+        assert_eq!(page(json!(["C:\\pagefile.sys 4096 MB"]), 8.0, false), None);
         let mut s = base();
         s.health = json!({});
         assert_eq!(level_of(&evaluate(&s), "no-pagefile"), None, "no data, no guess");
+    }
+
+    #[test]
+    fn crash_files_windows_could_not_save() {
+        let ev = |list: &[(&str, i64)]| json!(list.iter().map(|(d, i)| json!({"Date": d, "Id": i})).collect::<Vec<_>>());
+        let pc = |files: serde_json::Value, enabled: i64, events: serde_json::Value| {
+            let mut s = base();
+            s.health = json!({
+                "perf": {"Pagefiles": files, "RamTotalGB": 32.0},
+                "crashControl": {"Enabled": enabled, "DedicatedDumpFile": "", "SystemDrive": "C:"},
+                "dumpEvents": events
+            });
+            s
+        };
+        let on_c = || json!(["C:\\pagefile.sys 4096 MB", "D:\\pagefile.sys 2048 MB"]);
+        let fixes = |s: &Snapshot, id: &str| -> Vec<Fix> {
+            let f = evaluate(s);
+            let x = f.iter().find(|x| x.id == id).unwrap_or_else(|| panic!("{id} missing"));
+            x.actions.iter().filter_map(|a| if let Action::Fix(fx) = a { Some(fx.clone()) } else { None }).collect()
+        };
+        let none_about_crash_files = |s: &Snapshot| evaluate(s).iter().all(|x| !x.id.starts_with("crash-files"));
+
+        // A failure within minutes of a saved file is the same crash, partly saved.
+        let s = pc(
+            on_c(),
+            7,
+            ev(&[("2026-10-19 06:07", 162), ("2026-10-19 06:07", 161), ("2026-09-15 20:28", 161), ("2026-09-15 19:57", 162), ("2026-09-09 19:38", 161)]),
+        );
+        let f = evaluate(&s);
+        let x = f.iter().find(|x| x.id == "crash-files-lost").expect("finding");
+        assert_eq!(x.title, "Windows couldn't save the details of 2 crashes");
+        assert_eq!(x.level, Level::WorthDoing);
+        assert_eq!(x.details, ["2026-09-15 20:28", "2026-09-09 19:38"]);
+        assert!(x.actions.contains(&Action::Goto(Page::Storage)));
+        assert!(none_about_crash_files(&pc(on_c(), 7, ev(&[("2026-10-19 06:07", 162), ("2026-10-19 06:08", 161)]))), "partly saved");
+        assert!(none_about_crash_files(&pc(on_c(), 7, json!([]))));
+
+        // Switched off: worth doing once Windows has crashed.
+        let mut off = pc(on_c(), 0, json!([]));
+        assert_eq!(level_of(&evaluate(&off), "crash-files-off"), Some(Level::NiceToHave));
+        assert_eq!(fixes(&off, "crash-files-off"), [Fix::EnableCrashFiles]);
+        off.health["unexpectedShutdowns"] = json!([{"Date": "2026-11-01 10:00", "Code": "0x3B", "PowerButton": false}]);
+        assert_eq!(level_of(&evaluate(&off), "crash-files-off"), Some(Level::WorthDoing));
+
+        // Page files only on other drives leave Windows nowhere to write one.
+        let d_only = pc(json!(["D:\\pagefile.sys 4096 MB"]), 7, json!([]));
+        assert_eq!(level_of(&evaluate(&d_only), "crash-files-no-room"), Some(Level::NiceToHave));
+        assert_eq!(fixes(&d_only, "crash-files-no-room"), [Fix::SystemManagedPagefile]);
+        let warned = pc(json!(["d:\\pagefile.sys 4096 MB"]), 7, ev(&[("2026-11-01 09:00", 46)]));
+        assert_eq!(level_of(&evaluate(&warned), "crash-files-no-room"), Some(Level::WorthDoing));
+        let mut dedicated = pc(json!(["D:\\pagefile.sys 4096 MB"]), 7, json!([]));
+        dedicated.health["crashControl"]["DedicatedDumpFile"] = json!("D:\\dedicated.sys");
+        assert!(none_about_crash_files(&dedicated), "a dedicated crash file works instead");
+        assert!(none_about_crash_files(&pc(json!(["c:\\pagefile.sys 4096 MB"]), 7, json!([]))), "any case");
+
+        // No page file at all is the no-pagefile to-do's job.
+        let none = pc(json!([]), 7, ev(&[("2026-11-01 09:00", 46)]));
+        assert_eq!(level_of(&evaluate(&none), "no-pagefile"), Some(Level::WorthDoing));
+        assert!(none_about_crash_files(&none));
     }
 
     #[test]

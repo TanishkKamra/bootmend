@@ -50,6 +50,7 @@ pub enum Fix {
     SystemManagedPagefile,
     EnableDriverBlocklist,
     EnableLsaProtection,
+    EnableCrashFiles,
     /// What was switched on, so undo puts back exactly that.
     TurnOffProxy {
         enabled: bool,
@@ -115,6 +116,7 @@ impl Fix {
             Fix::SystemManagedPagefile => "Let Windows manage it",
             Fix::EnableDriverBlocklist => "Turn on the blocklist",
             Fix::EnableLsaProtection => "Turn on LSA protection",
+            Fix::EnableCrashFiles => "Turn on crash files",
             Fix::TurnOffProxy { .. } => "Turn off the proxy",
             Fix::DnsAutomatic { .. } => "Use automatic DNS",
             Fix::RemoveBrowserPolicies { .. } => "Remove the locked settings",
@@ -143,6 +145,7 @@ impl Fix {
             Fix::SystemManagedPagefile => "Windows will create a page file and choose its size itself. A restart finishes the change, and you can undo it from History.".into(),
             Fix::EnableDriverBlocklist => "Windows will block drivers on Microsoft's list of unsafe ones. If an old game's anti-cheat or a hardware tool stops working, undo this from History. A restart finishes the change.".into(),
             Fix::EnableLsaProtection => "Windows will guard the part of it that holds your sign-in details. Rarely, an old fingerprint reader or smart-card add-on stops working; if so, undo this from History. A restart finishes the change.".into(),
+            Fix::EnableCrashFiles => "Windows will save the details of a crash again, the way it does out of the box, so the cause can be found. A restart finishes the change, and you can undo it from History.".into(),
             Fix::TurnOffProxy { .. } => "Web traffic will go straight to the internet again. If a VPN or another tool stops working, switch the proxy back on from History. Restart your browser afterwards.".into(),
             Fix::DnsAutomatic { adapter, servers } => format!("{adapter} will use the DNS servers your router hands out. To go back to {}, undo this from History.", servers.join(", ")),
             Fix::RemoveBrowserPolicies { browser, .. } => format!("The locked settings will be removed from {browser}, after saving a copy so you can put them back from History. Restart {browser} afterwards."),
@@ -236,9 +239,15 @@ impl Fix {
                 let d = ps_quote(drive);
                 (format!("Resume-BitLocker -MountPoint {d} | Out-Null"), format!("Suspend-BitLocker -MountPoint {d} -RebootCount 0 | Out-Null"))
             }
+            // Switching to automatic replaces the list of page files, so the old list is saved for the undo.
             Fix::SystemManagedPagefile => {
+                let k = r"'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'";
+                let f = format!("$f = {}", ps_quote(&backup_file("pagefiles", "txt")));
                 let set = |v: &str| format!("Get-CimInstance Win32_ComputerSystem | Set-CimInstance -Property @{{ AutomaticManagedPagefile = ${v} }}");
-                (set("true"), set("false"))
+                (
+                    format!("{f}\n[IO.File]::WriteAllLines($f, [string[]]@((Get-ItemProperty {k}).PagingFiles | Where-Object {{ $_ }}))\n{}", set("true")),
+                    format!("{f}\n{}\nSet-ItemProperty {k} -Name PagingFiles -Value ([IO.File]::ReadAllLines($f)) -Type MultiString", set("false")),
+                )
             }
             Fix::EnableDriverBlocklist => {
                 let k = r"'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config'";
@@ -254,6 +263,10 @@ impl Fix {
                         "Set-ItemProperty {k} -Name RunAsPPL -Value 0 -Type DWord\nif ((Get-ItemProperty {k}).PSObject.Properties.Name -contains 'RunAsPPLBoot') {{ Remove-ItemProperty {k} -Name RunAsPPLBoot }}"
                     ),
                 )
+            }
+            Fix::EnableCrashFiles => {
+                let set = |v: u8| format!(r"Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -Name CrashDumpEnabled -Value {v} -Type DWord");
+                (set(7), set(0))
             }
             Fix::TurnOffProxy { enabled, pac, winhttp } => {
                 let k = r"'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'";
@@ -282,7 +295,7 @@ impl Fix {
             }
             Fix::RemoveBrowserPolicies { browser, key, settings } => {
                 let hive = key.split('\\').next().unwrap_or_default();
-                let f = ps_quote(&backup_file(&format!("policies-{browser}-{hive}")));
+                let f = ps_quote(&backup_file(&format!("policies-{browser}-{hive}"), "reg"));
                 let (reg, path) = (ps_quote(key), ps_quote(&format!("Registry::{key}")));
                 let names = settings.iter().map(|x| ps_quote(x)).collect::<Vec<_>>().join(", ");
                 // A policy is a value on the browser's key, or a subkey (lists, Firefox's groups).
@@ -303,10 +316,10 @@ foreach ($n in @({names})) {{
 }
 
 /// Where a copy of settings is kept before they are removed, so undo can put them back.
-fn backup_file(what: &str) -> String {
+fn backup_file(what: &str, ext: &str) -> String {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let dir = data_dir("backups").unwrap_or_else(|_| std::env::temp_dir());
-    dir.join(format!("{what}-{stamp}.reg")).display().to_string()
+    dir.join(format!("{what}-{stamp}.{ext}")).display().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,7 +478,13 @@ mod tests {
         let backup = a.lines().find(|l| l.starts_with("$f = ")).expect("backup path");
         assert!(u.contains(backup), "the undo imports the same copy");
         assert!(!p.needs_admin());
-        for fx in [Fix::EnableCloudProtection, Fix::EnableTrim, Fix::SystemManagedPagefile, Fix::EnableDriverBlocklist] {
+        let (a, u) = Fix::SystemManagedPagefile.scripts();
+        let backup = a.lines().find(|l| l.starts_with("$f = ")).expect("backup path");
+        assert!(a.contains("WriteAllLines") && a.contains("AutomaticManagedPagefile = $true"), "{a}");
+        assert!(u.contains(backup) && u.contains("ReadAllLines") && u.contains("PagingFiles"), "puts back the exact page files: {u}");
+        let (a, u) = Fix::EnableCrashFiles.scripts();
+        assert!(a.contains("CrashDumpEnabled -Value 7") && u.contains("CrashDumpEnabled -Value 0"), "{a} / {u}");
+        for fx in [Fix::EnableCloudProtection, Fix::EnableTrim, Fix::EnableDriverBlocklist] {
             let (a, u) = fx.scripts();
             assert!(!a.is_empty() && !u.is_empty() && a != u, "{fx:?}");
         }
@@ -491,6 +510,7 @@ mod tests {
             Fix::ResumeEncryption { drive: "C:".into() },
             Fix::SystemManagedPagefile,
             Fix::EnableDriverBlocklist,
+            Fix::EnableCrashFiles,
             Fix::EnableLsaProtection,
             Fix::TurnOffProxy { enabled: true, pac: "http://x/p.pac".into(), winhttp: "10.0.0.1:3128".into() },
             Fix::DnsAutomatic { adapter: "Wi-Fi".into(), servers: vec!["185.10.10.10".into()] },

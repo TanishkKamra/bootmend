@@ -102,16 +102,82 @@ fn pagefile(s: &Snapshot, f: &mut Vec<Finding>) {
         return;
     }
     let ram = perf.f("RamTotalGB").unwrap_or(0.0);
-    let lost = s.health.i("dumpFailures").unwrap_or(0);
-    let level = if ram < 16.0 || lost > 0 { Level::WorthDoing } else { Level::NiceToHave };
+    let (lost, warned) = crash_file_events(&s.health);
+    let level = if ram < 16.0 || warned || !lost.is_empty() { Level::WorthDoing } else { Level::NiceToHave };
     let mut x = Finding::new("no-pagefile", STAB, level, "Windows has no page file")
         .why("A page file gives Windows room to spare when memory runs short, and it's where Windows saves the details of a crash. Without one, big apps can stop with out-of-memory errors, and blue screens can't be looked into.")
         .step("Search Start for \"Adjust the appearance and performance of Windows\", open Advanced, then Virtual memory, Change, and tick Automatically manage paging file size for all drives. Restart afterwards.")
         .act(Action::Fix(Fix::SystemManagedPagefile));
-    if lost > 0 {
-        x = x.detail(format!("{} couldn't be saved in the last 90 days", plural(lost as usize, "crash report", "crash reports")));
+    if !lost.is_empty() {
+        x = x.detail(format!("{} couldn't be saved in the last 90 days", plural(lost.len(), "crash file", "crash files")));
+    } else if warned {
+        x = x.detail("Windows warned at start-up that it couldn't save crash files");
     }
     f.push(x);
+}
+
+/// Crash files Windows failed to write (their dates), and whether it warned at start-up that it
+/// couldn't write one at all. volmgr 161 is a failed write, 162 a saved file, 46 the warning. A
+/// failure within minutes of a saved file is the same crash, partly saved, so it doesn't count.
+fn crash_file_events(h: &serde_json::Value) -> (Vec<String>, bool) {
+    let ev = h.a("dumpEvents");
+    let at = |d: &str| chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%d %H:%M").ok();
+    let saved: Vec<_> = ev.iter().filter(|e| e.i("Id") == Some(162)).filter_map(|e| at(&e.s("Date")?)).collect();
+    let lost = ev
+        .iter()
+        .filter(|e| e.i("Id") == Some(161))
+        .filter_map(|e| e.s("Date"))
+        .filter(|d| at(d).is_none_or(|t| saved.iter().all(|s| (*s - t).num_minutes().abs() > 5)))
+        .collect();
+    (lost, ev.iter().any(|e| e.i("Id") == Some(46)))
+}
+
+/// A crash file shows what made Windows crash. Three things stop one being saved: the setting is
+/// off, there's no page file on the system drive to write it through, or the write itself failed.
+/// No page file at all is the no-pagefile to-do's job.
+fn crash_files(s: &Snapshot, f: &mut Vec<Finding>) {
+    let h = &s.health;
+    let files: Vec<String> = h.g("perf").strs("Pagefiles");
+    if files.is_empty() {
+        return;
+    }
+    let cc = h.g("crashControl");
+    let crashed = !h.a("bugchecks").is_empty() || h.a("unexpectedShutdowns").iter().any(|e| e.s("Code").is_some_and(|c| c != "0x0"));
+    let (lost, warned) = crash_file_events(h);
+    if cc.i("Enabled") == Some(0) {
+        f.push(
+            Finding::new("crash-files-off", STAB, if crashed { Level::WorthDoing } else { Level::NiceToHave }, "Windows is set not to save crash files")
+                .why("When Windows crashes, it normally saves a file that shows what caused it. That's switched off, so crashes can't be looked into. Tuning tools sometimes switch it off to save space.")
+                .step("Search Start for \"View advanced system settings\", open Startup and Recovery, Settings, and set Write debugging information to Automatic memory dump.")
+                .act(Action::Fix(Fix::EnableCrashFiles)),
+        );
+        return;
+    }
+    let drive = cc.s("SystemDrive").filter(|d| !d.is_empty()).unwrap_or_else(|| "C:".into()).to_ascii_uppercase();
+    let on_drive = files.iter().any(|p| p.to_ascii_uppercase().starts_with(&drive));
+    if !on_drive && cc.s("DedicatedDumpFile").is_none_or(|d| d.is_empty()) {
+        let level = if crashed || warned || !lost.is_empty() { Level::WorthDoing } else { Level::NiceToHave };
+        f.push(
+            Finding::new("crash-files-no-room", STAB, level, "Windows can't save crash files")
+                .why(format!("When Windows crashes, it saves what caused it through the page file on drive {drive}, and {drive} doesn't have one. Without that file, crashes can't be looked into."))
+                .step("Search Start for \"Adjust the appearance and performance of Windows\", open Advanced, then Virtual memory, Change, and tick Automatically manage paging file size for all drives. Restart afterwards.")
+                .details(files.iter().map(|p| format!("Page file: {p}")))
+                .act(Action::Fix(Fix::SystemManagedPagefile)),
+        );
+        return;
+    }
+    if !lost.is_empty() {
+        let these = if lost.len() == 1 { "this crash" } else { "these crashes" };
+        f.push(
+            Finding::new("crash-files-lost", STAB, Level::WorthDoing, format!("Windows couldn't save the details of {}", plural(lost.len(), "crash", "crashes")))
+                .why(format!("When Windows crashes, it writes a file that shows what went wrong. For {these} it couldn't, which usually means the drive stopped responding, or the PC lost power, while the file was being written."))
+                .step("Check the drive's health on the Storage page.")
+                .step("If the PC also switches off by itself, the power supply may be struggling. Have it checked.")
+                .details(lost)
+                .conf(Confidence::BestGuess)
+                .act(Action::Goto(Page::Storage)),
+        );
+    }
 }
 
 pub fn hardware_stress_codes(code: u32) -> bool {
@@ -122,6 +188,7 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
     gpu_resets(s, f);
     boot_options(s, f);
     pagefile(s, f);
+    crash_files(s, f);
     let h = &s.health;
     let mut codes: BTreeMap<u32, usize> = BTreeMap::new();
     for b in h.a("bugchecks") {
