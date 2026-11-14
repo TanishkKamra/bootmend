@@ -63,7 +63,7 @@ Bootmend checks a Windows PC (hardware, health, security, software), then turns 
   - Not flattering and not persuasive: no praise for the user, no pushing, no urgency it can't back up.
   - No "please", "successfully", "simply" or "just".
 - **Look:** Windows 11 native, with Mica and Segoe UI Variable.
-- **Logo:** the Keystone. It's an arch of five stones on two legs, and its top stone is still dropping in. Everything is graphite except the keystone, which is cobalt `#2F5BEA`. The app icon sits on a graphite plate. There's no tagline. DESIGN.md has the reasoning and the rules.
+- **Logo:** the Keystone. It's an arch of five stones on two legs, and its top stone is still dropping in. Everything is graphite except the keystone, which is cobalt `#2F5BEA`. The app icon is the arch alone, with no plate. There's no tagline. DESIGN.md has the reasoning and the rules.
 
 ## Evidence on Hand
 

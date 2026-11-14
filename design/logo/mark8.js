@@ -145,10 +145,12 @@ function icon(key, size, finish, accent) {
   const acc = accent || null;
   const g = (n, a, b) => `<linearGradient id="${id}${n}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient>`;
   const defs = g('silver', '#F4F5F7', '#B4BAC4') + g('silverK', '#9AA1AD', '#6E7581') + g('graph', '#474B54', '#1D1F24') + g('graphK', '#A3A9B4', '#7C838F')
-    + g('plate', '#2B2D33', '#121317') + (acc ? g('acc', acc[0], acc[1]) : '')
+    + g('plate', '#2B2D33', '#121317') + g('steel', '#828A97', '#666D7A') + g('cob', '#5B86FF', '#3A66F2')
+    + `<filter id="${id}sh2" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="0.6" stdDeviation="0.6" flood-color="#000" flood-opacity=".25"/></filter>` + (acc ? g('acc', acc[0], acc[1]) : '')
     + `<filter id="${id}sh" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="0.9" stdDeviation="0.9" flood-color="#000" flood-opacity=".5"/></filter>`;
   let A, B, Mid;
   if (finish === 'sil') { A = B = Mid = '#000'; }
+  else if (finish === 'app') { A = `url(#${id}steel)`; Mid = '#737A87'; B = `url(#${id}cob)`; }
   else if (finish === 'light') { A = `url(#${id}graph)`; Mid = '#2E3138'; B = acc ? `url(#${id}acc)` : `url(#${id}graphK)`; }
   else { A = `url(#${id}silver)`; Mid = '#D3D7DD'; B = acc ? `url(#${id}acc)` : `url(#${id}silverK)`; }
   const body = `<g fill="${A}">${parts.a.replace(/class="mid"/g, `fill="${Mid}"`)}</g><g fill="${B}">${parts.b}</g>`;
@@ -156,6 +158,6 @@ function icon(key, size, finish, accent) {
     ? (() => { const o = ICONOPT, w = 48 - 2 * o.inset, rx = w / 4;
         return `<rect x="${o.inset}" y="${o.inset}" width="${w}" height="${w}" rx="${rx}" fill="url(#${id}plate)"/><rect x="${o.inset + 0.4}" y="${o.inset + 0.4}" width="${w - 0.8}" height="${w - 0.8}" rx="${rx - 0.4}" fill="none" stroke="#fff" stroke-opacity=".1" stroke-width=".8"/>
        <g transform="translate(24 24) scale(${o.scale}) translate(-24 -24)"${o.shadow ? ` filter="url(#${id}sh)"` : ''}>${body}</g>`; })()
-    : body;
+    : finish === 'app' ? `<g transform="translate(0 -2)" filter="url(#${id}sh2)">${body}</g>` : body;
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="${size}" height="${size}"><defs>${defs}${parts.defs}</defs>${inner}</svg>`;
 }

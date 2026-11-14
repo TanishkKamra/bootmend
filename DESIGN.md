@@ -23,12 +23,12 @@ The **Keystone** is an arch of five stones on two legs, with its top stone, the 
   - Joints are 1.6 units wide.
   - The keystone sits 2.6 units above its seat.
 - **Colour:**
-  - Stones: graphite.
+  - Stones: graphite in the mark, and a lighter steel in the app icon so it shows on dark taskbars.
   - Keystone: cobalt `#2F5BEA` (gradient `#6A92FF` to `#2F5BEA`).
   - A one-colour version exists for print.
 - **App icon:**
-  - The mark at 66% on a graphite plate (`#2B2D33` to `#121317`).
-  - At 24 px and below, the plate fills more of the square and the mark grows to 78%, so it still reads in the taskbar.
+  - The mark alone, with no plate, inside the 48-unit grid with a 2-unit margin.
+  - Stones are a lighter steel (`#828A97` to `#666D7A`) and the keystone a brighter cobalt (`#5B86FF` to `#3A66F2`). Every stop passes 3:1 on both the light (`#F3F3F3`) and dark (`#202020`) taskbar.
   - `assets/bootmend.ico` holds 16, 20, 24, 30, 32, 36, 40, 48, 64 and 256 px.
   - The exe and the window both use it.
 - **Files:**
