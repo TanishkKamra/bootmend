@@ -5,12 +5,19 @@ $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 Try-Section 'device' {
   $tpm = Get-Tpm; $tpmc = Get-CimInstance -Namespace root\cimv2\security\microsofttpm -ClassName Win32_Tpm
   $sb = $null; try { $sb = Confirm-SecureBootUEFI } catch { }
+  # Confirm-SecureBootUEFI needs administrator rights; Windows also records the state here.
+  if ($null -eq $sb) { $st = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State').UEFISecureBootEnabled; if ($null -ne $st) { $sb = ($st -eq 1) } }
+  # Progress of the switch to the 2023 Secure Boot certificates (community-documented values).
+  $sbs = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing'
   $R.device = [ordered]@{
     Manufacturer = Clean $cs.Manufacturer; Model = Clean $cs.Model; Family = Clean $cs.SystemFamily; SKU = Clean $cs.SystemSKUNumber
     Serial = Clean $bios.SerialNumber; UUID = $csp.UUID; ChassisTypes = @($encl.ChassisTypes); Hostname = $env:COMPUTERNAME; Workgroup = $cs.Workgroup
     BoardMaker = Clean $bb.Manufacturer; BoardProduct = Clean $bb.Product; BoardVersion = Clean $bb.Version
     BIOSVendor = Clean $bios.Manufacturer; BIOSVersion = Clean $bios.SMBIOSBIOSVersion; BIOSDate = (D $bios.ReleaseDate)
     FirmwareMode = $env:firmware_type; SecureBoot = $sb
+    SecureBootCert = $sbs.UEFICA2023Status; SecureBootCertCapable = $sbs.WindowsUEFICA2023Capable; SecureBootCertError = [bool]$sbs.UEFICA2023Error
+    # Joined to a work or school domain, or to Microsoft Entra: its IT department manages it.
+    Joined = ([bool]$cs.PartOfDomain -or [bool](Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo'))
     TpmPresent = $tpm.TpmPresent; TpmReady = $tpm.TpmReady; TpmMaker = Clean $tpm.ManufacturerIdTxt; TpmVersion = Clean $tpm.ManufacturerVersion
     TpmSpec = $(if ($tpmc.SpecVersion) { ($tpmc.SpecVersion -split ',')[0] } else { $null })
     HasBattery = [bool](Get-CimInstance Win32_Battery)
@@ -122,13 +129,16 @@ Try-Section 'winupdate' {
   # history times are UTC.
   $boot = $os.LastBootUpTime.ToUniversalTime()
   $first = $hist | Where-Object { $_.ResultCode -eq 2 -and $_.Operation -eq 1 -and $_.Date -gt $boot -and $_.Title -cnotmatch '^[0-9A-Z]{12}-' } | Sort-Object Date | Select-Object -First 1
+  # Windows also logs the moment an installed package first needs a restart. The earlier of the two wins.
+  $staged = $(if ($R.os.PendingReboot) { Get-WinEvent -FilterHashtable @{ LogName = 'Setup'; ProviderName = 'Microsoft-Windows-Servicing'; Id = 4; StartTime = $os.LastBootUpTime } | Sort-Object TimeCreated | Select-Object -First 1 } else { $null })
+  $waiting = @($(if ($first) { [DateTime]::SpecifyKind($first.Date, 'Utc').ToLocalTime() }), $staged.TimeCreated) | Where-Object { $_ } | Sort-Object | Select-Object -First 1
   $pol = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
   $R.winupdate = [ordered]@{
     LastInstalled = $(if ($ok) { $ok.Date.ToString('yyyy-MM-dd') } else { $null }); LastInstalledTitle = $(if ($ok) { $ok.Title } else { $null })
     Failed = $failed
     PausedUntil = $(if ($ux.PauseUpdatesExpiryTime) { D $ux.PauseUpdatesExpiryTime } else { $null })
     PausedSince = $(if ($ux.PauseUpdatesStartTime) { D $ux.PauseUpdatesStartTime } else { $null })
-    RestartWaitingSince = $(if ($first) { $first.Date.ToString('yyyy-MM-dd') } else { $null })
+    RestartWaitingSince = $(if ($waiting) { $waiting.ToString('yyyy-MM-dd') } else { $null })
     AutoUpdateOff = ($pol.NoAutoUpdate -eq 1)
   }
 }

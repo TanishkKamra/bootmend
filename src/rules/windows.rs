@@ -103,15 +103,26 @@ pub fn win11_readiness(s: &Snapshot) -> Readiness {
     r
 }
 
+/// Whether this Windows 10 PC is signed up for Extended Security Updates. Windows' own sign-up
+/// state: 3 = this device, 5 = through a Microsoft account. The values are community-documented,
+/// not by Microsoft, hence the best-guess label.
+fn esu_enrolled(s: &Snapshot) -> bool {
+    let os = s.system.g("os");
+    matches!(os.i("EsuState"), Some(3 | 5)) || os.b("EsuLicensed") == Some(true)
+}
+
+/// Windows 10 outside Extended Security Updates: it gets no updates at all, which its own to-do
+/// covers, so checks that depend on updates stay quiet.
+pub fn without_updates(s: &Snapshot) -> bool {
+    s.system.g("os").s("Edition").is_some_and(|e| e.contains("Windows 10")) && !esu_enrolled(s)
+}
+
 fn windows10(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
     if !s.system.g("os").s("Edition").is_some_and(|e| e.contains("Windows 10")) {
         return;
     }
     let esu_over = date(ESU_END).is_some_and(|end| today > end);
-    let os = s.system.g("os");
-    // Windows' own sign-up state: 3 = this device, 5 = through a Microsoft account. The values are
-    // community-documented, not by Microsoft, hence the best-guess label.
-    let enrolled = matches!(os.i("EsuState"), Some(3 | 5)) || os.b("EsuLicensed") == Some(true);
+    let enrolled = esu_enrolled(s);
     let r = win11_readiness(s);
     let level = if esu_over || !enrolled { Level::DoFirst } else { Level::WorthDoing };
     let why = if esu_over {

@@ -15,6 +15,145 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
     apps(s, f);
     system(s, f);
     device_access(s, f);
+    backup(s, f);
+    extras(s, f);
+}
+
+/// Work and school PCs: their IT department manages these settings.
+fn joined(s: &Snapshot) -> bool {
+    s.system.g("device").b("Joined") == Some(true)
+}
+
+/// Windows 11 and its build number, from the build string ("26200.7000").
+fn win11_build(s: &Snapshot) -> Option<u32> {
+    let os = s.system.g("os");
+    if !os.s("Edition").is_some_and(|e| e.contains("Windows 11")) {
+        return None;
+    }
+    os.s("Build")?.split('.').next()?.parse().ok()
+}
+
+/// Apps that copy files somewhere else on a schedule. Sync folders such as Google Drive aren't
+/// here: they only cover what's kept inside them.
+const BACKUP_APPS: &[&str] = &[
+    "acronis",
+    "aomei backupper",
+    "backblaze",
+    "carbonite",
+    "cobian",
+    "crashplan",
+    "duplicati",
+    "easeus todo backup",
+    "idrive",
+    "iperius",
+    "macrium",
+    "paragon backup",
+    "syncback",
+    "veeam",
+];
+
+fn backup(s: &Snapshot, f: &mut Vec<Finding>) {
+    let b = s.storage.g("backup");
+    if b.is_null() {
+        return;
+    }
+    let signed_in = b.b("OneDriveSignedIn") == Some(true);
+    let running = b.b("OneDriveRunning") == Some(true);
+    let folders = b.strs("FoldersInOneDrive");
+    if !folders.is_empty() && !(signed_in && running) {
+        let state = if signed_in { "isn't running" } else { "is signed out" };
+        let mut x = Finding::new("onedrive-stopped", SEC, Level::WorthDoing, "OneDrive isn't backing up your folders")
+            .why(format!(
+                "Your {} are kept in the OneDrive folder, but OneDrive {state}, so nothing new is copied to the cloud. If this PC fails, recent changes would be lost.",
+                join_and(&folders)
+            ));
+        x = if signed_in {
+            x.step("Open OneDrive from the Start menu. It picks up where it left off.")
+        } else {
+            x.step("Open OneDrive from the Start menu and sign in with the same account. It uploads what changed.")
+        };
+        f.push(x.step("If you stopped using OneDrive on purpose, your files are still on this PC, just not copied anywhere."));
+        return;
+    }
+    let app = s.software.a("apps").into_iter().filter_map(|a| a.s("Name")).any(|n| BACKUP_APPS.iter().any(|k| n.to_lowercase().contains(k)));
+    if (signed_in && running && !folders.is_empty()) || b.b("FileHistory") == Some(true) || app {
+        return;
+    }
+    let first = if signed_in {
+        "OneDrive is signed in, but only its own folder is copied. In OneDrive's settings, open Sync and backup, then Manage back up, and switch on Desktop, Documents and Pictures."
+    } else {
+        "The simplest option is OneDrive: sign in and choose to back up Desktop, Documents and Pictures. The free plan holds 5 GB."
+    };
+    f.push(
+        Finding::new("no-backup", SEC, Level::WorthDoing, "We found no backup of your files")
+            .why("If the drive fails or the PC is lost, your documents and photos go with it. We looked for OneDrive folder backup, File History and common backup apps.")
+            .step(first)
+            .step("Or plug in an external drive and turn on File History: search Start for \"File History\".")
+            .step("If you already copy your files somewhere yourself, we can't see that, so you can ignore this.")
+            .conf(Confidence::BestGuess)
+            .open("Open Windows Backup", "ms-settings:backup"),
+    );
+}
+
+/// "Desktop, Documents and Pictures".
+fn join_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Protections that are off by default or can get in the way, plus LSA protection, which Windows
+/// Security warns about.
+fn extras(s: &Snapshot, f: &mut Vec<Finding>) {
+    let d = s.security.g("defender");
+    let build = win11_build(s);
+    if build.is_some() && !joined(s) && d.s("SmartAppControl").as_deref() == Some("Off") {
+        f.push(
+            Finding::new("sac-off", SEC, Level::NiceToHave, "Smart App Control is off")
+                .why("It blocks unknown and untrusted apps before they run, on top of your antivirus. It can also block some older or home-made apps; if one you need is blocked, switch it off again.")
+                .step("Open Windows Security, App & browser control, Smart App Control settings, and choose On. If the switch is greyed out, install waiting updates first.")
+                .open("Open App & browser control", "windowsdefender://appbrowser"),
+        );
+    }
+    let defender_on = d.b("RealTime") == Some(true) && s.security.strs("otherAntivirus").is_empty();
+    if defender_on && d.i("ControlledFolderAccess") == Some(0) {
+        f.push(
+            Finding::new("cfa-off", SEC, Level::NiceToHave, "Ransomware protection for your folders is off")
+                .why("Controlled folder access stops unknown apps from changing files in Documents, Pictures and other personal folders, which is what ransomware does. It can also stop a trusted app from saving there; Windows tells you when, and you can allow that app.")
+                .step("Open Windows Security, Virus & threat protection, Ransomware protection, and switch on Controlled folder access.")
+                .open("Open Virus & threat protection", "windowsdefender://threat"),
+        );
+    }
+    let daily = s.security.g("dailyAccount");
+    let others = daily.strs("OtherAdmins");
+    // With no other administrator, demoting this account would leave nobody able to fix the PC.
+    if daily.b("Admin") == Some(true) && !others.is_empty() && s.security.g("access").b("UAC") != Some(false) && !joined(s) {
+        let other = &others[0];
+        f.push(
+            Finding::new("daily-admin", SEC, Level::NiceToHave, "You use an administrator account every day")
+                .why("A harmful program that runs while you're signed in can change anything on the PC. With a standard account it can't, and Windows asks for an administrator's password when a change really needs one.")
+                .step(format!("Sign in to {other}, the other administrator account. You'll need its password."))
+                .step("Open Settings, Accounts, Other users, select your everyday account, choose Change account type, and pick Standard User.")
+                .step(format!("Sign back in to your own account. When Windows needs permission for a change, it asks for {other}'s password."))
+                .details(others.iter().map(|o| format!("Other administrator: {o}")))
+                .open("Open Other users", "ms-settings:otherusers"),
+        );
+    }
+    // Windows Security has a switch for it from Windows 11 22H2 (build 22621) on. Windows 10 has
+    // only a registry setting that locks into the firmware, which isn't safe to suggest.
+    let a = s.security.g("access");
+    let on = a.b("LsaRunning") == Some(true) || matches!(a.i("LsaPpl"), Some(1 | 2));
+    if build.is_some_and(|b| b >= 22621) && !on && !joined(s) {
+        f.push(
+            Finding::new("lsa-off", SEC, Level::WorthDoing, "Local Security Authority protection is off")
+                .why("It stops harmful programs from reading your sign-in details out of Windows' memory. Windows Security shows a warning about it too.")
+                .step("Open Windows Security, Device security, Core isolation details, switch on Local Security Authority protection, then restart.")
+                .step("Rarely, an old fingerprint reader or smart-card add-on stops working. If that happens, switch it off again.")
+                .open("Open Core isolation", "windowsdefender://coreisolation"),
+        );
+    }
 }
 
 /// One app's most recent use of the camera, microphone or location, as Windows records it.
@@ -432,6 +571,31 @@ fn system(s: &Snapshot, f: &mut Vec<Finding>) {
                 .step("Turning it on happens in the PC's firmware settings (BIOS). Look up your motherboard or laptop model for the exact steps.")
                 .conf(Confidence::Measured),
         );
+    }
+    // The 2011 Secure Boot certificates expired in 2026, and Windows Update swaps in the 2023 ones.
+    // The status values are community-documented, hence the best-guess label.
+    if dev.b("SecureBoot") == Some(true) && !super::windows::without_updates(s) {
+        if let Some(status) = dev.s("SecureBootCert") {
+            let capable = dev.i("SecureBootCertCapable");
+            if status != "Updated" || capable.is_some_and(|c| c < 2) {
+                let started = status != "NotStarted" || capable.is_some_and(|c| c >= 1);
+                let mut x = Finding::new("secureboot-cert", SEC, Level::WorthDoing, "Secure Boot needs its new certificates")
+                    .why(if started {
+                        "The certificates Secure Boot used since 2011 expired in 2026. Windows has started switching to the 2023 ones and needs a restart or two to finish."
+                    } else {
+                        "The certificates Secure Boot used since 2011 expired in 2026. Windows Update installs the 2023 replacements, but this PC doesn't have them yet. It still starts, but gets no new fixes for the start-up process."
+                    })
+                    .step("Install everything waiting in Windows Update, then restart twice.")
+                    .step("If this is still here after a few days, look for a firmware (BIOS) update on your PC or motherboard maker's support page. Bootmend never updates firmware itself.")
+                    .detail(format!("Certificate update: {status}"))
+                    .conf(Confidence::BestGuess)
+                    .open("Open Windows Update", "ms-settings:windowsupdate");
+                if dev.b("SecureBootCertError") == Some(true) {
+                    x = x.detail("Windows reported an error the last time it tried");
+                }
+                f.push(x);
+            }
+        }
     }
     let os = s.system.g("os");
     match os.s("MemoryIntegrity").as_deref() {

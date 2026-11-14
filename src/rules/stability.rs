@@ -137,8 +137,9 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
 
     if s.system.g("os").b("PendingReboot") == Some(true) {
         let since = s.system.g("winupdate").s("RestartWaitingSince").and_then(|d| chrono::NaiveDate::parse_from_str(d.get(..10)?, "%Y-%m-%d").ok());
-        // After a week, fixes have sat idle through a lot of normal use.
-        let level = if since.is_some_and(|d| (chrono::Local::now().date_naive() - d).num_days() >= 7) { Level::WorthDoing } else { Level::NiceToHave };
+        // After a week, fixes have sat idle through a lot of normal use. With no start date it may
+        // have waited that long already.
+        let level = if since.is_none_or(|d| (chrono::Local::now().date_naive() - d).num_days() >= 7) { Level::WorthDoing } else { Level::NiceToHave };
         let mut x = Finding::new("reboot", STAB, level, "Restart to finish installing updates")
             .why("Windows installed updates that only take effect after a restart. Until then, some fixes aren't active.");
         if let Some(d) = since {

@@ -76,9 +76,12 @@ fn storage(s: &Snapshot, f: &mut Vec<Finding>) {
         }
         let pct = free / size * 100.0;
         let system = letter == "C:";
-        let level = if system && (pct < 5.0 || free < 5.0) {
+        // Windows needs 2-3 GB for a monthly update and 6-11 GB for a yearly one. The share of the
+        // drive is capped, so a big drive with plenty left doesn't raise the alarm.
+        let (urgent, low) = ((size * 0.05).clamp(5.0, 10.0), (size * 0.10).clamp(15.0, 25.0));
+        let level = if system && free < urgent {
             Level::DoFirst
-        } else if system && (pct < 10.0 || free < 15.0) {
+        } else if system && free < low {
             Level::WorthDoing
         } else if !system && pct < 5.0 {
             Level::NiceToHave

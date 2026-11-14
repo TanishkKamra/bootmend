@@ -7,6 +7,7 @@ Try-Section 'defender' {
     # Exclusions are only readable as administrator; a standard user sees a placeholder string.
     ExclusionPaths = @($p.ExclusionPath | Where-Object { $_ }); ExclusionProcesses = @($p.ExclusionProcess | Where-Object { $_ }); ExclusionExtensions = @($p.ExclusionExtension | Where-Object { $_ })
     PUAProtection = $p.PUAProtection; CloudProtection = $p.MAPSReporting; ControlledFolderAccess = $p.EnableControlledFolderAccess
+    SmartAppControl = $m.SmartAppControlState
   }
   $R.otherAntivirus = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct | Where-Object { $_.displayName -notmatch 'Windows Defender|Microsoft Defender' } | ForEach-Object { $_.displayName })
   $R.threats = @(Get-MpThreatDetection | Sort-Object InitialDetectionTime -Descending | Select-Object -First 30 | ForEach-Object { $t = Get-MpThreat -ThreatID $_.ThreatID
@@ -31,11 +32,23 @@ Try-Section 'access' {
     SMB1 = (Get-SmbServerConfiguration).EnableSMB1Protocol
     SmartScreen = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer').SmartScreenEnabled
     AutoLogon = ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').AutoAdminLogon -eq '1')
+    LsaPpl = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa').RunAsPPL
+    # Windows' own proof: logged at start-up when LSA starts as a protected process.
+    LsaRunning = [bool](Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Wininit'; Id = 12; StartTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } -MaxEvents 1)
   }
   $hosts = Get-Content "$env:WINDIR\System32\drivers\etc\hosts" | Where-Object { $_ -notmatch '^\s*#' -and $_.Trim() }
   $R.hosts = [ordered]@{ Entries = @($hosts).Count; Sample = @($hosts | Select-Object -First 8) }
   $R.accounts = @(Get-LocalUser | ForEach-Object { [ordered]@{ Name = $_.Name; Enabled = [bool]$_.Enabled; LastLogon = (D $_.LastLogon); PasswordRequired = [bool]$_.PasswordRequired; Source = "$($_.PrincipalSource)" } })
   $R.admins = @(Get-LocalGroupMember -SID 'S-1-5-32-544' | ForEach-Object { "$($_.Name)" })
+}
+Try-Section 'dailyAccount' {
+  # The person signed in at the screen, not the account that gave Bootmend administrator rights.
+  $who = (Get-CimInstance Win32_ComputerSystem).UserName
+  if (-not $who) { $who = "$env:USERDOMAIN\$env:USERNAME" }
+  $sid = ([System.Security.Principal.NTAccount]$who).Translate([System.Security.Principal.SecurityIdentifier]).Value
+  $enabled = @{}; Get-LocalUser | Where-Object Enabled | ForEach-Object { $enabled["$($_.SID)"] = $_.Name }
+  $members = @(Get-LocalGroupMember -SID 'S-1-5-32-544' | ForEach-Object { "$($_.SID)" })
+  $R.dailyAccount = [ordered]@{ Name = $who; Admin = ($members -contains $sid); OtherAdmins = @($members | Where-Object { $_ -ne $sid -and $enabled.ContainsKey($_) } | ForEach-Object { $enabled[$_] }) }
 }
 Try-Section 'drivers' {
   $pd = Get-CimInstance Win32_PnPSignedDriver | Where-Object DeviceName

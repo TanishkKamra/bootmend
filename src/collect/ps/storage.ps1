@@ -20,6 +20,18 @@ Try-Section 'ataSmart' {
   $R.ataSmart = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_ATAPISmartData | ForEach-Object { [ordered]@{ Instance = $_.InstanceName; Data = @($_.VendorSpecific | ForEach-Object { [int]$_ }) } })
   $R.failurePredict = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus | ForEach-Object { [ordered]@{ Instance = $_.InstanceName; PredictFailure = [bool]$_.PredictFailure; Reason = $_.Reason } })
 }
+Try-Section 'backup' {
+  # Where Desktop, Documents and Pictures live, and whether OneDrive is signed in and running to copy them.
+  $usf = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+  $folders = [ordered]@{ Desktop = $usf.Desktop; Documents = $usf.Personal; Pictures = $usf.'My Pictures' }
+  $acc = @(Get-ChildItem 'HKCU:\Software\Microsoft\OneDrive\Accounts' | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.UserFolder })
+  $fh = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\FileHistory'
+  $R.backup = [ordered]@{
+    OneDriveSignedIn = ($acc.Count -gt 0); OneDriveRunning = [bool](Get-Process OneDrive)
+    FoldersInOneDrive = @($folders.Keys | Where-Object { $folders[$_] -match '\\OneDrive( - [^\\]+)?\\' })
+    FileHistory = (($fh.Enabled -eq 1) -and (Test-Path "$env:LOCALAPPDATA\Microsoft\Windows\FileHistory\Configuration\Config1.xml"))
+  }
+}
 Try-Section 'folders' {
   $R.bigFolders = @(foreach ($p in @("$env:USERPROFILE\Downloads", "$env:LOCALAPPDATA\Temp", "$env:WINDIR\Temp", "$env:WINDIR\SoftwareDistribution\Download", "$env:LOCALAPPDATA\CrashDumps")) {
       if (Test-Path $p) { $s = (Get-ChildItem $p -Recurse -Force -File | Measure-Object Length -Sum).Sum; [ordered]@{ Path = $p; SizeGB = [math]::Round([double]$s / 1GB, 2) } } })

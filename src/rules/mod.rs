@@ -381,6 +381,137 @@ mod tests {
         };
         assert_eq!(reboot(Some(ago(7))), Some(Level::WorthDoing));
         assert_eq!(reboot(Some(ago(2))), Some(Level::NiceToHave));
-        assert_eq!(reboot(None), Some(Level::NiceToHave), "unknown start: no louder than before");
+        assert_eq!(reboot(None), Some(Level::WorthDoing), "unknown start: it may have waited long");
+    }
+
+    fn win11(s: &mut Snapshot) {
+        s.system["os"]["Edition"] = json!("Microsoft Windows 11 Home");
+        s.system["os"]["Build"] = json!("26200.7000");
+    }
+
+    #[test]
+    fn free_space_levels_follow_the_size_of_the_drive() {
+        let space = |letter: &str, size: f64, free: f64| {
+            let mut s = base();
+            s.storage = json!({"volumes": [{"Letter": letter, "SizeGB": size, "FreeGB": free}]});
+            level_of(&evaluate(&s), &format!("space-{letter}"))
+        };
+        // Small drive: 5% and 10%, with floors of 5 GB and 15 GB.
+        assert_eq!(space("C:", 128.0, 6.0), Some(Level::DoFirst));
+        assert_eq!(space("C:", 128.0, 14.0), Some(Level::WorthDoing));
+        assert_eq!(space("C:", 128.0, 16.0), None);
+        // Big drive: capped at 10 GB and 25 GB, so 150 GB free on 2 TB is fine.
+        assert_eq!(space("C:", 2000.0, 9.5), Some(Level::DoFirst));
+        assert_eq!(space("C:", 2000.0, 24.0), Some(Level::WorthDoing));
+        assert_eq!(space("C:", 2000.0, 150.0), None);
+        assert_eq!(space("D:", 1000.0, 40.0), Some(Level::NiceToHave), "other drives keep the 5% rule");
+    }
+
+    #[test]
+    fn files_without_a_backup_are_worth_doing() {
+        let backup = |b: serde_json::Value, apps: serde_json::Value| {
+            let mut s = base();
+            s.storage = json!({ "backup": b });
+            s.software = json!({ "apps": apps });
+            let f = evaluate(&s);
+            (level_of(&f, "no-backup"), level_of(&f, "onedrive-stopped"))
+        };
+        let none = json!({"OneDriveSignedIn": false, "OneDriveRunning": false, "FoldersInOneDrive": [], "FileHistory": false});
+        assert_eq!(backup(none.clone(), json!([])), (Some(Level::WorthDoing), None));
+        assert_eq!(backup(none.clone(), json!([{"Name": "Macrium Reflect Free"}])), (None, None), "a backup app counts");
+        let mut fh = none.clone();
+        fh["FileHistory"] = json!(true);
+        assert_eq!(backup(fh, json!([])), (None, None));
+        let synced = json!({"OneDriveSignedIn": true, "OneDriveRunning": true, "FoldersInOneDrive": ["Desktop", "Documents"], "FileHistory": false});
+        assert_eq!(backup(synced, json!([])), (None, None));
+        // Folders still point into OneDrive, but nobody is signed in, so nothing syncs.
+        let stopped = json!({"OneDriveSignedIn": false, "OneDriveRunning": false, "FoldersInOneDrive": ["Desktop", "Documents"], "FileHistory": false});
+        assert_eq!(backup(stopped, json!([])), (None, Some(Level::WorthDoing)));
+        // Signed in, but only the OneDrive folder itself syncs.
+        let bare = json!({"OneDriveSignedIn": true, "OneDriveRunning": true, "FoldersInOneDrive": [], "FileHistory": false});
+        assert_eq!(backup(bare, json!([])), (Some(Level::WorthDoing), None));
+        let mut s = base();
+        s.storage = json!({});
+        assert_eq!(level_of(&evaluate(&s), "no-backup"), None, "no data, no guess");
+    }
+
+    #[test]
+    fn secure_boot_certificates_must_be_the_2023_ones() {
+        let cert = |status: Option<&str>, capable: Option<i64>, sb: bool| {
+            let mut s = base();
+            win11(&mut s);
+            s.system["device"]["SecureBoot"] = json!(sb);
+            s.system["device"]["SecureBootCert"] = json!(status);
+            s.system["device"]["SecureBootCertCapable"] = json!(capable);
+            evaluate(&s).into_iter().find(|x| x.id == "secureboot-cert").map(|x| (x.level, x.confidence))
+        };
+        assert_eq!(cert(Some("NotStarted"), Some(0), true), Some((Level::WorthDoing, Confidence::BestGuess)));
+        assert_eq!(cert(Some("InProgress"), Some(1), true).map(|x| x.0), Some(Level::WorthDoing));
+        assert_eq!(cert(Some("Updated"), Some(1), true).map(|x| x.0), Some(Level::WorthDoing), "not booting the new boot manager yet");
+        assert_eq!(cert(Some("Updated"), Some(2), true), None);
+        assert_eq!(cert(None, None, true), None, "no data, no guess");
+        assert_eq!(cert(Some("NotStarted"), Some(0), false), None, "Secure Boot off has its own to-do");
+        let mut s = base();
+        s.system["os"]["Edition"] = json!("Microsoft Windows 10 Home");
+        s.system["device"]["SecureBootCert"] = json!("NotStarted");
+        assert_eq!(level_of(&evaluate(&s), "secureboot-cert"), None, "Windows 10 without updates is covered by its own to-do");
+    }
+
+    #[test]
+    fn security_extras_that_can_get_in_the_way_are_nice_to_have() {
+        let mut s = base();
+        win11(&mut s);
+        s.security["defender"]["SmartAppControl"] = json!("Off");
+        s.security["defender"]["ControlledFolderAccess"] = json!(0);
+        s.security["dailyAccount"] = json!({"Name": "PC\\sam", "Admin": true, "OtherAdmins": ["Helper"]});
+        let f = evaluate(&s);
+        for id in ["sac-off", "cfa-off", "daily-admin"] {
+            assert_eq!(level_of(&f, id), Some(Level::NiceToHave), "{id}");
+        }
+        // Already on, or not Windows' to manage.
+        s.security["defender"]["SmartAppControl"] = json!("Eval");
+        s.security["defender"]["ControlledFolderAccess"] = json!(2);
+        s.security["dailyAccount"]["OtherAdmins"] = json!([]);
+        let f = evaluate(&s);
+        for id in ["sac-off", "cfa-off", "daily-admin"] {
+            assert_eq!(level_of(&f, id), None, "{id}");
+        }
+        let mut other = base();
+        other.security["defender"]["ControlledFolderAccess"] = json!(0);
+        other.security["otherAntivirus"] = json!(["Norton 360"]);
+        assert_eq!(level_of(&evaluate(&other), "cfa-off"), None, "only matters while Windows Security protects the PC");
+        let mut work = base();
+        win11(&mut work);
+        work.system["device"]["Joined"] = json!(true);
+        work.security["defender"]["SmartAppControl"] = json!("Off");
+        work.security["dailyAccount"] = json!({"Name": "CORP\\sam", "Admin": true, "OtherAdmins": ["Helper"]});
+        let f = evaluate(&work);
+        assert_eq!((level_of(&f, "sac-off"), level_of(&f, "daily-admin")), (None, None), "work PCs are managed by their IT");
+        let mut no_uac = base();
+        no_uac.security["access"]["UAC"] = json!(false);
+        no_uac.security["dailyAccount"] = json!({"Name": "PC\\sam", "Admin": true, "OtherAdmins": ["Helper"]});
+        assert_eq!(level_of(&evaluate(&no_uac), "daily-admin"), None, "UAC off already has its own to-do");
+    }
+
+    #[test]
+    fn lsa_protection_off_is_worth_doing_where_windows_security_warns() {
+        let lsa = |edition: &str, build: &str, ppl: Option<i64>, running: Option<bool>| {
+            let mut s = base();
+            s.system["os"]["Edition"] = json!(edition);
+            s.system["os"]["Build"] = json!(build);
+            s.security["access"]["LsaPpl"] = json!(ppl);
+            s.security["access"]["LsaRunning"] = json!(running);
+            level_of(&evaluate(&s), "lsa-off")
+        };
+        assert_eq!(lsa("Microsoft Windows 11 Home", "26200.7000", None, Some(false)), Some(Level::WorthDoing));
+        assert_eq!(lsa("Microsoft Windows 11 Home", "26200.7000", None, Some(true)), None, "Windows says it started protected");
+        assert_eq!(lsa("Microsoft Windows 11 Home", "26200.7000", Some(2), Some(false)), None, "on, starts protected after a restart");
+        assert_eq!(lsa("Microsoft Windows 11 Home", "26200.7000", None, None), Some(Level::WorthDoing));
+        assert_eq!(lsa("Microsoft Windows 11 Home", "22000.2000", None, Some(false)), None, "no switch for it before 22H2");
+        assert_eq!(lsa("Microsoft Windows 10 Pro", "19045.6000", None, Some(false)), None, "Windows 10 has no safe switch");
+        let mut work = base();
+        win11(&mut work);
+        work.system["device"]["Joined"] = json!(true);
+        assert_eq!(level_of(&evaluate(&work), "lsa-off"), None, "work PCs are managed by their IT");
     }
 }
