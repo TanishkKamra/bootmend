@@ -5,6 +5,7 @@ mod live_page;
 mod pages;
 mod schedule_ui;
 mod screens;
+mod system;
 pub mod theme;
 mod widgets;
 
@@ -43,12 +44,13 @@ pub enum Page {
     Scan,
     History,
     Report,
+    Settings,
     Privacy,
     About,
 }
 
 impl Page {
-    pub const ALL: [Page; 17] = [
+    pub const ALL: [Page; 18] = [
         Page::Overview,
         Page::Suggestions,
         Page::ThisPc,
@@ -64,6 +66,7 @@ impl Page {
         Page::Scan,
         Page::History,
         Page::Report,
+        Page::Settings,
         Page::Privacy,
         Page::About,
     ];
@@ -84,6 +87,7 @@ impl Page {
             Page::Scan => "Virus check",
             Page::History => "History & undo",
             Page::Report => "Save a report",
+            Page::Settings => "Settings",
             Page::Privacy => "Privacy",
             Page::About => "About",
         }
@@ -105,6 +109,7 @@ impl Page {
             Page::Scan => icon::SCAN,
             Page::History => icon::UNDO,
             Page::Report => icon::REPORT,
+            Page::Settings => icon::SETTINGS,
             Page::Privacy => icon::LOCK,
             Page::About => icon::INFO,
         }
@@ -167,11 +172,13 @@ struct Settings {
     schedule_hour: u8,
     /// The check-up offer was answered (or the person chose a pace).
     schedule_asked: bool,
+    /// Buttons, links and switches take the Windows accent colour instead of cobalt.
+    use_windows_accent: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { privacy_ack: false, schedule: Default::default(), schedule_hour: crate::schedule::NOON, schedule_asked: false }
+        Settings { privacy_ack: false, schedule: Default::default(), schedule_hour: crate::schedule::NOON, schedule_asked: false, use_windows_accent: false }
     }
 }
 
@@ -182,6 +189,8 @@ fn settings_path() -> Option<PathBuf> {
 fn load_settings() -> Settings {
     settings_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
+
+pub use system::mica_available;
 
 /// The check-up pace and hour the person chose, for setting the task up again outside the window.
 pub fn saved_schedule() -> (crate::schedule::Every, u8) {
@@ -249,11 +258,25 @@ pub struct App {
     trends: Vec<crate::trends::Trend>,
     /// The check the trends were drawn for.
     trends_for: String,
+    /// The window shows Windows' Mica backdrop behind the sidebar.
+    mica: bool,
+    /// The Windows accent last read, and when, while the person has accent sync on.
+    win_accent: Option<theme::AccentShades>,
+    accent_read: Option<Instant>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext, snap_dir: Option<PathBuf>) -> Self {
+    /// `mica` says the window was created transparent so the Mica backdrop can show through.
+    pub fn new(cc: &eframe::CreationContext, snap_dir: Option<PathBuf>, mica: bool) -> Self {
         theme::apply(&cc.egui_ctx);
+        let mica = mica
+            && match system::apply_mica(cc) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("The window stays solid because Mica couldn't be turned on: {e}");
+                    false
+                }
+            };
         let (tx, rx) = channel();
         let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this-pc".into());
         let mut app = App {
@@ -281,6 +304,9 @@ impl App {
             live: None,
             trends: vec![],
             trends_for: String::new(),
+            mica,
+            win_accent: None,
+            accent_read: None,
         };
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
@@ -329,6 +355,30 @@ impl App {
 
     fn toast(&mut self, text: impl Into<String>, ok: bool) {
         self.toasts.push((text.into(), ok, Instant::now()));
+    }
+
+    /// Follows the Windows accent colour while accent sync is on. Reading it is cheap, and every
+    /// return to the window repaints, so a change in Windows Settings shows up straight away.
+    fn sync_accent(&mut self, ctx: &egui::Context) {
+        if !self.settings.use_windows_accent || self.snap_mode.is_some() || self.accent_read.is_some_and(|t| t.elapsed().as_secs() < 1) {
+            return;
+        }
+        self.accent_read = Some(Instant::now());
+        let now = system::windows_accent();
+        if now != self.win_accent {
+            self.win_accent = now;
+            theme::set_accent(ctx, now.as_ref());
+        }
+    }
+
+    fn set_accent_sync(&mut self, ctx: &egui::Context, on: bool) {
+        self.settings.use_windows_accent = on;
+        self.save_settings();
+        self.win_accent = None;
+        self.accent_read = None;
+        theme::set_accent(ctx, None);
+        self.sync_accent(ctx);
+        ctx.request_repaint();
     }
 
     fn save_settings(&self) {
@@ -750,7 +800,7 @@ impl App {
             ("", &[Page::Overview, Page::Suggestions]),
             ("Details", &[Page::ThisPc, Page::Storage, Page::Network, Page::Security, Page::Software, Page::Startup, Page::Crashes]),
             ("Tools", &[Page::Cleanup, Page::Live, Page::Changes, Page::Scan, Page::History, Page::Report]),
-            ("This app", &[Page::Privacy, Page::About]),
+            ("This app", &[Page::Settings, Page::Privacy, Page::About]),
         ];
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -938,8 +988,18 @@ fn save_png(img: &egui::ColorImage, path: &std::path::Path) -> anyhow::Result<()
 }
 
 impl eframe::App for App {
+    /// With Mica on, whatever egui leaves unpainted shows the backdrop.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.mica {
+            [0.0; 4]
+        } else {
+            visuals.panel_fill.to_normalized_gamma_f32()
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        self.sync_accent(ctx);
         self.snap_step(ctx);
         let p = pal(ctx);
 
@@ -955,7 +1015,9 @@ impl eframe::App for App {
             egui::SidePanel::left("nav")
                 .resizable(false)
                 .exact_width(232.0)
-                .frame(egui::Frame::new().fill(p.sidebar).inner_margin(egui::Margin::symmetric(S2 as i8, 0)))
+                .frame(
+                    egui::Frame::new().fill(if self.mica { egui::Color32::TRANSPARENT } else { p.sidebar }).inner_margin(egui::Margin::symmetric(S2 as i8, 0)),
+                )
                 .show(ctx, |ui| self.sidebar(ui));
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ctx, |ui| {
                 let mut sa = egui::ScrollArea::vertical().auto_shrink(false);

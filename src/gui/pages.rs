@@ -35,6 +35,26 @@ fn two_lines(ui: &mut Ui, title: &str, detail: &str, hover: &str) {
     });
 }
 
+/// A row like the ones in Windows Settings: a name over a wrapped explanation, and the
+/// control on the right, centred against both lines.
+fn setting<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
+    const CONTROL_W: f32 = 200.0;
+    let muted = pal(ui.ctx()).muted;
+    let text_w = (ui.available_width() - CONTROL_W).max(160.0);
+    let detail = egui::WidgetText::from(RichText::new(detail).color(muted)).into_galley(ui, Some(egui::TextWrapMode::Wrap), text_w, egui::TextStyle::Body);
+    let h = (ui.text_style_height(&egui::TextStyle::Body) + S1 + detail.size().y).max(40.0);
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let r = control(ui);
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.y = S1;
+            ui.label(RichText::new(title).family(theme::semibold()));
+            ui.label(detail);
+        });
+        r
+    })
+    .inner
+}
+
 fn yes_no(v: Option<bool>) -> Option<String> {
     v.map(|b| if b { "Yes" } else { "No" }.to_string())
 }
@@ -85,6 +105,7 @@ impl App {
             Page::Scan => "Run Windows Security's own scanner from here.".into(),
             Page::History => "Every change Bootmend made, and how to undo it.".into(),
             Page::Report => "A copy of this check you can keep or send to someone helping you.".into(),
+            Page::Settings => "How Bootmend looks.".into(),
             Page::Privacy => "What Bootmend reads, keeps and sends.".into(),
             Page::About => String::new(),
         };
@@ -115,6 +136,7 @@ impl App {
             Page::Scan => self.scan_page(ui, &snap),
             Page::History => self.history_page(ui),
             Page::Report => self.report_page(ui, &snap),
+            Page::Settings => self.settings_page(ui),
             Page::Privacy => self.privacy(ui),
             Page::About => about(ui),
         }
@@ -1298,6 +1320,46 @@ impl App {
     }
 
     // ---------- Privacy ----------
+
+    fn settings_page(&mut self, ui: &mut Ui) {
+        let p = pal(ui.ctx());
+        section(ui, "Appearance");
+        card(ui, |ui| {
+            let on = self.settings.use_windows_accent;
+            let name = "Use my Windows accent colour";
+            let flip = setting(ui, name, "Buttons, links and switches take the accent colour you chose in Windows.", |ui| {
+                let clicked = widgets::switch(ui, on, true, name).clicked();
+                ui.label(if on { "On" } else { "Off" });
+                clicked
+            });
+            if flip {
+                self.set_accent_sync(ui.ctx(), !on);
+            }
+            let mode = if ui.visuals().dark_mode { "dark" } else { "light" };
+            let why = match &self.win_accent {
+                _ if !on => None,
+                None => Some("Bootmend couldn't read your Windows accent colour, so it's using its own blue.".to_string()),
+                Some(s) if !theme::accent_fits(ui.ctx(), s) => {
+                    Some(format!("Your Windows accent colour is hard to read in {mode} mode, so Bootmend is using its own blue."))
+                }
+                Some(_) => None,
+            };
+            if let Some(why) = why {
+                ui.add_space(S2);
+                widgets::note(ui, p.blue, p.blue_bg, icon::INFO, |ui| {
+                    ui.add(egui::Label::new(why).wrap());
+                });
+            }
+            ui.separator();
+            setting(ui, "Mode and transparency effects", "Bootmend follows the light or dark mode and the transparency effects set in Windows.", |ui| {
+                if widgets::icon_button(ui, icon::OPEN, "Colour settings", true).clicked() {
+                    if let Err(e) = shell_open("ms-settings:colors") {
+                        self.toast(format!("Windows Settings didn't open: {e:#}"), false);
+                    }
+                }
+            });
+        });
+    }
 
     fn privacy(&mut self, ui: &mut Ui) {
         let p = pal(ui.ctx());

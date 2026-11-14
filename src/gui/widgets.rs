@@ -29,6 +29,7 @@ pub mod icon {
     pub const ADMIN: &str = "\u{E7EF}";
     pub const CLEAN: &str = "\u{E74D}";
     pub const ACTIVITY: &str = "\u{E9D9}";
+    pub const SETTINGS: &str = "\u{E713}";
 }
 
 pub fn ico(ch: &str, size: f32) -> RichText {
@@ -84,7 +85,7 @@ pub fn pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) -> Response {
 }
 
 pub fn level_pill(ui: &mut Ui, l: Level) -> Response {
-    let (fg, bg) = level_colors(pal(ui.ctx()), l);
+    let (fg, bg) = level_colors(&pal(ui.ctx()), l);
     pill(ui, l.name(), fg, bg)
 }
 
@@ -281,7 +282,9 @@ pub fn nav_item(ui: &mut Ui, ic: &str, text: &str, selected: bool, badge: Option
     let bg = if selected {
         p.accent_soft
     } else if resp.hovered() {
-        p.surface2
+        // A faint wash of the text colour, as Windows uses, so hover shows on any sidebar fill,
+        // Mica included.
+        p.ink.gamma_multiply(0.07)
     } else {
         Color32::TRANSPARENT
     };

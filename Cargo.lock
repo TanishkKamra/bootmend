@@ -344,6 +344,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "png 0.17.16",
+ "raw-window-handle",
  "regex",
  "rfd",
  "serde",

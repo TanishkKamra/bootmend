@@ -1,9 +1,11 @@
 //! Colours, type and spacing. Every text/background pair here was checked for WCAG AA
-//! contrast (see DESIGN.md). The app follows the Windows light or dark setting.
+//! contrast (see DESIGN.md). The app follows the Windows light or dark setting, and can take
+//! its accent from Windows too.
 
 use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Theme, Visuals};
 use std::sync::Arc;
 
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Pal {
     pub bg: Color32,
     pub surface: Color32,
@@ -39,9 +41,9 @@ pub const LIGHT: Pal = Pal {
     muted: hex(0x4A5361),
     line: hex(0xDADFE6),
     control: hex(0x8A93A0),
-    accent: hex(0x1F56C4),
+    accent: hex(0x2F5BEA),
     on_accent: hex(0xFFFFFF),
-    accent_soft: hex(0xDCE6F8),
+    accent_soft: hex(0xE1E8FD),
     red: hex(0xB42318),
     red_bg: hex(0xFDECEA),
     amber: hex(0x8A4B00),
@@ -61,9 +63,9 @@ pub const DARK: Pal = Pal {
     muted: hex(0xA9B0BB),
     line: hex(0x2E333A),
     control: hex(0x7D8590),
-    accent: hex(0x8AB0FF),
-    on_accent: hex(0x0B1220),
-    accent_soft: hex(0x26324A),
+    accent: hex(0x8AABFF),
+    on_accent: hex(0x0B1530),
+    accent_soft: hex(0x24304F),
     red: hex(0xFF9C94),
     red_bg: hex(0x3A1D1B),
     amber: hex(0xFFC46B),
@@ -74,11 +76,93 @@ pub const DARK: Pal = Pal {
     green_bg: hex(0x17301F),
 };
 
-pub fn pal(ctx: &egui::Context) -> &'static Pal {
-    if ctx.style().visuals.dark_mode {
-        &DARK
+/// The palettes in use: cobalt, or the Windows accent when the person turned that on.
+#[derive(Clone, Copy)]
+struct Palettes {
+    light: Pal,
+    dark: Pal,
+}
+
+fn palettes_id() -> egui::Id {
+    egui::Id::new("bootmend-palettes")
+}
+
+pub fn pal(ctx: &egui::Context) -> Pal {
+    let dark = ctx.style().visuals.dark_mode;
+    let ps = ctx.data(|d| d.get_temp::<Palettes>(palettes_id())).unwrap_or(Palettes { light: LIGHT, dark: DARK });
+    if dark {
+        ps.dark
     } else {
-        &LIGHT
+        ps.light
+    }
+}
+
+/// Windows keeps the accent colour and six shades of it in `AccentPalette`: eight RGBA entries,
+/// ordered Light3, Light2, Light1, Accent, Dark1, Dark2, Dark3 and one unused.
+/// Windows 11 fills buttons with Dark1 in light mode and Light2 in dark mode.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AccentShades {
+    pub light2: Color32,
+    pub dark1: Color32,
+}
+
+pub fn accent_shades(b: &[u8]) -> Option<AccentShades> {
+    if b.len() != 32 {
+        return None;
+    }
+    let at = |i: usize| Color32::from_rgb(b[i * 4], b[i * 4 + 1], b[i * 4 + 2]);
+    Some(AccentShades { light2: at(1), dark1: at(4) })
+}
+
+/// WCAG 2 contrast ratio, 1 to 21.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    fn luminance(c: Color32) -> f32 {
+        let ch = |v: u8| {
+            let s = v as f32 / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
+    }
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// Every pair the accent takes part in: button text, links and icons on each background,
+/// text on a selected row, and the selection bar against its row.
+fn readable(p: &Pal) -> bool {
+    let text = |fg, bg| contrast(fg, bg) >= 4.5;
+    text(p.on_accent, p.accent)
+        && [p.bg, p.surface, p.surface2, p.sidebar].into_iter().all(|bg| text(p.accent, bg))
+        && text(p.ink, p.accent_soft)
+        && text(p.muted, p.accent_soft)
+        && contrast(p.accent, p.accent_soft) >= 3.0
+}
+
+/// The palette with the Windows accent in place of cobalt, the way Windows 11 uses it, or
+/// None when some pair would be hard to read.
+pub fn with_windows_accent(base: &Pal, s: &AccentShades, dark: bool) -> Option<Pal> {
+    let (accent, on_accent, tint) = if dark { (s.light2, Color32::BLACK, 0.18) } else { (s.dark1, Color32::WHITE, 0.14) };
+    let p = Pal { accent, on_accent, accent_soft: base.surface.lerp_to_gamma(accent, tint), ..*base };
+    readable(&p).then_some(p)
+}
+
+/// Whether the Windows accent can be used in the theme on screen now.
+pub fn accent_fits(ctx: &egui::Context, s: &AccentShades) -> bool {
+    let dark = ctx.style().visuals.dark_mode;
+    with_windows_accent(if dark { &DARK } else { &LIGHT }, s, dark).is_some()
+}
+
+/// Uses the Windows accent where it reads well, and cobalt everywhere else.
+pub fn set_accent(ctx: &egui::Context, windows: Option<&AccentShades>) {
+    let pick = |base: &Pal, dark| windows.and_then(|s| with_windows_accent(base, s, dark)).unwrap_or(*base);
+    let ps = Palettes { light: pick(&LIGHT, false), dark: pick(&DARK, true) };
+    ctx.data_mut(|d| d.insert_temp(palettes_id(), ps));
+    for (theme, p, dark) in [(Theme::Light, ps.light, false), (Theme::Dark, ps.dark, true)] {
+        ctx.style_mut_of(theme, |st| st.visuals = visuals(&p, dark));
     }
 }
 
@@ -122,7 +206,9 @@ pub fn fonts(ctx: &egui::Context) {
             f.families.entry(fam).or_default().insert(0, key.into());
         }
     };
-    add("segoe", &["segoeui.ttf"], FontFamily::Proportional);
+    // Segoe UI Variable is Windows 11's own UI font. egui can't pick a weight from a variable
+    // font, so it gives the regular text weight and headings keep classic Segoe UI Semibold.
+    add("segoe", &["SegUIVar.ttf", "segoeui.ttf"], FontFamily::Proportional);
     add("consolas", &["consola.ttf"], FontFamily::Monospace);
     add("segoe-sb", &["seguisb.ttf", "segoeuib.ttf"], semibold());
     add("fluent", &["SegoeIcons.ttf", "segmdl2.ttf"], icons());
@@ -184,9 +270,8 @@ fn visuals(p: &Pal, dark: bool) -> Visuals {
 pub fn apply(ctx: &egui::Context) {
     fonts(ctx);
     ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::System);
-    for (theme, p, dark) in [(Theme::Light, &LIGHT, false), (Theme::Dark, &DARK, true)] {
+    for theme in [Theme::Light, Theme::Dark] {
         ctx.style_mut_of(theme, |st| {
-            st.visuals = visuals(p, dark);
             st.text_styles = [
                 (TextStyle::Heading, FontId::new(26.0, semibold())),
                 (h2(), FontId::new(18.0, semibold())),
@@ -206,5 +291,69 @@ pub fn apply(ctx: &egui::Context) {
             sp.scroll = egui::style::ScrollStyle::solid();
             st.interaction.selectable_labels = true;
         });
+    }
+    set_accent(ctx, None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AccentPalette as Windows 11 stores it for its default blue accent.
+    const DEFAULT_BLUE: [u8; 32] = [
+        0x99, 0xEB, 0xFF, 0x00, 0x4C, 0xC2, 0xFF, 0x00, 0x00, 0x91, 0xF8, 0x00, 0x00, 0x78, 0xD4, 0x00, 0x00, 0x67, 0xC0, 0x00, 0x00, 0x3E, 0x92, 0x00, 0x00,
+        0x1A, 0x68, 0x00, 0xF7, 0x63, 0x0C, 0x00,
+    ];
+
+    #[test]
+    fn reads_the_shades_windows_uses() {
+        let s = accent_shades(&DEFAULT_BLUE).expect("32 bytes is a full palette");
+        assert_eq!(s.light2, hex(0x4CC2FF));
+        assert_eq!(s.dark1, hex(0x0067C0));
+    }
+
+    #[test]
+    fn rejects_a_palette_of_the_wrong_size() {
+        assert_eq!(accent_shades(&DEFAULT_BLUE[..31]), None);
+        assert_eq!(accent_shades(&[0; 33]), None);
+        assert_eq!(accent_shades(&[]), None);
+    }
+
+    #[test]
+    fn contrast_matches_wcag() {
+        assert!((contrast(Color32::WHITE, hex(0x2F5BEA)) - 5.52).abs() < 0.01);
+        assert!((contrast(Color32::BLACK, Color32::WHITE) - 21.0).abs() < 0.01);
+        assert_eq!(contrast(hex(0x2F5BEA), Color32::WHITE), contrast(Color32::WHITE, hex(0x2F5BEA)));
+    }
+
+    #[test]
+    fn brand_palettes_are_readable() {
+        assert!(readable(&LIGHT), "light palette fails a contrast pair");
+        assert!(readable(&DARK), "dark palette fails a contrast pair");
+    }
+
+    #[test]
+    fn light_theme_takes_the_darker_shade_with_white_text() {
+        let s = accent_shades(&DEFAULT_BLUE).unwrap();
+        let p = with_windows_accent(&LIGHT, &s, false).expect("Windows' default blue is readable");
+        assert_eq!(p.accent, hex(0x0067C0));
+        assert_eq!(p.on_accent, Color32::WHITE);
+        assert_eq!(p.ink, LIGHT.ink, "only the accent colours change");
+    }
+
+    #[test]
+    fn dark_theme_takes_the_lighter_shade_with_black_text() {
+        let s = accent_shades(&DEFAULT_BLUE).unwrap();
+        let p = with_windows_accent(&DARK, &s, true).expect("Windows' default blue is readable");
+        assert_eq!(p.accent, hex(0x4CC2FF));
+        assert_eq!(p.on_accent, Color32::BLACK);
+        assert_eq!(p.bg, DARK.bg, "only the accent colours change");
+    }
+
+    #[test]
+    fn an_unreadable_accent_keeps_cobalt() {
+        let pale = AccentShades { light2: hex(0x303030), dark1: hex(0xFFD700) };
+        assert_eq!(with_windows_accent(&LIGHT, &pale, false), None);
+        assert_eq!(with_windows_accent(&DARK, &pale, true), None);
     }
 }

@@ -179,9 +179,14 @@ fn main() {
         Ok(icon) => viewport = viewport.with_icon(icon),
         Err(e) => eprintln!("Couldn't load the window icon: {e}"),
     }
+    let shots = args.screenshots;
+    // Screenshots stay on solid colours so they look the same on every PC.
+    let mica = shots.is_none() && gui::mica_available();
+    if mica {
+        viewport = viewport.with_transparent(true);
+    }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let theme = args.theme;
-    let shots = args.screenshots;
     if let Some(dir) = &shots {
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("Couldn't create {}: {e}", dir.display());
@@ -192,7 +197,7 @@ fn main() {
         util::APP,
         options,
         Box::new(move |cc| {
-            let app = gui::App::new(cc, shots);
+            let app = gui::App::new(cc, shots, mica);
             match theme.as_deref() {
                 Some("dark") => cc.egui_ctx.set_theme(eframe::egui::Theme::Dark),
                 Some("light") => cc.egui_ctx.set_theme(eframe::egui::Theme::Light),

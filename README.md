@@ -19,6 +19,7 @@ Bootmend only reads until you press a button, and every change explains itself f
 - **Changes and History:** what changed between checks, every settings change Bootmend made with an Undo button, and charts of free space, suggestions, startup apps and battery health over time.
 - **Regular check-ups (optional):** after the first check, Bootmend offers to check again daily, weekly or monthly. A check-up runs quietly at the hour you pick (noon unless you change it), or as soon as the PC is on after that, and shows a notification only when something new needs a look. It keeps up to 100 saved checks.
 - **Save a report:** HTML or PDF, with personal details hidden unless you choose to show them.
+- **Looks like Windows 11:** follows your light or dark mode and transparency effects, and can take your Windows accent colour (Settings > Appearance).
 
 Some details (Windows Security's skip list, crash files, some drive health data) need administrator rights. The app offers to restart as administrator and works without it.
 

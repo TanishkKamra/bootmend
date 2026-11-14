@@ -5,7 +5,7 @@ Bootmend is a **Use** surface: a native Windows utility that people open to answ
 ## Principles
 
 1. **Trust before anything.** It reads until you press a button. Every change explains itself in a confirm dialog. Changes to Windows settings can be undone from History; clearing space and app updates can't, and the dialog says so. No alarm colours for things that aren't urgent, no fake scores, and nothing to buy.
-2. **Native, not themed.** Segoe UI, Segoe Fluent Icons, and switches and spacing that match Windows Settings. It follows the Windows light or dark setting.
+2. **Native, not themed.** Segoe UI Variable, Segoe Fluent Icons, and switches and spacing that match Windows Settings. It follows the Windows mode, transparency effects and, when asked, the accent colour.
 3. **Plain words.** Each suggestion says what was found, why it matters and what to do, in that order. No jargon without an explanation next to it.
 4. **One loud thing per view.** One filled (accent) button per card at most. Long lists use switches or quiet secondary buttons.
 5. **Colour never works alone.** Every status pairs a colour with an icon or a word ("Needs attention", "On", "Off").
@@ -56,33 +56,40 @@ The **Keystone** is an arch of five stones on two legs, with its top stone, the 
 | muted | `#4A5361` | `#A9B0BB` | Secondary text |
 | line | `#DADFE6` | `#2E333A` | Card borders and dividers (decorative) |
 | control | `#8A93A0` | `#7D8590` | Control borders, switch edge (3:1) |
-| accent | `#1F56C4` | `#8AB0FF` | The one "press here" colour, links, switch on |
-| on_accent | `#FFFFFF` | `#0B1220` | Text on accent |
-| accent_soft | `#DCE6F8` | `#26324A` | Selected and hover fills |
+| accent | `#2F5BEA` | `#8AABFF` | Cobalt: the one "press here" colour, links, switch on |
+| on_accent | `#FFFFFF` | `#0B1530` | Text on accent |
+| accent_soft | `#E1E8FD` | `#24304F` | Selected and hover fills |
 | red / red_bg | `#B42318` / `#FDECEA` | `#FF9C94` / `#3A1D1B` | "Do first" and failures only |
 | amber / amber_bg | `#8A4B00` / `#FFF4E0` | `#FFC46B` / `#3A2C14` | "Worth doing", trade-offs |
 | blue / blue_bg | `#2B5797` / `#E8F0FB` | `#9EC2FF` / `#1C2A40` | "Nice to have", info notes |
 | green / green_bg | `#1E7B3C` / `#E6F4EA` | `#7BD88F` / `#17301F` | "Looks good", done |
 
-Contrast (checked 2026-11-12 with `design-playbook/scripts/contrast.mjs`). All text pairs pass 4.5:1 and all control shapes pass 3:1.
+Contrast (checked 2026-11-12 with `design-playbook/scripts/contrast.mjs`; accent pairs rechecked 2026-11-14 for cobalt). All text pairs pass 4.5:1 and all control shapes pass 3:1. The test `brand_palettes_are_readable` in `theme.rs` fails the build if an accent pair drops below its threshold.
 
 - **Text, light theme:**
   - ink on surface: 16.56:1
   - muted on bg, surface and surface2: 7.25, 7.77 and 6.81:1
-  - on_accent on accent: 6.59:1
+  - on_accent on accent: 5.52:1
+  - accent as link text on bg, surface and surface2: 5.15, 5.52 and 4.83:1
+  - ink on accent_soft: 13.53:1, and accent on accent_soft: 4.51:1
   - the lowest pair is green on green_bg, at 4.68:1
 - **Text, dark theme:**
   - ink on surface: 13.24:1
   - muted on bg, surface and surface2: 8.14, 7.30 and 6.24:1
-  - on_accent on accent: 8.68:1
+  - on_accent on accent: 8.03:1
+  - accent as link text on bg, surface and surface2: 7.91, 7.10 and 6.07:1
+  - ink on accent_soft: 10.82:1
   - every state colour on its tint is 5.94:1 or higher
 - **Control shapes:**
   - control on surface: 3.11:1 in light and 4.28:1 in dark
-  - accent on bg: 6.15:1 in light and 8.24:1 in dark
+  - accent on bg: 5.15:1 in light and 7.91:1 in dark
 
 ### Type
 
-Segoe UI (regular and semibold), Consolas for raw values, and Segoe Fluent Icons. All are loaded from `%WINDIR%\Fonts`, with egui's own fonts as the fallback.
+- **Body:** Segoe UI Variable, Windows 11's UI font (`SegUIVar.ttf`), with Segoe UI as the fallback on Windows 10. egui can't pick a weight from a variable font, so it draws the font's default instance, regular text weight.
+- **Headings and labels that need weight:** classic Segoe UI Semibold (`seguisb.ttf`).
+- Consolas for raw values, and Segoe Fluent Icons.
+- All are loaded from `%WINDIR%\Fonts`, with egui's own fonts as the fallback.
 
 | Style | Size | Use |
 |---|---|---|
@@ -122,12 +129,27 @@ Body is 14.5 px, not the 16 px a website would use. That matches Windows' own 14
 | Pill (`pill`, `level_pill`) | static | Priority ("Do first", "Worth doing") and short states |
 | Note (`widgets::note`) | info, warning | A tinted strip with an icon and words; never colour alone |
 | Card (`widgets::card`) | static | One group of related content. Cards are never nested |
+| Setting row (`pages::setting`) | static, holding a switch or a button | One option on the Settings page: its name over a wrapped explanation, the control on the right, as in Windows Settings |
 | Table (`table`, `table_action`) | rows, optional row button | Lists of like items with real columns |
 | Confirm dialog (`Pending` + `ask`) | open, busy | Before anything that changes the PC or goes online. At most two choices |
 | Toast | success, failure | The result of a background job |
 | Empty state | icon, title, one line on what goes here | History with no changes yet. Smaller lists use one muted line ("No blue-screen crashes in the last 90 days.") |
 
 Busy work shows a spinner and words ("Working on it", "Saving a restore point") in place of the button that started it.
+
+## Following Windows
+
+- **Mode:** light or dark, as Windows is set.
+- **Accent colour:** Settings > Appearance > "Use my Windows accent colour", off by default.
+  - It reads `AccentPalette` from the registry and uses the shades Windows 11 itself uses: Dark1 with white text in light mode, Light2 with black text in dark mode. `accent_soft` is the card colour tinted 14% (light) or 18% (dark) towards it.
+  - Every pair the accent is part of has to pass, or that mode keeps cobalt and the Settings page says why in plain words. The checks are `readable()` in `theme.rs`.
+  - It's read again at most once a second, and only while the app is repainting, so a change in Windows Settings shows when the person comes back to the window.
+  - The app icon never changes colour.
+- **Transparency effects (Mica):**
+  - On Windows 11 22H2 (build 22621) or later with Transparency effects on, the window is created transparent and gets the Mica backdrop.
+  - Mica shows in the title bar and behind the sidebar only. The page area and cards stay solid, so text contrast never depends on the wallpaper. This matches File Explorer and Outlook.
+  - If Windows refuses Mica, the window stays solid. `--screenshots` never uses Mica, so pictures match on every PC.
+- **Words:** the app says what Windows says: "transparency effects", "accent colour", "mode". It never says "Mica".
 
 ## Motion
 
@@ -141,10 +163,12 @@ None beyond egui's defaults: hover fills, the spinner and scrolling. A check-up 
 - **Status cards on Overview stay.** Four equal cards could look like a stock "metric row", but each one is a real area with real counts, and the row answers the app's main question at a glance.
 - **No brand colour beyond one accent.** Blue reads as "system tool" on Windows and keeps red, amber and green free for meaning.
 - **Cobalt is the brand colour (2026-11-14).**
-  - `#2F5BEA` is the keystone colour. The app's accent tokens move from `#1F56C4` to cobalt in the theme update.
+  - `#2F5BEA` is the keystone colour and, since 2026-11-14, the app's accent (`#8AABFF` in dark mode). It replaced `#1F56C4`.
   - Gold was considered and rejected. As a control on light backgrounds it reaches only 1.84:1, and gold on black looks like Norton.
   - Simple and Detailed share one theme: Detailed changes density and content, not colour.
-  - A Settings option will let the accent follow the Windows accent colour. It uses Windows' own lighter and darker accent shades, falls back to cobalt when a pair fails contrast, and never changes the icon.
+  - The accent can follow the Windows accent colour instead (see Following Windows).
+- **Mica behind the sidebar only (2026-11-14).** Mica behind the cards would make dark-mode cards (`#1F2227`) sit darker than the backdrop (about `#202020`) and put page text on a surface that changes with the wallpaper. Keeping it to the title bar and sidebar gives the Windows 11 feel with no contrast risk.
+- **Sidebar hover is a faint wash of the text colour (2026-11-14).** The old hover fill (`surface2`) was the same colour as the light sidebar, so hover didn't show. Ink at 7% shows on the solid sidebar and on Mica alike.
 
 ## Verifying
 
