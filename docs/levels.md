@@ -16,7 +16,7 @@ Every finding gets one of four levels. Home groups the to-dos by level, and the 
 - A security setting that costs nothing to turn on (CIS Level 1) is Worth doing. One that can get in the way (CIS Level 2) is Nice to have.
 - A finding Bootmend can't confirm is marked "Our best guess" rather than ranked lower.
 - Thresholds marked *judgement* have no official number behind them. They are our call, written down so they stay consistent.
-- Work and school PCs (joined to a domain or Microsoft Entra) skip settings their IT department manages: Smart App Control, LSA protection and the administrator account.
+- Work and school PCs (joined to a domain or Microsoft Entra) skip settings their IT department manages: Smart App Control, LSA protection, the administrator account, browser policies, proxies and DNS servers.
 
 ## Do first
 
@@ -33,6 +33,7 @@ Every finding gets one of four levels. Home groups the to-dos by level, and the 
 | Blue screens | 3 or more in 90 days (1 or 2 are Worth doing) |
 | System drive almost full | Under 5% of the drive free, at least 5 GB and at most 10 GB (6.4 GB on a 128 GB drive, 10 GB from 200 GB up). A monthly update alone needs 2-3 GB |
 | Windows 10 without security fixes | Not signed up for Extended Security Updates, or after they end on 12 October 2027 |
+| Windows 11 version without security fixes | Home or Pro on a version past Microsoft's end date (24H2 ended on 13 October 2026). Not Enterprise, Education or preview builds, which run on other dates |
 | No Windows update | None installed for 90 days or more (*judgement*) |
 
 ## Worth doing
@@ -69,6 +70,23 @@ Every finding gets one of four levels. Home groups the to-dos by level, and the 
 | Secure Boot certificates | Secure Boot is on but the 2023 certificates aren't in place (best guess: the status values are community-documented). Not on Windows 10 without updates, which has its own to-do |
 | Local Security Authority protection off | Windows 11 22H2 and later, where Windows Security warns about it. Not on Windows 10, whose only setting locks into the firmware |
 | Windows 10 with Extended Security Updates | Signed up, until 12 October 2027 |
+| Windows 11 version ending soon | 90 days or less before its last security fixes (*judgement*: time to sort out an upgrade that won't install) |
+| Windows not activated | Unlicensed, not genuine, or in reminder-only mode. Grace periods are Nice to have |
+| Drive errors in Windows' log | On a drive inside the PC, over 90 days: any bad block, failure warning or file system damage; 3 or more retries, resets, controller errors or lost writes (*judgement*: one is often a hiccup). USB drives and memory sticks are skipped, and a failing drive has its own Do first to-do |
+| Graphics driver stops responding | On 3 or more different days in 30 (*judgement*). Counted by day because one freeze often brings several resets within minutes. PCs with only a virtual screen are skipped |
+| Windows still set up for testing | Test signing, driver signature checks off, kernel debugging, Data Execution Prevention off, a memory or processor limit below what the PC has, safe mode, or Driver Verifier |
+| No page file | With under 16 GB of memory, or when Windows couldn't save a crash report in 90 days |
+| Browser settings forced by a policy | A policy sets the home page, start-up pages, new tab page, search engine, a proxy or force-installed extensions (best guess: some security apps do this on purpose) |
+| Proxy | Web traffic goes through another computer: a proxy server, setup script or Windows' own WinHTTP proxy. One running on this PC is Nice to have |
+| DNS server we don't recognise | Set on the PC by hand, public, and not a well-known service such as Cloudflare, Google, Quad9, OpenDNS, AdGuard, NextDNS, Control D or CleanBrowsing (best guess) |
+| Weak or open Wi-Fi | The connected network uses WEP or TKIP, or has no password |
+| Core Windows services switched off | Windows Update, BITS, Update Orchestrator, Microsoft Defender (unless another antivirus runs), the firewall, Security Center, Event Log, Cryptographic Services, WMI or Windows Time set to Disabled |
+| Programs starting from a temporary or hidden place | A start-up entry or scheduled task in Temp, Downloads, Public, the Recycle Bin or loose in ProgramData, or run through encoded PowerShell, mshta, or rundll32 with a web address (best guess) |
+| Cloud protection off, automatic sample submission off | While Windows Security is the antivirus. Windows Security shows a warning for both |
+| Encryption paused | BitLocker or device encryption is suspended on a drive that is still encrypted, and no restart is waiting |
+| Vulnerable driver blocklist off | Windows 11 without memory integrity running. With memory integrity, which enforces the list anyway, Nice to have |
+| Two antivirus apps running | Two or more besides Microsoft Defender, both switched on |
+| Guest or built-in Administrator account on | Enabled, unless it is the account in daily use |
 
 ## Nice to have
 
@@ -86,6 +104,12 @@ Every finding gets one of four levels. Home groups the to-dos by level, and the 
 | Battery | Holds 50% to 69% of its original charge |
 | Hardware errors, overclocking | Under 10 errors and no blue screens that point at hardware; an overclock with no errors |
 | Another drive almost full | Under 5% free on a drive other than C: |
+| Preview versions of Windows | The PC is in the Windows Insider Program (best guess: it may be on purpose) |
+| Windows activation grace period | Windows still has time to confirm its licence |
+| Windows Security hasn't scanned | Over 30 days since its last quick or full scan (*judgement*: real-time protection is the main defence) |
+| No page file | With 16 GB of memory or more and no lost crash reports |
+| Network cable at 100 Mbps or less | A wired port that can do more is linked at 10 or 100 Mbps (*judgement*: usually the cable, plug or router port) |
+| TRIM off | On an SSD that holds Windows |
 
 ## All good
 
@@ -100,4 +124,10 @@ Another antivirus protecting the PC, threats Windows Security already removed, a
 - Space Windows updates need: [Microsoft Support, free up space for Windows updates](https://support.microsoft.com/en-us/windows/deployment/updates-lifecycle/free-up-space-for-windows-updates).
 - Secure Boot certificates expiring in 2026: [Microsoft Support, Secure Boot certificate expiration](https://support.microsoft.com/en-us/topic/windows-secure-boot-certificate-expiration-and-ca-updates-7ff40d33-95dc-4c3c-8725-a9b95457578e). The `UEFICA2023Status` values are community-documented ([4sysops](https://4sysops.com/archives/update-windows-secure-boot-db-certificates-with-group-policy-and-powershell/)).
 - LSA protection and its start-up event: [Microsoft Learn, configuring added LSA protection](https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection).
+- Windows 11 end dates: [Microsoft Learn lifecycle, Windows 11 Home and Pro](https://learn.microsoft.com/en-us/lifecycle/products/windows-11-home-and-pro) (checked 14 November 2026). The end date shown there is the first day without fixes.
+- Graphics driver timeouts (event 4101, stop codes 0x117 and 0x141): [Microsoft Learn, timeout detection and recovery](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/timeout-detection-and-recovery).
+- Drive errors in the System log: [Microsoft Learn, data corruption and disk errors](https://learn.microsoft.com/en-us/troubleshoot/windows-server/backup-and-storage/troubleshoot-data-corruption-and-disk-errors).
+- Page file and crash reports: [Microsoft Learn, introduction to the page file](https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/introduction-to-the-page-file).
+- Vulnerable driver blocklist: [Microsoft Learn, recommended driver block rules](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/design/microsoft-recommended-driver-block-rules).
+- Sample submission warning: community-documented ([TheWindowsClub](https://www.thewindowsclub.com/automatic-sample-submission-is-off-in-microsoft-defender)); Microsoft publishes no list of Windows Security's warnings. Which antivirus apps are switched on comes from Security Center's `productState`, also community-documented.
 - Smart App Control: [Microsoft Support FAQ](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003). Controlled folder access: [Microsoft Learn](https://learn.microsoft.com/en-us/defender-endpoint/controlled-folder-access-overview).
