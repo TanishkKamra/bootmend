@@ -298,6 +298,8 @@ enum Shot {
     Welcome,
     View(Page),
     Menu,
+    /// A confirmation open over the Crashes page.
+    Dialog,
 }
 
 struct SnapMode {
@@ -395,6 +397,7 @@ impl App {
         if let Some(dir) = snap_dir {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
+            queue.push(Shot::Dialog);
             queue.push(Shot::Menu);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         }
@@ -1171,11 +1174,13 @@ impl App {
             })
         });
         let live_pending = self.page == Page::Live && self.live_data().is_none();
+        let mut open_dialog = false;
         let Some(m) = &mut self.snap_mode else { return };
         if let Some(img) = shot {
             let name = match m.queue.first() {
                 Some(Shot::View(p)) => p.slug(),
                 Some(Shot::Menu) => "menu".to_string(),
+                Some(Shot::Dialog) => "dialog".to_string(),
                 _ => "welcome".to_string(),
             };
             let file = m.dir.join(if m.part == 0 { format!("{name}.png") } else { format!("{name}-{}.png", m.part + 1) });
@@ -1185,6 +1190,9 @@ impl App {
             if m.more && m.part < 8 {
                 m.part += 1;
             } else {
+                if matches!(m.queue.first(), Some(Shot::Dialog)) {
+                    self.confirm = None;
+                }
                 m.queue.remove(0);
                 m.part = 0;
             }
@@ -1204,8 +1212,10 @@ impl App {
                 let page = match target {
                     Shot::View(p) => Some(p),
                     Shot::Menu => Some(Page::Home),
+                    Shot::Dialog => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
+                open_dialog = matches!(target, Shot::Dialog) && self.confirm.is_none();
                 if let Some(p) = page {
                     if self.page != p {
                         self.page = p;
@@ -1223,6 +1233,9 @@ impl App {
                 }
                 ctx.request_repaint();
             }
+        }
+        if open_dialog {
+            self.ask(Pending::AnalyzeDumps);
         }
     }
 }

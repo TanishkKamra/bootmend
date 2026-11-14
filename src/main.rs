@@ -180,6 +180,11 @@ fn main() {
         Err(e) => eprintln!("Couldn't load the window icon: {e}"),
     }
     let shots = args.screenshots;
+    if shots.is_some() {
+        // Screenshots are taken in a window parked off-screen with no taskbar button, so
+        // nothing appears while they're taken.
+        viewport = viewport.with_position([-20000.0, -20000.0]).with_taskbar(false).with_active(false);
+    }
     // Screenshots stay on solid colours so they look the same on every PC.
     let mica = shots.is_none() && gui::mica_available();
     if mica {
