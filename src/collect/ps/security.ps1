@@ -7,8 +7,10 @@ Try-Section 'defender' {
     # Exclusions are only readable as administrator; a standard user sees a placeholder string.
     ExclusionPaths = @($p.ExclusionPath | Where-Object { $_ }); ExclusionProcesses = @($p.ExclusionProcess | Where-Object { $_ }); ExclusionExtensions = @($p.ExclusionExtension | Where-Object { $_ })
     PUAProtection = $p.PUAProtection; CloudProtection = $p.MAPSReporting; ControlledFolderAccess = $p.EnableControlledFolderAccess
-    SmartAppControl = $m.SmartAppControlState
+    SmartAppControl = $m.SmartAppControlState; SampleSubmission = $p.SubmitSamplesConsent
   }
+  # Every antivirus Windows knows about. The middle byte of productState holds 0x10 when it is switched on.
+  $R.antivirus = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct | ForEach-Object { [ordered]@{ Name = $_.displayName; On = ((($_.productState -shr 8) -band 0x10) -ne 0) } })
   $R.otherAntivirus = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct | Where-Object { $_.displayName -notmatch 'Windows Defender|Microsoft Defender' } | ForEach-Object { $_.displayName })
   $R.threats = @(Get-MpThreatDetection | Sort-Object InitialDetectionTime -Descending | Select-Object -First 30 | ForEach-Object { $t = Get-MpThreat -ThreatID $_.ThreatID
       [ordered]@{ Date = (D $_.InitialDetectionTime); Name = $t.ThreatName; Severity = [int]$t.SeverityID; ActionSuccess = $_.ActionSuccess; Resources = @($_.Resources | Select-Object -First 3) } })
@@ -38,8 +40,33 @@ Try-Section 'access' {
   }
   $hosts = Get-Content "$env:WINDIR\System32\drivers\etc\hosts" | Where-Object { $_ -notmatch '^\s*#' -and $_.Trim() }
   $R.hosts = [ordered]@{ Entries = @($hosts).Count; Sample = @($hosts | Select-Object -First 8) }
-  $R.accounts = @(Get-LocalUser | ForEach-Object { [ordered]@{ Name = $_.Name; Enabled = [bool]$_.Enabled; LastLogon = (D $_.LastLogon); PasswordRequired = [bool]$_.PasswordRequired; Source = "$($_.PrincipalSource)" } })
+  $R.accounts = @(Get-LocalUser | ForEach-Object { [ordered]@{ Name = $_.Name; Enabled = [bool]$_.Enabled; LastLogon = (D $_.LastLogon); PasswordRequired = [bool]$_.PasswordRequired; Source = "$($_.PrincipalSource)"; Rid = [int]("$($_.SID)" -split '-')[-1] } })
+  # Services Windows needs to stay updated and protected, set to Disabled (often by "debloat" tools).
+  $R.disabledServices = @(Get-Service -Name wuauserv, BITS, UsoSvc, WinDefend, mpssvc, wscsvc, EventLog, CryptSvc, Winmgmt, W32Time | Where-Object StartType -EQ 'Disabled' | ForEach-Object { $_.Name })
   $R.admins = @(Get-LocalGroupMember -SID 'S-1-5-32-544' | ForEach-Object { "$($_.Name)" })
+}
+Try-Section 'browserPolicies' {
+  # Browser settings forced by a policy. Work PCs set these on purpose; on a home PC, adware usually did.
+  $watch = 'ExtensionInstallForcelist', 'ExtensionSettings', 'HomepageLocation', 'RestoreOnStartupURLs', 'NewTabPageLocation', 'DefaultSearchProviderSearchURL', 'ProxyServer', 'ProxyPacUrl', 'ProxySettings', 'Homepage', 'Proxy', 'SearchEngines', 'Extensions'
+  $list = New-Object System.Collections.Generic.List[object]
+  foreach ($hive in 'HKLM', 'HKCU') {
+    foreach ($b in ([ordered]@{ Chrome = 'Google\Chrome'; Edge = 'Microsoft\Edge'; Brave = 'BraveSoftware\Brave'; Firefox = 'Mozilla\Firefox' }).GetEnumerator()) {
+      $key = "${hive}:\SOFTWARE\Policies\$($b.Value)"
+      if (-not (Test-Path $key)) { continue }
+      $top = Get-Item $key
+      foreach ($w in $watch) {
+        # A policy is a value on the browser's key, or a subkey of values (lists, and Firefox's groups).
+        $v = $(if ($top.GetValueNames() -contains $w) { "$($top.GetValue($w))" } elseif (Test-Path "$key\$w") {
+            (@(Get-Item "$key\$w") + @(Get-ChildItem "$key\$w" -Recurse) | ForEach-Object { $k = $_; $k.GetValueNames() | ForEach-Object { "$($k.GetValue($_))" } }) -join ' ; ' } else { $null })
+        if (-not $v) { continue }
+        if ($w -eq 'ExtensionSettings' -and $v -notmatch 'force_installed|normal_installed') { continue }
+        # "Use the system proxy" and "no proxy" are harmless; only a real server counts.
+        if ($w -match 'Proxy' -and $v -notmatch '://|\d+\.\d+\.\d+\.\d+|[\w-]+\.[a-z]{2,}') { continue }
+        $list.Add([ordered]@{ Browser = $b.Key; Setting = $w; Value = $v.Substring(0, [math]::Min(200, $v.Length)) })
+      }
+    }
+  }
+  $R.browserPolicies = $list.ToArray()
 }
 Try-Section 'dailyAccount' {
   # The person signed in at the screen, not the account that gave Bootmend administrator rights.

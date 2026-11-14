@@ -4,6 +4,8 @@ use crate::fixes::{ExclusionKind, Fix};
 use crate::gui::Page;
 use crate::snapshot::Snapshot;
 use crate::util::{version_lt, J};
+use regex::Regex;
+use std::sync::OnceLock;
 
 const SEC: Area = Area::Security;
 
@@ -17,6 +19,8 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
     device_access(s, f);
     backup(s, f);
     extras(s, f);
+    browser_and_network(s, f);
+    hardening(s, f);
 }
 
 /// Work and school PCs: their IT department manages these settings.
@@ -93,6 +97,298 @@ fn backup(s: &Snapshot, f: &mut Vec<Finding>) {
             .conf(Confidence::BestGuess)
             .open("Open Windows Backup", "ms-settings:backup"),
     );
+}
+
+/// Public DNS services people choose on purpose. Anything else set by hand is worth a look.
+const KNOWN_DNS: &[&str] = &[
+    "1.1.1.",
+    "1.0.0.",
+    "8.8.8.8",
+    "8.8.4.4",
+    "9.9.9.",
+    "149.112.112.",
+    "208.67.220.",
+    "208.67.222.",
+    "94.140.14.",
+    "94.140.15.",
+    "45.90.28.",
+    "45.90.30.",
+    "76.76.2.",
+    "76.76.10.",
+    "185.228.168.",
+    "185.228.169.",
+];
+
+/// A public internet address: not private, loopback, link-local or a carrier's shared range.
+fn public_ipv4(ip: &str) -> bool {
+    let Ok(a) = ip.trim().parse::<std::net::Ipv4Addr>() else { return false };
+    let [x, y, ..] = a.octets();
+    !(a.is_private() || a.is_loopback() || a.is_link_local() || a.is_unspecified() || (x == 100 && (64..128).contains(&y)))
+}
+
+/// Whether every server in a proxy setting ("http=127.0.0.1:8888;https=...") runs on this PC.
+fn local_proxy(setting: &str) -> bool {
+    setting.split(';').filter(|p| !p.trim().is_empty()).all(|p| {
+        let p = p.rsplit('=').next().unwrap_or(p).trim();
+        let p = p.split("://").last().unwrap_or(p);
+        let host = p.split(['/', ':']).next().unwrap_or(p).to_lowercase();
+        host == "localhost" || host.starts_with("127.") || p.starts_with("[::1]")
+    })
+}
+
+fn browser_and_network(s: &Snapshot, f: &mut Vec<Finding>) {
+    // Work and school PCs set all of these on purpose.
+    if joined(s) {
+        return;
+    }
+    let pol = s.security.a("browserPolicies");
+    if !pol.is_empty() {
+        let mut browsers: Vec<String> = vec![];
+        for b in pol.iter().filter_map(|p| p.s("Browser")) {
+            if !browsers.contains(&b) {
+                browsers.push(b);
+            }
+        }
+        f.push(
+            Finding::new("browser-policies", SEC, Level::WorthDoing, format!("Something is controlling {}'s settings", join_and(&browsers)))
+                .why("Settings such as the home page, search engine or extensions are locked by a policy, the way a work PC is managed. On a home PC, adware usually put them there. The browser's menu then says it's managed by your organisation.")
+                .step("If you don't recognise them, remove programs you didn't install on purpose from Settings, Apps, Installed apps.")
+                .step("Then run a full scan in Windows Security, which removes known adware.")
+                .details(pol.iter().map(|p| format!("{}: {} = {}", p.s("Browser").unwrap_or_default(), p.s("Setting").unwrap_or_default(), p.s("Value").unwrap_or_default())))
+                .conf(Confidence::BestGuess)
+                .open("Open Installed apps", "ms-settings:appsfeatures"),
+        );
+    }
+    let p = s.network.g("proxy");
+    let mut proxies = vec![];
+    if p.b("Enabled") == Some(true) {
+        proxies.extend(p.s("Server").filter(|x| !x.is_empty()).map(|x| format!("Proxy server: {x}")));
+    }
+    proxies.extend(p.s("Pac").filter(|x| !x.is_empty()).map(|x| format!("Setup script: {x}")));
+    proxies.extend(p.s("WinHttp").filter(|x| !x.is_empty()).map(|x| format!("For Windows itself: {x} (netsh winhttp reset proxy clears it)")));
+    if !proxies.is_empty() {
+        let local = proxies.iter().all(|x| local_proxy(x.split_once(": ").map_or("", |(_, v)| v.split(' ').next().unwrap_or(v))));
+        f.push(
+            Finding::new("proxy", SEC, if local { Level::NiceToHave } else { Level::WorthDoing }, "Your internet traffic goes through a proxy")
+                .why(if local {
+                    "A program on this PC passes your web traffic through itself. VPNs, ad blockers and developer tools do this. If you use none of those, something else set it up."
+                } else {
+                    "Web traffic is sent through another computer first. Workplaces do this on purpose; on a home PC, adware sometimes sets it up to watch or change what you see."
+                })
+                .step("If you don't use a VPN or a tool that needs it, open Settings, Network & internet, Proxy, and switch off Use a proxy server and Use setup script.")
+                .details(proxies)
+                .open("Open proxy settings", "ms-settings:network-proxy"),
+        );
+    }
+    let odd: Vec<String> = s.network.strs("staticDns").into_iter().filter(|ip| public_ipv4(ip) && !KNOWN_DNS.iter().any(|k| ip.starts_with(k))).collect();
+    if !odd.is_empty() {
+        f.push(
+            Finding::new("dns-changed", SEC, Level::WorthDoing, "This PC uses a DNS server we don't recognise")
+                .why("DNS turns website names into addresses, so whoever runs it can send you to fake copies of real sites. This one was set on the PC by hand or by a program, not by your router.")
+                .step("If you didn't choose it, open Settings, Network & internet, your connection, Hardware properties, and set DNS server assignment to Automatic (DHCP).")
+                .details(odd.iter().map(|i| format!("DNS server: {i}")))
+                .conf(Confidence::BestGuess)
+                .open("Open network settings", "ms-settings:network-status"),
+        );
+    }
+    let w = s.network.g("wifi");
+    if let Some(ssid) = w.s("SSID") {
+        let (auth, cipher) = (w.s("Auth").unwrap_or_default(), w.s("Cipher").unwrap_or_default());
+        let weak = auth.contains("WEP") || cipher.contains("WEP") || cipher.contains("TKIP");
+        let open = !weak && auth.eq_ignore_ascii_case("Open");
+        if weak || open {
+            f.push(
+                Finding::new(
+                    "wifi-weak",
+                    SEC,
+                    Level::WorthDoing,
+                    if open { format!("{ssid} is a Wi-Fi network without a password") } else { format!("{ssid} uses outdated Wi-Fi security") },
+                )
+                .why(if open {
+                    "Anyone nearby can see traffic on a network without a password. At a café or airport that's normal: avoid banking there, or use your phone's hotspot."
+                } else {
+                    "Its security can be cracked in minutes, letting someone nearby join the network or read what's sent over it."
+                })
+                .step(if open {
+                    "If this is your own network, set a password on the router using WPA2 or WPA3."
+                } else {
+                    "In the router's settings, switch Wi-Fi security to WPA2 (AES) or WPA3. The label on the router or its manual says how to sign in to it."
+                })
+                .detail(format!("Security: {auth} {cipher}").trim_end().to_string()),
+            );
+        }
+    }
+}
+
+/// Friendly names for the services Windows needs to stay protected and up to date.
+const CORE_SERVICES: &[(&str, &str)] = &[
+    ("wuauserv", "Windows Update"),
+    ("BITS", "Background Intelligent Transfer Service, which downloads updates"),
+    ("UsoSvc", "Update Orchestrator Service"),
+    ("WinDefend", "Microsoft Defender Antivirus"),
+    ("mpssvc", "Windows Defender Firewall"),
+    ("wscsvc", "Security Center"),
+    ("EventLog", "Windows Event Log"),
+    ("CryptSvc", "Cryptographic Services"),
+    ("Winmgmt", "Windows Management Instrumentation"),
+    ("W32Time", "Windows Time"),
+];
+
+/// A program that starts from a throwaway folder or a hidden script, as harmful software does.
+fn odd_start(cmd: &str) -> bool {
+    static PATTERNS: OnceLock<[Regex; 2]> = OnceLock::new();
+    let [encoded, loose] = PATTERNS.get_or_init(|| {
+        [
+            // PowerShell takes any short form of -EncodedCommand ("-e", "-ec", "-enc"...), but "-ex" is -ExecutionPolicy.
+            Regex::new(r"(?i)\b(powershell|pwsh)(\.exe)?\b.*\s[-/](e|ec|en[a-z]*)\s").expect("valid"),
+            Regex::new(r"(?i)c:\\programdata\\[^\\]+\.(exe|dll|bat|cmd|vbs|js|ps1)\b").expect("valid"),
+        ]
+    });
+    let c = cmd.to_lowercase();
+    let places = ["\\appdata\\local\\temp\\", "%temp%", "%tmp%", "\\windows\\temp\\", "\\users\\public\\", "\\downloads\\", "$recycle.bin"];
+    places.iter().any(|p| c.contains(p))
+        || encoded.is_match(cmd)
+        || loose.is_match(cmd)
+        || c.contains("mshta")
+        || (c.contains("rundll32") && (c.contains("http") || c.contains("javascript:")))
+}
+
+fn hardening(s: &Snapshot, f: &mut Vec<Finding>) {
+    let sec = &s.security;
+    let d = sec.g("defender");
+    let others = !sec.strs("otherAntivirus").is_empty();
+    let mut off = sec.strs("disabledServices");
+    if others {
+        off.retain(|x| x != "WinDefend");
+    }
+    if !off.is_empty() {
+        let name = |n: &String| CORE_SERVICES.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map_or(n.clone(), |(_, v)| v.to_string());
+        let title = if off.len() == 1 { format!("{} is switched off", name(&off[0])) } else { format!("{} Windows services are switched off", off.len()) };
+        f.push(
+            Finding::new("services-off", SEC, Level::WorthDoing, title)
+                .why("Windows needs these to stay up to date and protected. \"Debloat\" and tuning tools often switch them off.")
+                .step("Search Start for Services, double-click each one listed, set Startup type back to Automatic or Manual, and restart.")
+                .details(off.iter().map(|n| format!("{} ({n})", name(n)))),
+        );
+    }
+    let mut odd: Vec<String> = s
+        .software
+        .a("startup")
+        .into_iter()
+        .filter(|x| x.b("Enabled") != Some(false) && x.s("Command").is_some_and(|c| odd_start(&c)))
+        .map(|x| format!("{}: {}", x.s("Name").unwrap_or_default(), x.s("Command").unwrap_or_default()))
+        .collect();
+    odd.extend(
+        s.software
+            .a("tasks")
+            .into_iter()
+            .filter(|x| x.s("Action").is_some_and(|c| odd_start(&c)))
+            .map(|x| format!("Scheduled task {}: {}", x.s("Name").unwrap_or_default(), x.s("Action").unwrap_or_default())),
+    );
+    if !odd.is_empty() {
+        f.push(
+            Finding::new("startup-odd", SEC, Level::WorthDoing, format!("{} from a temporary or hidden place", plural(odd.len(), "program starts", "programs start")))
+                .why("Real apps start from where they're installed. Starting from a temporary folder, the Downloads folder or a hidden script is a common trick of harmful software.")
+                .step("Look up each name below. If you don't recognise it, switch it off in Tune-up's start-up list, then run a full scan in Windows Security.")
+                .details(odd.into_iter().map(|x| x.chars().take(160).collect()))
+                .conf(Confidence::BestGuess)
+                .act(Action::Goto(Page::Startup)),
+        );
+    }
+    let defender_on = d.b("RealTime") == Some(true) && !others;
+    if defender_on && d.i("CloudProtection") == Some(0) {
+        f.push(
+            Finding::new("av-cloud-off", SEC, Level::WorthDoing, "Cloud protection is off")
+                .why("Windows Security checks new and unknown files with Microsoft's cloud, which catches threats hours before a normal update. Windows Security shows a warning about this too.")
+                .step("Open Windows Security, Virus & threat protection, Manage settings, and switch on Cloud-delivered protection.")
+                .open("Open virus protection settings", "windowsdefender://threatsettings"),
+        );
+    }
+    if defender_on && d.i("SampleSubmission") == Some(2) {
+        f.push(
+            Finding::new("av-samples-off", SEC, Level::WorthDoing, "Automatic sample submission is off")
+                .why("When Windows Security finds a suspicious program, it can send it to Microsoft to check. Files likely to hold personal information still ask first. Windows Security shows a warning about this too.")
+                .step("Open Windows Security, Virus & threat protection, Manage settings, and switch on Automatic sample submission.")
+                .open("Open virus protection settings", "windowsdefender://threatsettings"),
+        );
+    }
+    let today = chrono::Local::now().date_naive();
+    let last_scan = [d.s("LastQuickScan"), d.s("LastFullScan")]
+        .into_iter()
+        .flatten()
+        .filter_map(|x| chrono::NaiveDate::parse_from_str(x.get(..10)?, "%Y-%m-%d").ok())
+        .max();
+    // Real-time protection is the main defence, so a quiet month is only worth a nudge (our judgement).
+    if let Some(days) = last_scan.map(|x| (today - x).num_days()).filter(|&n| defender_on && n > 30) {
+        f.push(
+            Finding::new("av-scan-old", SEC, Level::NiceToHave, format!("Windows Security hasn't scanned in {days} days"))
+                .why("Real-time protection checks files as you use them, so this isn't urgent. A scan also catches anything that slipped in while protection was off.")
+                .step("Open Windows Security, Virus & threat protection, and choose Quick scan.")
+                .open("Open virus protection", "windowsdefender://threat"),
+        );
+    }
+    // Windows pauses encryption for a restart around some updates.
+    if s.system.g("os").b("PendingReboot") != Some(true) {
+        let paused: Vec<String> = s
+            .storage
+            .a("volumes")
+            .into_iter()
+            .filter(|v| v.s("BitLocker").is_some_and(|b| b.starts_with("Off") && b.contains("Encrypt")))
+            .filter_map(|v| v.s("Letter"))
+            .collect();
+        if !paused.is_empty() {
+            f.push(
+                Finding::new("bitlocker-suspended", SEC, Level::WorthDoing, format!("Encryption is paused on {}", join_and(&paused)))
+                    .why("The drive is encrypted, but its protection is paused, so anyone who takes the drive out could still read it. Windows pauses it briefly around some updates; this time it stayed off.")
+                    .step("Open Settings, Privacy & security, Device encryption, and switch it on. On Pro editions, BitLocker in Control Panel shows Resume protection instead.")
+                    .open("Open device encryption", "ms-settings:deviceencryption"),
+            );
+        }
+    }
+    let os = s.system.g("os");
+    if win11_build(s).is_some() && os.i("DriverBlocklist") == Some(0) {
+        // Memory integrity enforces the list anyway.
+        let level = if os.s("MemoryIntegrity").as_deref() == Some("On") { Level::NiceToHave } else { Level::WorthDoing };
+        f.push(
+            Finding::new("driver-blocklist-off", SEC, level, "Windows' list of unsafe drivers is switched off")
+                .why("Microsoft keeps a list of drivers with known security holes that attackers misuse, and Windows blocks them. Some old games' anti-cheat or hardware tools ask you to switch it off.")
+                .step("Open Windows Security, Device security, Core isolation details, and switch on Microsoft Vulnerable Driver Blocklist.")
+                .open("Open Core isolation", "windowsdefender://coreisolation"),
+        );
+    }
+    let running: Vec<String> =
+        sec.a("antivirus").into_iter().filter(|a| a.b("On") == Some(true)).filter_map(|a| a.s("Name")).filter(|n| !n.contains("Defender")).collect();
+    if running.len() >= 2 {
+        f.push(
+            Finding::new("two-av", SEC, Level::WorthDoing, "Two antivirus apps are running at once")
+                .why("They check the same files twice and can block each other, which slows the PC and can cause crashes. One good antivirus is enough, and Windows Security is free.")
+                .step("Uninstall the one you don't want from Settings, Apps, Installed apps.")
+                .details(running)
+                .open("Open Installed apps", "ms-settings:appsfeatures"),
+        );
+    }
+    let daily = sec.g("dailyAccount").s("Name").unwrap_or_default();
+    let daily = daily.rsplit('\\').next().unwrap_or_default().to_lowercase();
+    for a in sec.a("accounts") {
+        let (Some(name), Some(rid)) = (a.s("Name"), a.i("Rid")) else { continue };
+        if a.b("Enabled") != Some(true) || name.to_lowercase() == daily {
+            continue;
+        }
+        let (id, title, why) = match rid {
+            501 => ("guest-on", "The Guest account is switched on", "Anyone at the keyboard can use this PC through it without a password."),
+            500 => (
+                "builtin-admin-on",
+                "The built-in Administrator account is switched on",
+                "It's the same on every Windows PC, often has no password and never asks before making changes, so attackers try it first.",
+            ),
+            _ => continue,
+        };
+        f.push(
+            Finding::new(id, SEC, Level::WorthDoing, title)
+                .why(why)
+                .step(format!("Search Start for Command Prompt, choose Run as administrator, and type: net user \"{name}\" /active:no")),
+        );
+    }
 }
 
 /// "Desktop, Documents and Pictures".
@@ -620,7 +916,8 @@ fn system(s: &Snapshot, f: &mut Vec<Finding>) {
     }
     if dev.b("HasBattery") == Some(true) {
         let sysvol = s.storage.a("volumes").into_iter().find(|v| v.s("Letter").as_deref() == Some("C:"));
-        if sysvol.and_then(|v| v.s("BitLocker")).is_some_and(|b| b.starts_with("Off")) {
+        // "Off / FullyEncrypted" is paused encryption, which has its own to-do.
+        if sysvol.and_then(|v| v.s("BitLocker")).is_some_and(|b| b.starts_with("Off") && !b.contains("Encrypt")) {
             f.push(
                 Finding::new("encryption-off", SEC, Level::WorthDoing, "This laptop's drive is not encrypted")
                     .why("If the laptop is lost or stolen, someone could take the drive out and read your files. Encryption prevents that, and you won't notice it day to day.")
