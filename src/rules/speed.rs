@@ -1,4 +1,5 @@
 use super::{plural, Action, Area, Confidence, Finding, Level};
+use crate::fixes::Fix;
 use crate::gui::Page;
 use crate::snapshot::Snapshot;
 use crate::util::J;
@@ -93,7 +94,8 @@ fn links(s: &Snapshot, f: &mut Vec<Finding>) {
         f.push(
             Finding::new("trim-off", SPD, Level::NiceToHave, "TRIM is off for the SSD")
                 .why("TRIM lets Windows tell the SSD which space is free, which keeps it fast and helps it last. Windows turns it on by default; old tuning guides switch it off.")
-                .step("Search Start for Command Prompt, choose Run as administrator, and type: fsutil behavior set DisableDeleteNotify 0"),
+                .step("Search Start for Command Prompt, choose Run as administrator, and type: fsutil behavior set DisableDeleteNotify 0")
+                .act(Action::Fix(Fix::EnableTrim)),
         );
     }
 }

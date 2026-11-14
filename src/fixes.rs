@@ -7,16 +7,65 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Fix {
-    DisableStartup { name: String, approved_key: String },
-    EnableStartup { name: String, approved_key: String },
-    RemoveExclusion { kind: ExclusionKind, value: String },
+    DisableStartup {
+        name: String,
+        approved_key: String,
+    },
+    EnableStartup {
+        name: String,
+        approved_key: String,
+    },
+    RemoveExclusion {
+        kind: ExclusionKind,
+        value: String,
+    },
     EnablePua,
     DisableRemoteAssistance,
-    DisableFirewallRule { name: String, display: String },
-    ServiceManual { name: String, display: String },
+    DisableFirewallRule {
+        name: String,
+        display: String,
+    },
+    ServiceManual {
+        name: String,
+        display: String,
+    },
     DisableSmb1,
     EnableSystemProtection,
     AllowAutoUpdates,
+    /// `start` is Windows' default for the service: "Automatic", "Manual" or "Delayed".
+    EnableService {
+        name: String,
+        display: String,
+        start: String,
+    },
+    DisableAccount {
+        name: String,
+    },
+    EnableCloudProtection,
+    EnableSampleSubmission,
+    EnableTrim,
+    ResumeEncryption {
+        drive: String,
+    },
+    SystemManagedPagefile,
+    EnableDriverBlocklist,
+    EnableLsaProtection,
+    /// What was switched on, so undo puts back exactly that.
+    TurnOffProxy {
+        enabled: bool,
+        pac: String,
+        winhttp: String,
+    },
+    DnsAutomatic {
+        adapter: String,
+        servers: Vec<String>,
+    },
+    /// `key` as reg.exe writes it: "HKLM\SOFTWARE\Policies\Google\Chrome".
+    RemoveBrowserPolicies {
+        browser: String,
+        key: String,
+        settings: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -37,6 +86,10 @@ impl ExclusionKind {
 }
 
 const DISABLED: &str = "([byte[]](3,0,0,0,0,0,0,0,0,0,0,0))";
+/// Runs a Windows command-line tool and returns its exit code. Its messages are dropped because
+/// Windows PowerShell turns a tool's error output into a terminating error under 'Stop', before
+/// the exit code can be checked.
+const NATIVE: &str = "function Native([scriptblock]$b) { $ErrorActionPreference = 'Continue'; & $b 2>&1 | Out-Null; $LASTEXITCODE }\n";
 const ENABLED: &str = "([byte[]](2,0,0,0,0,0,0,0,0,0,0,0))";
 
 impl Fix {
@@ -53,6 +106,18 @@ impl Fix {
             Fix::DisableSmb1 => "Turn off SMB1",
             Fix::EnableSystemProtection => "Turn on System Restore",
             Fix::AllowAutoUpdates => "Let Windows update itself",
+            Fix::EnableService { .. } => "Switch back on",
+            Fix::DisableAccount { .. } => "Switch off this account",
+            Fix::EnableCloudProtection => "Turn on cloud protection",
+            Fix::EnableSampleSubmission => "Turn on sample submission",
+            Fix::EnableTrim => "Turn on TRIM",
+            Fix::ResumeEncryption { .. } => "Resume encryption",
+            Fix::SystemManagedPagefile => "Let Windows manage it",
+            Fix::EnableDriverBlocklist => "Turn on the blocklist",
+            Fix::EnableLsaProtection => "Turn on LSA protection",
+            Fix::TurnOffProxy { .. } => "Turn off the proxy",
+            Fix::DnsAutomatic { .. } => "Use automatic DNS",
+            Fix::RemoveBrowserPolicies { .. } => "Remove the locked settings",
         }
     }
 
@@ -69,6 +134,18 @@ impl Fix {
             Fix::DisableSmb1 => "The old SMB1 file-sharing protocol will be removed. Very old network drives may stop working; you can turn it back on from History. A restart finishes the change.".into(),
             Fix::EnableSystemProtection => "Windows will start saving restore points for drive C before updates and driver installs, using a small share of the drive. Undoing this later deletes the saved restore points.".into(),
             Fix::AllowAutoUpdates => "The policy that stops automatic updates will be removed, so Windows installs security fixes by itself again. You can put the policy back from History.".into(),
+            Fix::EnableService { display, .. } => format!("{display} will start the way Windows sets it up. A restart finishes the change, and you can switch it off again from History."),
+            Fix::DisableAccount { name } => format!("The {name} account will be switched off, not deleted. You can switch it back on from History."),
+            Fix::EnableCloudProtection => "Windows Security will check new and unknown files with Microsoft's cloud. You can undo this from History.".into(),
+            Fix::EnableSampleSubmission => "Windows Security will send suspicious programs to Microsoft to check. Files likely to hold personal information still ask first. You can undo this from History.".into(),
+            Fix::EnableTrim => "Windows will tell the SSD which space is free again. You can undo this from History.".into(),
+            Fix::ResumeEncryption { drive } => format!("Protection on {drive} will be switched back on. Have your recovery key to hand in case Windows asks for it when the PC next starts: it's saved in your Microsoft account at account.microsoft.com/devices/recoverykey. You can pause it again from History."),
+            Fix::SystemManagedPagefile => "Windows will create a page file and choose its size itself. A restart finishes the change, and you can undo it from History.".into(),
+            Fix::EnableDriverBlocklist => "Windows will block drivers on Microsoft's list of unsafe ones. If an old game's anti-cheat or a hardware tool stops working, undo this from History. A restart finishes the change.".into(),
+            Fix::EnableLsaProtection => "Windows will guard the part of it that holds your sign-in details. Rarely, an old fingerprint reader or smart-card add-on stops working; if so, undo this from History. A restart finishes the change.".into(),
+            Fix::TurnOffProxy { .. } => "Web traffic will go straight to the internet again. If a VPN or another tool stops working, switch the proxy back on from History. Restart your browser afterwards.".into(),
+            Fix::DnsAutomatic { adapter, servers } => format!("{adapter} will use the DNS servers your router hands out. To go back to {}, undo this from History.", servers.join(", ")),
+            Fix::RemoveBrowserPolicies { browser, .. } => format!("The locked settings will be removed from {browser}, after saving a copy so you can put them back from History. Restart {browser} afterwards."),
         }
     }
 
@@ -76,6 +153,8 @@ impl Fix {
     pub fn needs_admin(&self) -> bool {
         match self {
             Fix::DisableStartup { approved_key, .. } | Fix::EnableStartup { approved_key, .. } => approved_key.starts_with("HKLM"),
+            Fix::TurnOffProxy { winhttp, .. } => !winhttp.is_empty(),
+            Fix::RemoveBrowserPolicies { key, .. } => key.starts_with("HKLM"),
             _ => true,
         }
     }
@@ -125,8 +204,109 @@ impl Fix {
                 let k = r"'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'";
                 (format!("Remove-ItemProperty -Path {k} -Name NoAutoUpdate"), format!("Set-ItemProperty -Path {k} -Name NoAutoUpdate -Value 1 -Type DWord"))
             }
+            Fix::EnableService { name, display, start } => {
+                let n = ps_quote(name);
+                let apply = match start.as_str() {
+                    "Delayed" => {
+                        format!("{NATIVE}if (Native {{ sc.exe config {n} start= delayed-auto }}) {{ throw {} }}", ps_quote(&format!("Windows would not change {display}")))
+                    }
+                    "Manual" => format!("Set-Service -Name {n} -StartupType Manual"),
+                    _ => format!("Set-Service -Name {n} -StartupType Automatic"),
+                };
+                (apply, format!("Set-Service -Name {n} -StartupType Disabled"))
+            }
+            Fix::DisableAccount { name } => {
+                let n = ps_quote(name);
+                (format!("Disable-LocalUser -Name {n}"), format!("Enable-LocalUser -Name {n}"))
+            }
+            // With tamper protection on, Windows Security can ignore the change without an error.
+            Fix::EnableCloudProtection => (
+                "Set-MpPreference -MAPSReporting Advanced\nif ((Get-MpPreference).MAPSReporting -eq 0) { throw \"Windows Security didn't accept the change. Switch it on in Windows Security instead.\" }".into(),
+                "Set-MpPreference -MAPSReporting Disabled".into(),
+            ),
+            Fix::EnableSampleSubmission => (
+                "Set-MpPreference -SubmitSamplesConsent SendSafeSamples\nif ((Get-MpPreference).SubmitSamplesConsent -ne 1) { throw \"Windows Security didn't accept the change. Switch it on in Windows Security instead.\" }".into(),
+                "Set-MpPreference -SubmitSamplesConsent NeverSend".into(),
+            ),
+            Fix::EnableTrim => {
+                let set = |v: u8, what: &str| format!("{NATIVE}if (Native {{ fsutil behavior set DisableDeleteNotify {v} }}) {{ throw 'Windows would not switch TRIM {what}' }}");
+                (set(0, "on"), set(1, "off"))
+            }
+            Fix::ResumeEncryption { drive } => {
+                let d = ps_quote(drive);
+                (format!("Resume-BitLocker -MountPoint {d} | Out-Null"), format!("Suspend-BitLocker -MountPoint {d} -RebootCount 0 | Out-Null"))
+            }
+            Fix::SystemManagedPagefile => {
+                let set = |v: &str| format!("Get-CimInstance Win32_ComputerSystem | Set-CimInstance -Property @{{ AutomaticManagedPagefile = ${v} }}");
+                (set("true"), set("false"))
+            }
+            Fix::EnableDriverBlocklist => {
+                let k = r"'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config'";
+                let set = |v: u8| format!("if (-not (Test-Path {k})) {{ New-Item {k} -Force | Out-Null }}\nSet-ItemProperty {k} -Name VulnerableDriverBlocklistEnable -Value {v} -Type DWord");
+                (set(1), set(0))
+            }
+            // 2 switches it on without locking it into the firmware, as Windows Security's switch does.
+            Fix::EnableLsaProtection => {
+                let k = r"'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'";
+                (
+                    format!("Set-ItemProperty {k} -Name RunAsPPL -Value 2 -Type DWord\nSet-ItemProperty {k} -Name RunAsPPLBoot -Value 2 -Type DWord"),
+                    format!(
+                        "Set-ItemProperty {k} -Name RunAsPPL -Value 0 -Type DWord\nif ((Get-ItemProperty {k}).PSObject.Properties.Name -contains 'RunAsPPLBoot') {{ Remove-ItemProperty {k} -Name RunAsPPLBoot }}"
+                    ),
+                )
+            }
+            Fix::TurnOffProxy { enabled, pac, winhttp } => {
+                let k = r"'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'";
+                let (mut apply, mut undo) = (vec![], vec![]);
+                if *enabled {
+                    apply.push(format!("Set-ItemProperty {k} -Name ProxyEnable -Value 0 -Type DWord"));
+                    undo.push(format!("Set-ItemProperty {k} -Name ProxyEnable -Value 1 -Type DWord"));
+                }
+                if !pac.is_empty() {
+                    apply.push(format!("Remove-ItemProperty {k} -Name AutoConfigURL"));
+                    undo.push(format!("Set-ItemProperty {k} -Name AutoConfigURL -Value {}", ps_quote(pac)));
+                }
+                if !winhttp.is_empty() {
+                    apply.push(format!("{NATIVE}if (Native {{ netsh.exe winhttp reset proxy }}) {{ throw 'Windows would not reset its own proxy' }}"));
+                    undo.push(format!(
+                        "{NATIVE}if (Native {{ netsh.exe winhttp set proxy {} }}) {{ throw 'Windows would not set its own proxy back' }}",
+                        ps_quote(&format!("proxy-server={winhttp}"))
+                    ));
+                }
+                (apply.join("\n"), undo.join("\n"))
+            }
+            Fix::DnsAutomatic { adapter, servers } => {
+                let a = ps_quote(adapter);
+                let list = servers.iter().map(|x| ps_quote(x)).collect::<Vec<_>>().join(",");
+                (format!("Set-DnsClientServerAddress -InterfaceAlias {a} -ResetServerAddresses"), format!("Set-DnsClientServerAddress -InterfaceAlias {a} -ServerAddresses {list}"))
+            }
+            Fix::RemoveBrowserPolicies { browser, key, settings } => {
+                let hive = key.split('\\').next().unwrap_or_default();
+                let f = ps_quote(&backup_file(&format!("policies-{browser}-{hive}")));
+                let (reg, path) = (ps_quote(key), ps_quote(&format!("Registry::{key}")));
+                let names = settings.iter().map(|x| ps_quote(x)).collect::<Vec<_>>().join(", ");
+                // A policy is a value on the browser's key, or a subkey (lists, Firefox's groups).
+                let apply = format!(
+                    r#"{NATIVE}$f = {f}
+if (Native {{ reg.exe export {reg} $f /y }}) {{ throw 'Could not save a copy of the settings first, so nothing was changed' }}
+$p = {path}
+foreach ($n in @({names})) {{
+  if (Test-Path -LiteralPath "$p\$n") {{ Remove-Item -LiteralPath "$p\$n" -Recurse }}
+  if ((Get-ItemProperty -LiteralPath $p).PSObject.Properties.Name -contains $n) {{ Remove-ItemProperty -LiteralPath $p -Name $n }}
+}}"#
+                );
+                let undo = format!("{NATIVE}$f = {f}\nif (Native {{ reg.exe import $f }}) {{ throw 'Could not put the settings back from the saved copy' }}");
+                (apply, undo)
+            }
         }
     }
+}
+
+/// Where a copy of settings is kept before they are removed, so undo can put them back.
+fn backup_file(what: &str) -> String {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let dir = data_dir("backups").unwrap_or_else(|_| std::env::temp_dir());
+    dir.join(format!("{what}-{stamp}.reg")).display().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,5 +431,124 @@ mod tests {
         run_ps(&undo).unwrap();
         assert_eq!(first(key), "2");
         run_ps(r"Remove-Item -Path 'HKCU:\Software\bootmend-selftest' -Recurse").unwrap();
+    }
+
+    #[test]
+    fn new_fixes_record_an_exact_undo() {
+        let svc = |start: &str| Fix::EnableService { name: "UsoSvc".into(), display: "Update Orchestrator Service".into(), start: start.into() }.scripts();
+        let (a, u) = svc("Delayed");
+        assert!(a.contains("sc.exe config 'UsoSvc' start= delayed-auto") && u.contains("Set-Service -Name 'UsoSvc' -StartupType Disabled"), "{a} / {u}");
+        assert!(svc("Manual").0.contains("-StartupType Manual"));
+        let (a, u) = Fix::DisableAccount { name: "Guest".into() }.scripts();
+        assert_eq!((a.as_str(), u.as_str()), ("Disable-LocalUser -Name 'Guest'", "Enable-LocalUser -Name 'Guest'"));
+        let (a, u) = Fix::EnableSampleSubmission.scripts();
+        assert!(a.contains("SendSafeSamples") && a.contains("throw") && u.contains("NeverSend"), "checks Windows Security took it");
+        let (a, u) = Fix::EnableLsaProtection.scripts();
+        assert!(a.contains("RunAsPPL -Value 2") && a.contains("RunAsPPLBoot -Value 2") && u.contains("RunAsPPL -Value 0") && u.contains("Remove-ItemProperty"));
+        let (a, u) = Fix::ResumeEncryption { drive: "C:".into() }.scripts();
+        assert!(a.starts_with("Resume-BitLocker -MountPoint 'C:'") && u.contains("Suspend-BitLocker -MountPoint 'C:' -RebootCount 0"));
+        let (a, u) = Fix::TurnOffProxy { enabled: true, pac: "http://x/p.pac".into(), winhttp: "10.0.0.1:3128".into() }.scripts();
+        assert!(a.contains("ProxyEnable -Value 0") && a.contains("AutoConfigURL") && a.contains("winhttp reset proxy"), "{a}");
+        assert!(u.contains("ProxyEnable -Value 1") && u.contains("'http://x/p.pac'") && u.contains("'proxy-server=10.0.0.1:3128'"), "{u}");
+        let (a, u) = Fix::TurnOffProxy { enabled: false, pac: "http://x/p.pac".into(), winhttp: String::new() }.scripts();
+        assert!(!a.contains("ProxyEnable") && !a.contains("winhttp") && !u.contains("ProxyEnable"), "only what was on: {a} / {u}");
+        assert!(!Fix::TurnOffProxy { enabled: true, pac: String::new(), winhttp: String::new() }.needs_admin(), "your own proxy setting");
+        let (a, u) = Fix::DnsAutomatic { adapter: "Wi-Fi".into(), servers: vec!["185.10.10.10".into(), "1.1.1.1".into()] }.scripts();
+        assert!(a.contains("-InterfaceAlias 'Wi-Fi' -ResetServerAddresses") && u.contains("-ServerAddresses '185.10.10.10','1.1.1.1'"), "{u}");
+        let p = Fix::RemoveBrowserPolicies {
+            browser: "Chrome".into(),
+            key: r"HKCU\SOFTWARE\Policies\Google\Chrome".into(),
+            settings: vec!["HomepageLocation".into()],
+        };
+        let (a, u) = p.scripts();
+        assert!(a.contains("export") && a.contains("'HomepageLocation'") && u.contains("import"), "{a} / {u}");
+        let backup = a.lines().find(|l| l.starts_with("$f = ")).expect("backup path");
+        assert!(u.contains(backup), "the undo imports the same copy");
+        assert!(!p.needs_admin());
+        for fx in [Fix::EnableCloudProtection, Fix::EnableTrim, Fix::SystemManagedPagefile, Fix::EnableDriverBlocklist] {
+            let (a, u) = fx.scripts();
+            assert!(!a.is_empty() && !u.is_empty() && a != u, "{fx:?}");
+        }
+    }
+
+    fn every_fix() -> Vec<Fix> {
+        vec![
+            Fix::DisableStartup { name: "App".into(), approved_key: r"HKCU:\Software\X\Run".into() },
+            Fix::RemoveExclusion { kind: ExclusionKind::Path, value: r"C:\Games".into() },
+            Fix::EnablePua,
+            Fix::DisableRemoteAssistance,
+            Fix::DisableFirewallRule { name: "r".into(), display: "Rule".into() },
+            Fix::ServiceManual { name: "svc".into(), display: "Service".into() },
+            Fix::DisableSmb1,
+            Fix::EnableSystemProtection,
+            Fix::AllowAutoUpdates,
+            Fix::EnableService { name: "UsoSvc".into(), display: "Update Orchestrator Service".into(), start: "Delayed".into() },
+            Fix::EnableService { name: "W32Time".into(), display: "Windows Time".into(), start: "Manual".into() },
+            Fix::DisableAccount { name: "Guest".into() },
+            Fix::EnableCloudProtection,
+            Fix::EnableSampleSubmission,
+            Fix::EnableTrim,
+            Fix::ResumeEncryption { drive: "C:".into() },
+            Fix::SystemManagedPagefile,
+            Fix::EnableDriverBlocklist,
+            Fix::EnableLsaProtection,
+            Fix::TurnOffProxy { enabled: true, pac: "http://x/p.pac".into(), winhttp: "10.0.0.1:3128".into() },
+            Fix::DnsAutomatic { adapter: "Wi-Fi".into(), servers: vec!["185.10.10.10".into()] },
+            Fix::RemoveBrowserPolicies {
+                browser: "Chrome".into(),
+                key: r"HKLM\SOFTWARE\Policies\Google\Chrome".into(),
+                settings: vec!["HomepageLocation".into()],
+            },
+        ]
+    }
+
+    /// Parses every apply and undo script with PowerShell's own parser. Nothing runs.
+    #[test]
+    #[ignore = "starts PowerShell; run with --ignored"]
+    fn every_fix_script_parses() {
+        let mut checks = String::new();
+        for fx in every_fix() {
+            let (a, u) = fx.scripts();
+            for s in [a, u] {
+                checks += &format!(
+                    "$t = $null; $e = $null; [void][System.Management.Automation.Language.Parser]::ParseInput({}, [ref]$t, [ref]$e); if ($e) {{ 'BAD ' + {} + ': ' + $e[0].Message }}\n",
+                    ps_quote(&s),
+                    ps_quote(&format!("{fx:?}"))
+                );
+            }
+        }
+        let out = powershell(&checks, Duration::from_secs(60)).unwrap();
+        assert!(!out.stdout.contains("BAD "), "{}", out.stdout);
+    }
+
+    /// Removes a forced setting from a throwaway policy key under HKCU, then puts it back from the copy.
+    #[test]
+    #[ignore = "writes to the registry; run with --ignored"]
+    fn browser_policy_fix_and_undo_on_a_scratch_key() {
+        let key = r"HKCU\Software\bootmend-selftest\Policies\Chrome";
+        let setup = r#"$k = 'HKCU:\Software\bootmend-selftest\Policies\Chrome'; New-Item $k -Force | Out-Null; Set-ItemProperty $k -Name HomepageLocation -Value 'http://x.example'; Set-ItemProperty $k -Name Keep -Value 1; New-Item "$k\ExtensionInstallForcelist" -Force | Out-Null; Set-ItemProperty "$k\ExtensionInstallForcelist" -Name 1 -Value 'abc;https://x'"#;
+        run_ps(setup).unwrap();
+        let state = || {
+            let o = powershell(
+                r#"$k = 'HKCU:\Software\bootmend-selftest\Policies\Chrome'; '{0}|{1}|{2}' -f (Get-ItemProperty $k).HomepageLocation, (Get-ItemProperty $k).Keep, (Test-Path "$k\ExtensionInstallForcelist")"#,
+                Duration::from_secs(60),
+            )
+            .unwrap();
+            o.stdout.trim().to_string()
+        };
+        assert_eq!(state(), "http://x.example|1|True");
+        let f = Fix::RemoveBrowserPolicies {
+            browser: "Chrome".into(),
+            key: key.into(),
+            settings: vec!["HomepageLocation".into(), "ExtensionInstallForcelist".into()],
+        };
+        let (apply, undo) = f.scripts();
+        run_ps(&apply).unwrap();
+        assert_eq!(state(), "|1|False", "only the forced settings go");
+        run_ps(&undo).unwrap();
+        assert_eq!(state(), "http://x.example|1|True");
+        let backup = apply.lines().find_map(|l| l.strip_prefix("$f = ")).unwrap().trim_matches('\'').to_string();
+        run_ps(r"Remove-Item -Path 'HKCU:\Software\bootmend-selftest' -Recurse").unwrap();
+        std::fs::remove_file(backup).unwrap();
     }
 }

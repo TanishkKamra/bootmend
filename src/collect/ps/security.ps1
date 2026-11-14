@@ -62,7 +62,7 @@ Try-Section 'browserPolicies' {
         if ($w -eq 'ExtensionSettings' -and $v -notmatch 'force_installed|normal_installed') { continue }
         # "Use the system proxy" and "no proxy" are harmless; only a real server counts.
         if ($w -match 'Proxy' -and $v -notmatch '://|\d+\.\d+\.\d+\.\d+|[\w-]+\.[a-z]{2,}') { continue }
-        $list.Add([ordered]@{ Browser = $b.Key; Setting = $w; Value = $v.Substring(0, [math]::Min(200, $v.Length)) })
+        $list.Add([ordered]@{ Browser = $b.Key; Setting = $w; Value = $v.Substring(0, [math]::Min(200, $v.Length)); Key = "$hive\SOFTWARE\Policies\$($b.Value)" })
       }
     }
   }

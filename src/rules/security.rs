@@ -156,6 +156,7 @@ fn browser_and_network(s: &Snapshot, f: &mut Vec<Finding>) {
                 .step("Then run a full scan in Windows Security, which removes known adware.")
                 .details(pol.iter().map(|p| format!("{}: {} = {}", p.s("Browser").unwrap_or_default(), p.s("Setting").unwrap_or_default(), p.s("Value").unwrap_or_default())))
                 .conf(Confidence::BestGuess)
+                .acts(policy_fixes(&pol))
                 .open("Open Installed apps", "ms-settings:appsfeatures"),
         );
     }
@@ -177,17 +178,31 @@ fn browser_and_network(s: &Snapshot, f: &mut Vec<Finding>) {
                 })
                 .step("If you don't use a VPN or a tool that needs it, open Settings, Network & internet, Proxy, and switch off Use a proxy server and Use setup script.")
                 .details(proxies)
+                .act(Action::Fix(Fix::TurnOffProxy {
+                    enabled: p.b("Enabled") == Some(true) && p.s("Server").is_some_and(|x| !x.is_empty()),
+                    pac: p.s("Pac").unwrap_or_default(),
+                    winhttp: p.s("WinHttp").unwrap_or_default(),
+                }))
                 .open("Open proxy settings", "ms-settings:network-proxy"),
         );
     }
     let odd: Vec<String> = s.network.strs("staticDns").into_iter().filter(|ip| public_ipv4(ip) && !KNOWN_DNS.iter().any(|k| ip.starts_with(k))).collect();
     if !odd.is_empty() {
+        // Adapters still in the PC can be set back to automatic; the servers go into the undo.
+        let fixes = s.network.a("dnsByHand").into_iter().filter_map(|a| {
+            let servers = a.strs("Servers");
+            if !servers.iter().any(|x| odd.contains(x)) {
+                return None;
+            }
+            Some(Action::Fix(Fix::DnsAutomatic { adapter: a.s("Adapter")?, servers }))
+        });
         f.push(
             Finding::new("dns-changed", SEC, Level::WorthDoing, "This PC uses a DNS server we don't recognise")
                 .why("DNS turns website names into addresses, so whoever runs it can send you to fake copies of real sites. This one was set on the PC by hand or by a program, not by your router.")
                 .step("If you didn't choose it, open Settings, Network & internet, your connection, Hardware properties, and set DNS server assignment to Automatic (DHCP).")
                 .details(odd.iter().map(|i| format!("DNS server: {i}")))
                 .conf(Confidence::BestGuess)
+                .acts(fixes)
                 .open("Open network settings", "ms-settings:network-status"),
         );
     }
@@ -220,19 +235,34 @@ fn browser_and_network(s: &Snapshot, f: &mut Vec<Finding>) {
     }
 }
 
-/// Friendly names for the services Windows needs to stay protected and up to date.
-const CORE_SERVICES: &[(&str, &str)] = &[
-    ("wuauserv", "Windows Update"),
-    ("BITS", "Background Intelligent Transfer Service, which downloads updates"),
-    ("UsoSvc", "Update Orchestrator Service"),
-    ("WinDefend", "Microsoft Defender Antivirus"),
-    ("mpssvc", "Windows Defender Firewall"),
-    ("wscsvc", "Security Center"),
-    ("EventLog", "Windows Event Log"),
-    ("CryptSvc", "Cryptographic Services"),
-    ("Winmgmt", "Windows Management Instrumentation"),
-    ("W32Time", "Windows Time"),
+/// The services Windows needs to stay protected and up to date: friendly name, and how Windows 11
+/// starts each one. None marks the three whose settings Windows refuses to let even administrators
+/// change, so they get no button.
+const CORE_SERVICES: &[(&str, &str, Option<&str>)] = &[
+    ("wuauserv", "Windows Update", Some("Manual")),
+    ("BITS", "Background Intelligent Transfer Service, which downloads updates", Some("Delayed")),
+    ("UsoSvc", "Update Orchestrator Service", Some("Delayed")),
+    ("WinDefend", "Microsoft Defender Antivirus", None),
+    ("mpssvc", "Windows Defender Firewall", None),
+    ("wscsvc", "Security Center", None),
+    ("EventLog", "Windows Event Log", Some("Automatic")),
+    ("CryptSvc", "Cryptographic Services", Some("Automatic")),
+    ("Winmgmt", "Windows Management Instrumentation", Some("Automatic")),
+    ("W32Time", "Windows Time", Some("Manual")),
 ];
+
+/// One fix per policy key, in the order the keys were found.
+fn policy_fixes(pol: &[&serde_json::Value]) -> Vec<Action> {
+    let mut keys: Vec<(String, String, Vec<String>)> = vec![];
+    for p in pol {
+        let (Some(browser), Some(key), Some(setting)) = (p.s("Browser"), p.s("Key"), p.s("Setting")) else { continue };
+        match keys.iter_mut().find(|(_, k, _)| *k == key) {
+            Some((_, _, settings)) => settings.push(setting),
+            None => keys.push((browser, key, vec![setting])),
+        }
+    }
+    keys.into_iter().map(|(browser, key, settings)| Action::Fix(Fix::RemoveBrowserPolicies { browser, key, settings })).collect()
+}
 
 /// A program that starts from a throwaway folder or a hidden script, as harmful software does.
 fn odd_start(cmd: &str) -> bool {
@@ -262,14 +292,24 @@ fn hardening(s: &Snapshot, f: &mut Vec<Finding>) {
         off.retain(|x| x != "WinDefend");
     }
     if !off.is_empty() {
-        let name = |n: &String| CORE_SERVICES.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map_or(n.clone(), |(_, v)| v.to_string());
+        let known = |n: &String| CORE_SERVICES.iter().find(|(k, _, _)| k.eq_ignore_ascii_case(n));
+        let name = |n: &String| known(n).map_or(n.clone(), |(_, v, _)| v.to_string());
         let title = if off.len() == 1 { format!("{} is switched off", name(&off[0])) } else { format!("{} Windows services are switched off", off.len()) };
-        f.push(
-            Finding::new("services-off", SEC, Level::WorthDoing, title)
-                .why("Windows needs these to stay up to date and protected. \"Debloat\" and tuning tools often switch them off.")
-                .step("Search Start for Services, double-click each one listed, set Startup type back to Automatic or Manual, and restart.")
-                .details(off.iter().map(|n| format!("{} ({n})", name(n)))),
-        );
+        let locked: Vec<String> = off.iter().filter(|n| known(n).is_some_and(|(_, _, start)| start.is_none())).map(name).collect();
+        let mut x = Finding::new("services-off", SEC, Level::WorthDoing, title)
+            .why("Windows needs these to stay up to date and protected. \"Debloat\" and tuning tools often switch them off.")
+            .details(off.iter().map(|n| format!("{} ({n})", name(n))))
+            .acts(off.iter().filter_map(|n| {
+                let (_, display, start) = known(n)?;
+                Some(Action::Fix(Fix::EnableService { name: n.clone(), display: display.to_string(), start: start.as_ref()?.to_string() }))
+            }));
+        if !locked.is_empty() {
+            x = x.step(format!(
+                "Windows doesn't let anyone change {} directly. Undo it in the tool that switched it off, or open Settings, System, Recovery, and choose Fix problems using Windows Update, which reinstalls Windows and keeps your files and apps.",
+                join_and(&locked)
+            ));
+        }
+        f.push(x);
     }
     let mut odd: Vec<String> = s
         .software
@@ -301,6 +341,7 @@ fn hardening(s: &Snapshot, f: &mut Vec<Finding>) {
             Finding::new("av-cloud-off", SEC, Level::WorthDoing, "Cloud protection is off")
                 .why("Windows Security checks new and unknown files with Microsoft's cloud, which catches threats hours before a normal update. Windows Security shows a warning about this too.")
                 .step("Open Windows Security, Virus & threat protection, Manage settings, and switch on Cloud-delivered protection.")
+                .act(Action::Fix(Fix::EnableCloudProtection))
                 .open("Open virus protection settings", "windowsdefender://threatsettings"),
         );
     }
@@ -309,6 +350,7 @@ fn hardening(s: &Snapshot, f: &mut Vec<Finding>) {
             Finding::new("av-samples-off", SEC, Level::WorthDoing, "Automatic sample submission is off")
                 .why("When Windows Security finds a suspicious program, it can send it to Microsoft to check. Files likely to hold personal information still ask first. Windows Security shows a warning about this too.")
                 .step("Open Windows Security, Virus & threat protection, Manage settings, and switch on Automatic sample submission.")
+                .act(Action::Fix(Fix::EnableSampleSubmission))
                 .open("Open virus protection settings", "windowsdefender://threatsettings"),
         );
     }
@@ -341,6 +383,7 @@ fn hardening(s: &Snapshot, f: &mut Vec<Finding>) {
                 Finding::new("bitlocker-suspended", SEC, Level::WorthDoing, format!("Encryption is paused on {}", join_and(&paused)))
                     .why("The drive is encrypted, but its protection is paused, so anyone who takes the drive out could still read it. Windows pauses it briefly around some updates; this time it stayed off.")
                     .step("Open Settings, Privacy & security, Device encryption, and switch it on. On Pro editions, BitLocker in Control Panel shows Resume protection instead.")
+                    .acts(paused.iter().map(|d| Action::Fix(Fix::ResumeEncryption { drive: d.clone() })))
                     .open("Open device encryption", "ms-settings:deviceencryption"),
             );
         }
@@ -353,6 +396,7 @@ fn hardening(s: &Snapshot, f: &mut Vec<Finding>) {
             Finding::new("driver-blocklist-off", SEC, level, "Windows' list of unsafe drivers is switched off")
                 .why("Microsoft keeps a list of drivers with known security holes that attackers misuse, and Windows blocks them. Some old games' anti-cheat or hardware tools ask you to switch it off.")
                 .step("Open Windows Security, Device security, Core isolation details, and switch on Microsoft Vulnerable Driver Blocklist.")
+                .act(Action::Fix(Fix::EnableDriverBlocklist))
                 .open("Open Core isolation", "windowsdefender://coreisolation"),
         );
     }
@@ -386,7 +430,8 @@ fn hardening(s: &Snapshot, f: &mut Vec<Finding>) {
         f.push(
             Finding::new(id, SEC, Level::WorthDoing, title)
                 .why(why)
-                .step(format!("Search Start for Command Prompt, choose Run as administrator, and type: net user \"{name}\" /active:no")),
+                .step(format!("Search Start for Command Prompt, choose Run as administrator, and type: net user \"{name}\" /active:no"))
+                .act(Action::Fix(Fix::DisableAccount { name: name.clone() })),
         );
     }
 }
@@ -447,6 +492,7 @@ fn extras(s: &Snapshot, f: &mut Vec<Finding>) {
                 .why("It stops harmful programs from reading your sign-in details out of Windows' memory. Windows Security shows a warning about it too.")
                 .step("Open Windows Security, Device security, Core isolation details, switch on Local Security Authority protection, then restart.")
                 .step("Rarely, an old fingerprint reader or smart-card add-on stops working. If that happens, switch it off again.")
+                .act(Action::Fix(Fix::EnableLsaProtection))
                 .open("Open Core isolation", "windowsdefender://coreisolation"),
         );
     }

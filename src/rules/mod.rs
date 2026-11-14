@@ -137,6 +137,10 @@ impl Finding {
         self.actions.push(a);
         self
     }
+    pub fn acts(mut self, it: impl IntoIterator<Item = Action>) -> Self {
+        self.actions.extend(it);
+        self
+    }
     pub fn open(self, label: &'static str, target: &str) -> Self {
         self.act(Action::Open { label, target: target.to_string() })
     }
@@ -765,5 +769,74 @@ mod tests {
         };
         assert_eq!(trim("SSD"), Some(Level::NiceToHave));
         assert_eq!(trim("HDD"), None);
+    }
+
+    #[test]
+    fn new_to_dos_come_with_a_fix() {
+        use crate::fixes::Fix;
+        let fixes = |s: &Snapshot, id: &str| -> Vec<Fix> {
+            let f = evaluate(s);
+            let x = f.iter().find(|x| x.id == id).unwrap_or_else(|| panic!("{id} missing"));
+            x.actions.iter().filter_map(|a| if let Action::Fix(fx) = a { Some(fx.clone()) } else { None }).collect()
+        };
+        let mut s = base();
+        win11(&mut s);
+        s.security["defender"]["CloudProtection"] = json!(0);
+        s.security["defender"]["SampleSubmission"] = json!(2);
+        s.security["disabledServices"] = json!(["UsoSvc", "W32Time"]);
+        s.security["accounts"] = json!([{"Name": "Guest", "Rid": 501, "Enabled": true}]);
+        s.security["browserPolicies"] = json!([
+            {"Browser": "Chrome", "Setting": "HomepageLocation", "Value": "http://x.example", "Key": r"HKLM\SOFTWARE\Policies\Google\Chrome"},
+            {"Browser": "Chrome", "Setting": "ExtensionInstallForcelist", "Value": "abc", "Key": r"HKLM\SOFTWARE\Policies\Google\Chrome"},
+            {"Browser": "Edge", "Setting": "NewTabPageLocation", "Value": "http://x.example", "Key": r"HKCU\SOFTWARE\Policies\Microsoft\Edge"}
+        ]);
+        s.system["os"]["DriverBlocklist"] = json!(0);
+        s.health = json!({"perf": {"Pagefiles": [], "RamTotalGB": 8.0}});
+        s.storage = json!({
+            "disks": [{"Number": 0, "Bus": "NVMe", "Media": "SSD", "IsSystem": true}],
+            "volumes": [{"Letter": "C:", "Disk": 0, "BitLocker": "Off / FullyEncrypted"}],
+            "trim": {"Off": true}
+        });
+        s.network = json!({
+            "proxy": {"Enabled": true, "Server": "203.0.113.5:8080", "Pac": "http://203.0.113.5/p.pac", "WinHttp": null},
+            "staticDns": ["185.10.10.10", "1.1.1.1"],
+            "dnsByHand": [{"Adapter": "Wi-Fi", "Servers": ["185.10.10.10", "1.1.1.1"]}, {"Adapter": "Ethernet", "Servers": ["1.1.1.1"]}]
+        });
+        assert_eq!(fixes(&s, "av-cloud-off"), [Fix::EnableCloudProtection]);
+        assert_eq!(fixes(&s, "av-samples-off"), [Fix::EnableSampleSubmission]);
+        assert_eq!(
+            fixes(&s, "services-off"),
+            [
+                Fix::EnableService { name: "UsoSvc".into(), display: "Update Orchestrator Service".into(), start: "Delayed".into() },
+                Fix::EnableService { name: "W32Time".into(), display: "Windows Time".into(), start: "Manual".into() },
+            ]
+        );
+        assert_eq!(fixes(&s, "guest-on"), [Fix::DisableAccount { name: "Guest".into() }]);
+        assert_eq!(
+            fixes(&s, "browser-policies"),
+            [
+                Fix::RemoveBrowserPolicies {
+                    browser: "Chrome".into(),
+                    key: r"HKLM\SOFTWARE\Policies\Google\Chrome".into(),
+                    settings: vec!["HomepageLocation".into(), "ExtensionInstallForcelist".into()]
+                },
+                Fix::RemoveBrowserPolicies {
+                    browser: "Edge".into(),
+                    key: r"HKCU\SOFTWARE\Policies\Microsoft\Edge".into(),
+                    settings: vec!["NewTabPageLocation".into()]
+                },
+            ]
+        );
+        assert_eq!(fixes(&s, "driver-blocklist-off"), [Fix::EnableDriverBlocklist]);
+        assert_eq!(fixes(&s, "lsa-off"), [Fix::EnableLsaProtection]);
+        assert_eq!(fixes(&s, "no-pagefile"), [Fix::SystemManagedPagefile]);
+        assert_eq!(fixes(&s, "trim-off"), [Fix::EnableTrim]);
+        assert_eq!(fixes(&s, "bitlocker-suspended"), [Fix::ResumeEncryption { drive: "C:".into() }]);
+        assert_eq!(fixes(&s, "proxy"), [Fix::TurnOffProxy { enabled: true, pac: "http://203.0.113.5/p.pac".into(), winhttp: String::new() }]);
+        assert_eq!(
+            fixes(&s, "dns-changed"),
+            [Fix::DnsAutomatic { adapter: "Wi-Fi".into(), servers: vec!["185.10.10.10".into(), "1.1.1.1".into()] }],
+            "only the adapter with the unknown server"
+        );
     }
 }

@@ -1,6 +1,7 @@
 use super::data::cpu_clocks;
 use super::{plural, Action, Area, Confidence, Finding, Level};
 use crate::collect::dumps::bugcheck_info;
+use crate::fixes::Fix;
 use crate::gui::Page;
 use crate::snapshot::Snapshot;
 use crate::util::J;
@@ -105,7 +106,8 @@ fn pagefile(s: &Snapshot, f: &mut Vec<Finding>) {
     let level = if ram < 16.0 || lost > 0 { Level::WorthDoing } else { Level::NiceToHave };
     let mut x = Finding::new("no-pagefile", STAB, level, "Windows has no page file")
         .why("A page file gives Windows room to spare when memory runs short, and it's where Windows saves the details of a crash. Without one, big apps can stop with out-of-memory errors, and blue screens can't be looked into.")
-        .step("Search Start for \"Adjust the appearance and performance of Windows\", open Advanced, then Virtual memory, Change, and tick Automatically manage paging file size for all drives. Restart afterwards.");
+        .step("Search Start for \"Adjust the appearance and performance of Windows\", open Advanced, then Virtual memory, Change, and tick Automatically manage paging file size for all drives. Restart afterwards.")
+        .act(Action::Fix(Fix::SystemManagedPagefile));
     if lost > 0 {
         x = x.detail(format!("{} couldn't be saved in the last 90 days", plural(lost as usize, "crash report", "crash reports")));
     }

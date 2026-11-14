@@ -24,6 +24,15 @@ Try-Section 'proxy' {
 Try-Section 'staticDns' {
   # DNS servers typed in on the PC (by a person or a program) rather than handed out by the router.
   $R.staticDns = @(Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces' | ForEach-Object { (Get-ItemProperty $_.PSPath).NameServer } | Where-Object { $_ } | ForEach-Object { $_ -split '[ ,]+' } | Where-Object { $_ } | Select-Object -Unique)
+  # The same per network adapter, IPv6 included, so each can be set back to automatic and the undo
+  # restores both. Adapters that are gone are left out.
+  $names = @{}; Get-NetAdapter -IncludeHidden | ForEach-Object { $names["$($_.InterfaceGuid)"] = $_.Name }
+  $by = [ordered]@{}
+  foreach ($ip in 'Tcpip', 'Tcpip6') {
+    Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\$ip\Parameters\Interfaces" | ForEach-Object { $ns = (Get-ItemProperty $_.PSPath).NameServer; $n = $names[$_.PSChildName]
+      if ($ns -and $n) { $by[$n] = @($by[$n]) + @($ns -split '[ ,]+' | Where-Object { $_ }) | Where-Object { $_ } } }
+  }
+  $R.dnsByHand = @($by.GetEnumerator() | ForEach-Object { [ordered]@{ Adapter = $_.Key; Servers = @($_.Value) } })
 }
 Try-Section 'listening' {
   $R.listening = @(Get-NetTCPConnection -State Listen | Where-Object { $_.LocalAddress -notin '127.0.0.1', '::1' } | ForEach-Object {

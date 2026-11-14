@@ -87,7 +87,12 @@ fn fix_target(f: &Fix) -> String {
         Fix::RemoveExclusion { value, .. } => value.clone(),
         Fix::DisableFirewallRule { display, .. } => display.clone(),
         Fix::DisableStartup { name, .. } | Fix::EnableStartup { name, .. } => name.clone(),
-        Fix::ServiceManual { display, .. } => display.clone(),
+        Fix::ServiceManual { display, .. } | Fix::EnableService { display, .. } => display.clone(),
+        Fix::DisableAccount { name } => name.clone(),
+        Fix::ResumeEncryption { drive } => drive.clone(),
+        Fix::DnsAutomatic { adapter, .. } => adapter.clone(),
+        Fix::RemoveBrowserPolicies { browser, key, .. } if key.starts_with("HKLM") => format!("{browser}, for everyone on this PC"),
+        Fix::RemoveBrowserPolicies { browser, .. } => format!("{browser}, for your account"),
         _ => String::new(),
     }
 }
