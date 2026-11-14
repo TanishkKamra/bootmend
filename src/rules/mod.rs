@@ -32,14 +32,6 @@ impl Area {
             Area::Hardware => "Hardware",
         }
     }
-    pub fn blurb(self) -> &'static str {
-        match self {
-            Area::Security => "Virus protection, firewall, risky apps and extensions",
-            Area::Stability => "Crashes, freezes and unexpected restarts",
-            Area::Speed => "Startup, memory, free space and updates",
-            Area::Hardware => "Drives, battery and devices",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

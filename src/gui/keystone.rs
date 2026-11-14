@@ -51,22 +51,43 @@ fn layers(ctx: &egui::Context) -> Option<Layers> {
     l
 }
 
-/// Paints the mark in a square `rect`, with the keystone `lift` units above its seat (negative
-/// sinks it a touch, for the landing) and drawn at `opacity`.
-pub fn paint(ui: &Ui, rect: Rect, lift: f32, opacity: f32) {
+/// Paints the mark in a square `rect`. Each of `keys` is a keystone to draw: how many units it
+/// sits above its seat (negative sinks it a touch, for the landing) and its opacity. A fade
+/// between two positions draws two.
+pub fn paint(ui: &Ui, rect: Rect, keys: &[(f32, f32)]) {
     let Some(l) = layers(ui.ctx()) else { return };
     let stones = if ui.visuals().dark_mode { &l.stones_dark } else { &l.stones_light };
     let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     let painter = ui.painter();
     painter.image(stones.id(), rect, uv, Color32::WHITE);
-    let up = lift * rect.height() / 48.0;
-    painter.image(l.keystone.id(), rect.translate(egui::vec2(0.0, -up)), uv, Color32::WHITE.gamma_multiply(opacity));
+    for &(lift, opacity) in keys {
+        let up = lift * rect.height() / 48.0;
+        painter.image(l.keystone.id(), rect.translate(egui::vec2(0.0, -up)), uv, Color32::WHITE.gamma_multiply(opacity));
+    }
+}
+
+/// How long the keystone takes to drop into its seat.
+pub const DROP_MS: f32 = 360.0;
+
+/// Where the keystone is `t` of the way through its drop (0 to 1), in units above its seat. It
+/// falls with gravity, settles a hair below the seat at 78% and comes to rest, with no bounce.
+pub fn lift_at(t: f32) -> f32 {
+    const SETTLE: f32 = -0.18;
+    const LAND: f32 = 0.78;
+    let t = t.clamp(0.0, 1.0);
+    if t < LAND {
+        let k = t / LAND;
+        RAISED + (SETTLE - RAISED) * k * k
+    } else {
+        let k = (t - LAND) / (1.0 - LAND);
+        SETTLE * (1.0 - k) * (1.0 - k)
+    }
 }
 
 /// The logo as it always looks: keystone raised. For the sidebar; it never changes.
 pub fn mark(ui: &mut Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    paint(ui, rect, RAISED, 1.0);
+    paint(ui, rect, &[(RAISED, 1.0)]);
 }
 
 #[cfg(test)]
@@ -84,5 +105,16 @@ mod tests {
             assert_eq!(img.size, [256, 256]);
             assert!(img.pixels.iter().any(|p| p.a() == 0), "the background must be transparent");
         }
+    }
+
+    #[test]
+    fn the_keystone_falls_settles_and_rests_without_bouncing() {
+        assert_eq!(lift_at(0.0), RAISED);
+        assert!((lift_at(0.78) + 0.18).abs() < 1e-4, "settles a hair below the seat");
+        assert_eq!(lift_at(1.0), 0.0);
+        let path: Vec<f32> = (0..=78).map(|i| lift_at(i as f32 / 100.0)).collect();
+        assert!(path.windows(2).all(|w| w[1] <= w[0]), "only ever falls on the way down");
+        let rest: Vec<f32> = (78..=100).map(|i| lift_at(i as f32 / 100.0)).collect();
+        assert!(rest.windows(2).all(|w| w[1] >= w[0] && w[1] <= 0.0), "comes up to the seat and no further");
     }
 }

@@ -1,6 +1,7 @@
 //! The desktop window: navigation, background jobs and confirmations.
 
 mod cleanup_page;
+mod home;
 mod keystone;
 mod live_page;
 mod pages;
@@ -13,7 +14,7 @@ mod widgets;
 use crate::collect::{self, Progress};
 use crate::diff::{self, Change};
 use crate::fixes::{self, Fix, HistoryEntry};
-use crate::rules::{self, Area, Finding};
+use crate::rules::{self, Finding};
 use crate::scan;
 use crate::snapshot::{self, AppUpgrade, DumpAnalysis, ScanResult, Snapshot};
 use crate::util::data_dir;
@@ -80,7 +81,6 @@ impl Place {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Page {
     Home,
-    Suggestions,
     Report,
     Cleanup,
     Startup,
@@ -100,9 +100,8 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 18] = [
+    pub const ALL: [Page; 17] = [
         Page::Home,
-        Page::Suggestions,
         Page::Report,
         Page::Cleanup,
         Page::Startup,
@@ -122,18 +121,17 @@ impl Page {
     ];
     pub fn place(self) -> Place {
         match self {
-            Page::Home | Page::Suggestions | Page::Report => Place::Home,
+            Page::Home | Page::Report => Place::Home,
             Page::Cleanup | Page::Startup | Page::Live | Page::NetCheck => Place::TuneUp,
             Page::ThisPc | Page::Storage | Page::Security | Page::Software | Page::Network | Page::Crashes => Place::MyPc,
             Page::History | Page::Changes | Page::Trends | Page::Saved => Place::History,
             Page::Settings => Place::Settings,
         }
     }
-    /// The tab's name, or the view's own name for Home's inner views.
+    /// The tab's name, or the view's own name for a view inside Home.
     pub fn title(self) -> &'static str {
         match self {
             Page::Home => "Home",
-            Page::Suggestions => "Suggestions",
             Page::Report => "Save a report",
             Page::Cleanup => "Free up space",
             Page::Startup => "Startup apps",
@@ -244,7 +242,9 @@ pub struct Checking {
 
 #[derive(Default)]
 pub struct UiState {
-    pub area: Option<Area>,
+    /// Whether the keystone on Home was raised last time it was drawn, and when it began to drop.
+    pub keystone_raised: Option<bool>,
+    pub keystone_drop: Option<Instant>,
     pub expanded: HashSet<String>,
     pub search: String,
     pub hide_personal: bool,
@@ -878,14 +878,31 @@ impl App {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str) {
         let p = pal(ui.ctx());
         let place = self.page.place();
+        // A view inside Home shows the way back the way Windows Settings does: "Home > Save a report".
+        let crumb = self.page == Page::Report;
+        let draw_title = |this: &mut Self, ui: &mut egui::Ui| {
+            if crumb {
+                let home = egui::Button::new(RichText::new(Place::Home.title()).text_style(egui::TextStyle::Heading).color(p.muted)).frame(false);
+                if ui.add(home).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    this.go(Page::Home);
+                }
+                ui.label(widgets::ico(icon::CHEVRON_RIGHT, 16.0).color(p.muted));
+            }
+            widgets::page_title(ui, title);
+        };
+        let has_title = crumb || !title.is_empty();
         // Below about 700 px of content, the actions move under the title instead of crowding it.
         if ui.available_width() >= 700.0 {
             ui.horizontal(|ui| {
-                widgets::page_title(ui, title);
+                if has_title {
+                    draw_title(self, ui);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.header_actions(ui, place, true));
             });
         } else {
-            widgets::page_title(ui, title);
+            if has_title {
+                ui.horizontal(|ui| draw_title(self, ui));
+            }
             ui.horizontal_wrapped(|ui| self.header_actions(ui, place, false));
         }
         let tabs = place.tabs();
@@ -920,13 +937,18 @@ impl App {
         }
     }
 
-    /// Home and My PC show when the check ran and can run it again; Home can also save a report.
-    /// `rtl` is true when the actions sit at the right edge, so they're added right to left.
+    /// Home and My PC can run the check again, and Home can save a report. My PC says when the
+    /// check ran here; Home says it beside the verdict. `rtl` is true when the actions sit at the
+    /// right edge, so they're added right to left.
     fn header_actions(&mut self, ui: &mut egui::Ui, place: Place, rtl: bool) {
-        if !matches!(place, Place::Home | Place::MyPc) {
+        if !matches!(place, Place::Home | Place::MyPc) || self.page == Page::Report {
             return;
         }
-        let when = self.snap.as_ref().map(|s| format!("Checked {}", crate::util::when_words(&s.taken, chrono::Local::now().date_naive())));
+        let when = self
+            .snap
+            .as_ref()
+            .filter(|_| place == Place::MyPc)
+            .map(|s| format!("Checked {}", crate::util::when_words(&s.taken, chrono::Local::now().date_naive())));
         let checked = |ui: &mut egui::Ui| {
             if let Some(w) = &when {
                 widgets::small(ui, w.clone());
@@ -1156,7 +1178,7 @@ mod tests {
         }
         for page in Page::ALL {
             let place = page.place();
-            let reachable = place.first() == page || place.tabs().contains(&page) || matches!(page, Page::Suggestions | Page::Report);
+            let reachable = place.first() == page || place.tabs().contains(&page) || page == Page::Report;
             assert!(reachable, "{page:?} can't be reached from the sidebar or a tab");
         }
     }

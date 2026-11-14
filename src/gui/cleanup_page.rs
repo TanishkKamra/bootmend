@@ -66,10 +66,21 @@ fn look(elevated: bool) -> Result<Found, String> {
     })
 }
 
+/// Safe to clear without asking: in the safe group, allowed with these rights, and not held open
+/// by an app.
+fn safe(i: &Item, found: &Found, elevated: bool) -> bool {
+    i.group == Group::Safe && (elevated || !i.admin) && !found.open.contains_key(i.id)
+}
+
 impl CleanupView {
     fn new(found: Found, elevated: bool) -> Self {
-        let ticked = found.items.iter().filter(|i| i.group == Group::Safe && (elevated || !i.admin) && !found.open.contains_key(i.id)).map(|i| i.id).collect();
+        let ticked = found.items.iter().filter(|i| safe(i, &found, elevated)).map(|i| i.id).collect();
         CleanupView { found, ticked, done: HashMap::new(), progress: Arc::new(AtomicUsize::new(0)), cleaning: vec![], error: None }
+    }
+
+    /// The items Bootmend clears without asking, ticked or not.
+    pub fn safe(&self, elevated: bool) -> Vec<&Item> {
+        self.found.items.iter().filter(|i| safe(i, &self.found, elevated)).collect()
     }
 
     pub fn selected(&self) -> Vec<&Item> {

@@ -1,11 +1,11 @@
 //! Every page in the sidebar.
 
 use super::theme::{self, pal, S1, S2, S3, S4, S5};
-use super::widgets::{self, card, ico, icon, kv, level_pill, muted, section, small, table};
+use super::widgets::{self, card, ico, icon, kv, muted, section, small, table};
 use super::{App, Page, Pending};
 use crate::diff::Kind as ChangeKind;
 use crate::fixes::Fix;
-use crate::rules::{plural, score, Action, Area, Finding, Level};
+use crate::rules::{plural, Action, Finding};
 use crate::scan;
 use crate::snapshot::Snapshot;
 use crate::util::{shell_open, J};
@@ -87,8 +87,7 @@ impl App {
         let Some(snap) = self.snap.clone() else { return };
         let page = self.page;
         let subtitle = match page {
-            Page::Home => format!("{} · {}", model(&snap), if snap.elevated { "checked as administrator" } else { "checked without administrator rights" }),
-            Page::Suggestions => "Sorted by what matters most. Nothing changes unless you press a button.".into(),
+            Page::Home => String::new(),
             Page::Report => "A copy of this check you can keep or send to someone helping you.".into(),
             Page::Cleanup => "See what's taking up space before anything is removed.".into(),
             Page::Startup => "Apps that open by themselves when you sign in.".into(),
@@ -110,14 +109,14 @@ impl App {
             Page::Settings => String::new(),
         };
         let title = match page {
-            Page::Home => "Your PC at a glance",
-            Page::Suggestions | Page::Report => page.title(),
+            // Home's title is its verdict, drawn large beside the Keystone.
+            Page::Home => "",
+            Page::Report => page.title(),
             _ => page.place().title(),
         };
         self.header(ui, title, &subtitle);
         match page {
-            Page::Home => self.overview(ui, &snap),
-            Page::Suggestions => self.suggestions(ui),
+            Page::Home => self.home(ui, &snap),
             Page::Report => self.report_page(ui, &snap),
             Page::Cleanup => self.cleanup_page(ui),
             Page::Startup => self.startup_apps(ui, &snap),
@@ -146,231 +145,46 @@ impl App {
         }
     }
 
-    // ---------- Overview ----------
+    // ---------- Findings ----------
 
-    fn overview(&mut self, ui: &mut Ui, snap: &Arc<Snapshot>) {
+    /// What to do, the details and the buttons for one finding, shown when its row on Home is
+    /// open. `skip_fix` leaves out the single fix the row's own button already offers.
+    pub(super) fn finding_body(&mut self, ui: &mut Ui, f: &Finding, skip_fix: bool) {
         let p = pal(ui.ctx());
-        if !snap.errors.is_empty() {
-            widgets::note(ui, p.amber, p.amber_bg, icon::WARN, |ui| {
-                ui.label(format!("{} couldn't finish, so a few details may be missing.", plural(snap.errors.len(), "part of the check", "parts of the check")));
-                ui.collapsing("Show what happened", |ui| {
-                    for e in &snap.errors {
-                        ui.add(egui::Label::new(RichText::new(e).small()).wrap());
-                    }
+        if !f.steps.is_empty() {
+            widgets::subsection(ui, "What to do");
+            for (i, st) in f.steps.iter().enumerate() {
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(format!("{}.", i + 1)).color(p.muted));
+                    ui.add(egui::Label::new(st).wrap());
                 });
-            });
-            ui.add_space(S4);
+            }
         }
-        let findings = self.findings.clone();
-        let cols = if ui.available_width() > 820.0 { 4 } else { 2 };
-        let mut goto_area = None;
-        for row in Area::ALL.chunks(cols) {
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = S3;
-                ui.columns(cols, |uis| {
-                    for (ui, a) in uis.iter_mut().zip(row) {
-                        let sc = score(&findings, *a);
-                        let (fg, ic) = match sc.value {
-                            85..=100 => (p.green, icon::CHECK),
-                            60..=84 => (p.amber, icon::WARN),
-                            _ => (p.red, icon::WARN),
-                        };
-                        card(ui, |ui| {
-                            ui.set_min_height(150.0);
-                            ui.label(RichText::new(a.name()).color(p.muted));
-                            ui.horizontal(|ui| {
-                                ui.label(ico(ic, 16.0).color(fg));
-                                ui.label(RichText::new(sc.verdict).text_style(theme::h2()).color(fg));
-                            });
-                            small(ui, a.blurb());
-                            ui.add_space(S1);
-                            if sc.open > 0 {
-                                if ui.link(plural(sc.open, "suggestion", "suggestions")).clicked() {
-                                    goto_area = Some(*a);
-                                }
-                            } else {
-                                muted(ui, "Nothing to do");
-                            }
-                        });
-                    }
+        if !f.details.is_empty() {
+            widgets::subsection(ui, "Details");
+            for d in f.details.iter().take(40) {
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new("•").color(p.muted));
+                    ui.add(egui::Label::new(RichText::new(d).color(p.muted)).wrap());
                 });
-            });
+            }
+            if f.details.len() > 40 {
+                small(ui, format!("and {} more", f.details.len() - 40));
+            }
+        }
+        let mut rest = f.clone();
+        if skip_fix {
+            rest.actions.retain(|a| !matches!(a, Action::Fix(_)));
+        }
+        if !rest.actions.is_empty() {
             ui.add_space(S3);
+            self.actions(ui, &rest);
         }
-        if let Some(a) = goto_area {
-            self.ui.area = Some(a);
-            self.go(Page::Suggestions);
-        }
-
-        section(ui, "Start here");
-        let top: Vec<Finding> = findings.iter().filter(|f| f.level != Level::AllGood).take(3).cloned().collect();
-        if top.is_empty() {
-            widgets::empty(
-                ui,
-                icon::CHECK,
-                "Nothing needs your attention",
-                "Every check came back fine. Check again now and then, or after installing something new.",
-            );
-        }
-        for f in &top {
-            let mut open = false;
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    level_pill(ui, f.level);
-                    small(ui, f.area.name());
-                });
-                ui.add_space(S1);
-                ui.label(RichText::new(&f.title).text_style(theme::title()));
-                ui.add(egui::Label::new(&f.summary).wrap());
-                ui.add_space(S1);
-                open = widgets::secondary(ui, "Show me how").clicked();
-            });
-            ui.add_space(S2);
-            if open {
-                self.ui.area = None;
-                self.ui.expanded.insert(f.id.clone());
-                self.go(Page::Suggestions);
-            }
-        }
-        let more = findings.iter().filter(|f| f.level != Level::AllGood).count();
-        if more > 3 && ui.link(format!("See all {more} suggestions")).clicked() {
-            self.ui.area = None;
-            self.go(Page::Suggestions);
-        }
-        self.schedule_offer(ui);
-
-        section(ui, "This PC");
-        card(ui, |ui| {
-            let sys = &snap.system;
-            let cpu = sys.g("cpu");
-            let gpu = sys.a("gpus").into_iter().filter_map(|g| g.s("Name")).filter(|n| !n.contains("Basic")).collect::<Vec<_>>().join(", ");
-            kv(
-                ui,
-                "ov-pc",
-                &[
-                    ("Processor", cpu.s("Name")),
-                    ("Memory", num(sys.g("memory").f("TotalGB"), " GB")),
-                    ("Graphics", Some(gpu)),
-                    ("Windows", sys.g("os").s("Edition").map(|e| format!("{e} {}", s(sys.g("os"), "Version")))),
-                    ("Storage", Some(snap.drives.iter().map(|d| d.model.clone()).collect::<Vec<_>>().join(", "))),
-                ],
-            );
-            ui.add_space(S2);
-            if ui.link("See all hardware details").clicked() {
-                self.go(Page::ThisPc);
-            }
-        });
-
-        section(ui, "Since your last check");
-        card(ui, |ui| match &self.prev_taken {
-            None => {
-                muted(ui, "This is the first check on this PC. Next time, Bootmend will show what was installed, removed or changed in between.");
-            }
-            Some(t) => {
-                let notable = self.changes.iter().filter(|c| c.notable).count();
-                ui.label(format!(
-                    "{} since {t}{}.",
-                    plural(self.changes.len(), "change", "changes"),
-                    if notable > 0 { format!(", {notable} worth a look") } else { String::new() }
-                ));
-                if ui.link("See what changed").clicked() {
-                    self.go(Page::Changes);
-                }
-            }
-        });
-    }
-
-    // ---------- Suggestions ----------
-
-    fn suggestions(&mut self, ui: &mut Ui) {
-        let findings = self.findings.clone();
-        ui.horizontal_wrapped(|ui| {
-            let all = findings.iter().filter(|f| f.level != Level::AllGood).count();
-            if ui.selectable_label(self.ui.area.is_none(), format!("All ({all})")).clicked() {
-                self.ui.area = None;
-            }
-            for a in Area::ALL {
-                let n = findings.iter().filter(|f| f.area == a && f.level != Level::AllGood).count();
-                if ui.selectable_label(self.ui.area == Some(a), format!("{} ({n})", a.name())).clicked() {
-                    self.ui.area = Some(a);
-                }
-            }
-        });
         ui.add_space(S2);
-        for level in [Level::DoFirst, Level::WorthDoing, Level::NiceToHave, Level::AllGood] {
-            let items: Vec<&Finding> = findings.iter().filter(|f| f.level == level && self.ui.area.is_none_or(|a| a == f.area)).collect();
-            if items.is_empty() {
-                continue;
-            }
-            section(ui, &format!("{} ({})", level.name(), items.len()));
-            for f in items {
-                self.finding_card(ui, f);
-                ui.add_space(S2);
-            }
-        }
-    }
-
-    fn finding_card(&mut self, ui: &mut Ui, f: &Finding) {
-        let p = pal(ui.ctx());
-        let open = self.ui.expanded.contains(&f.id) || f.level == Level::DoFirst;
-        let has_more = !f.steps.is_empty() || !f.details.is_empty() || !f.actions.is_empty();
-        let mut toggle = false;
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                level_pill(ui, f.level);
-                small(ui, f.area.name());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    small(ui, f.confidence.name()).on_hover_text(match f.confidence {
-                        crate::rules::Confidence::Measured => "Bootmend read this directly from Windows or the hardware.",
-                        crate::rules::Confidence::BestGuess => "Bootmend is inferring this from indirect signs, so it may be wrong.",
-                    });
-                });
-            });
-            ui.add_space(S1);
-            ui.label(RichText::new(&f.title).text_style(theme::title()));
-            ui.add(egui::Label::new(&f.summary).wrap());
-            if open && has_more {
-                if !f.steps.is_empty() {
-                    ui.add_space(S2);
-                    ui.label(RichText::new("What to do").family(theme::semibold()));
-                    for (i, st) in f.steps.iter().enumerate() {
-                        ui.horizontal_top(|ui| {
-                            ui.label(RichText::new(format!("{}.", i + 1)).color(p.muted));
-                            ui.add(egui::Label::new(st).wrap());
-                        });
-                    }
-                }
-                if !f.details.is_empty() {
-                    ui.add_space(S2);
-                    ui.label(RichText::new("Details").family(theme::semibold()));
-                    for d in f.details.iter().take(40) {
-                        ui.horizontal_top(|ui| {
-                            ui.label(RichText::new("•").color(p.muted));
-                            ui.add(egui::Label::new(RichText::new(d).color(p.muted)).wrap());
-                        });
-                    }
-                    if f.details.len() > 40 {
-                        small(ui, format!("and {} more", f.details.len() - 40));
-                    }
-                }
-                ui.add_space(S3);
-                self.actions(ui, f);
-            }
-            if has_more && f.level != Level::DoFirst {
-                ui.add_space(S1);
-                let t = if open {
-                    "Show less"
-                } else if f.level == Level::AllGood {
-                    "Show details"
-                } else {
-                    "Show how to fix"
-                };
-                toggle = ui.link(t).clicked();
-            }
+        small(ui, f.confidence.name()).on_hover_text(match f.confidence {
+            crate::rules::Confidence::Measured => "Bootmend read this directly from Windows or the hardware.",
+            crate::rules::Confidence::BestGuess => "Bootmend is inferring this from indirect signs, so it may be wrong.",
         });
-        if toggle && !self.ui.expanded.remove(&f.id) {
-            self.ui.expanded.insert(f.id.clone());
-        }
     }
 
     fn actions(&mut self, ui: &mut Ui, f: &Finding) {
@@ -420,7 +234,7 @@ impl App {
     /// `primary: false` for long lists, where a filled button on every row would shout.
     fn fix_button_as(&mut self, ui: &mut Ui, fx: &Fix, title: &str, primary: bool) {
         let p = pal(ui.ctx());
-        if self.history.iter().any(|h| h.fix == *fx && h.undone.is_none()) {
+        if self.fixed(fx) {
             ui.label(ico(icon::CHECK, 14.0).color(p.green));
             ui.label(RichText::new("Done").color(p.green));
             return;

@@ -1,7 +1,6 @@
 //! Small building blocks shared by every page.
 
-use super::theme::{self, pal, Pal, CONTROL_RADIUS, RADIUS, S1, S2, S3, S4};
-use crate::rules::Level;
+use super::theme::{self, pal, CONTROL_RADIUS, RADIUS, S1, S2, S3, S4};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Response, RichText, Sense, Stroke, Ui};
 use egui_extras::{Column, TableBuilder};
 
@@ -25,19 +24,13 @@ pub mod icon {
     pub const SETTINGS: &str = "\u{E713}";
     pub const REPAIR: &str = "\u{E90F}";
     pub const HISTORY: &str = "\u{E81C}";
+    pub const CHEVRON_RIGHT: &str = "\u{E76C}";
+    pub const CHEVRON_DOWN: &str = "\u{E70D}";
+    pub const CHEVRON_UP: &str = "\u{E70E}";
 }
 
 pub fn ico(ch: &str, size: f32) -> RichText {
     RichText::new(ch).family(theme::icons()).size(size)
-}
-
-pub fn level_colors(p: &Pal, l: Level) -> (Color32, Color32) {
-    match l {
-        Level::DoFirst => (p.red, p.red_bg),
-        Level::WorthDoing => (p.amber, p.amber_bg),
-        Level::NiceToHave => (p.blue, p.blue_bg),
-        Level::AllGood => (p.green, p.green_bg),
-    }
 }
 
 pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
@@ -77,11 +70,6 @@ pub fn pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) -> Response {
         .inner_margin(Margin::symmetric(S2 as i8, 2))
         .show(ui, |ui| ui.label(RichText::new(text).small().color(fg).family(theme::semibold())))
         .response
-}
-
-pub fn level_pill(ui: &mut Ui, l: Level) -> Response {
-    let (fg, bg) = level_colors(&pal(ui.ctx()), l);
-    pill(ui, l.name(), fg, bg)
 }
 
 pub fn primary(ui: &mut Ui, text: &str) -> Response {
@@ -393,6 +381,57 @@ pub fn bar(ui: &mut Ui, name: &str, fraction: f32, fill: Color32) {
     let mut f = r;
     f.set_width(r.width() * fraction);
     ui.painter().rect_filled(f, CornerRadius::same(u8::MAX), fill);
+}
+
+/// A progress line with one segment per to-do. Past 24 to-dos the segments would be slivers, so
+/// it becomes one continuous line.
+pub fn segments(ui: &mut Ui, name: &str, done: usize, total: usize, width: f32) -> Response {
+    let p = pal(ui.ctx());
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(width, 6.0), Sense::hover());
+    let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+    resp.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, format!("{name}: {done} of {total} done"));
+        info.value = Some((fraction * 100.0).round() as f64);
+        info
+    });
+    ui.ctx().accesskit_node_builder(resp.id, |b| {
+        b.set_min_numeric_value(0.0);
+        b.set_max_numeric_value(100.0);
+    });
+    let round = CornerRadius::same(u8::MAX);
+    // The control stroke, thinned, so an empty segment shows on the page in both themes.
+    let track = p.control.gamma_multiply(0.4);
+    if total > 24 {
+        ui.painter().rect_filled(r, round, track);
+        ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(r.width() * fraction, r.height())), round, p.accent);
+        return resp;
+    }
+    let gap = S1;
+    let seg = (width - gap * (total.saturating_sub(1)) as f32) / total.max(1) as f32;
+    for i in 0..total {
+        let x = r.left() + i as f32 * (seg + gap);
+        let rect = egui::Rect::from_min_size(egui::pos2(x, r.top()), egui::vec2(seg, r.height()));
+        ui.painter().rect_filled(rect, round, if i < done { p.accent } else { track });
+    }
+    resp
+}
+
+/// A frameless chevron that opens and closes a row, as in a Windows settings expander.
+pub fn chevron(ui: &mut Ui, open: bool) -> Response {
+    let p = pal(ui.ctx());
+    let r = ui
+        .scope(|ui| {
+            let w = &mut ui.visuals_mut().widgets;
+            for (v, wash) in [(&mut w.inactive, 0.0), (&mut w.hovered, 0.06), (&mut w.active, 0.09)] {
+                v.weak_bg_fill = p.ink.gamma_multiply(wash);
+                v.bg_stroke = Stroke::NONE;
+            }
+            ui.add(egui::Button::new(ico(if open { icon::CHEVRON_UP } else { icon::CHEVRON_DOWN }, 12.0).color(p.ink)).min_size(egui::vec2(32.0, 32.0)))
+        })
+        .inner;
+    let name = if open { "Show less" } else { "Show more" };
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    r.on_hover_text(name)
 }
 
 /// A clickable row in the sidebar.
