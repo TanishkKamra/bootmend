@@ -3,7 +3,6 @@
 use super::theme::{pal, S2, S3, S4, S5, S6};
 use super::widgets::{self, ico, icon};
 use super::{App, Pending};
-use crate::collect::STEPS;
 use eframe::egui::{self, RichText};
 
 /// What Bootmend reads, in plain words. Shown on the welcome and privacy screens.
@@ -101,47 +100,6 @@ impl App {
                     }
                     ui.add_space(S6);
                 });
-            });
-        });
-    }
-
-    pub(super) fn checking_screen(&mut self, ui: &mut egui::Ui) {
-        let p = pal(ui.ctx());
-        let Some(c) = &self.checking else { return };
-        let secs = c.started.elapsed().as_secs();
-        let done = c.done.clone();
-        ui.vertical_centered(|ui| {
-            ui.set_max_width(ui.available_width().min(520.0));
-            ui.add_space(S6);
-            widgets::page_title(ui, "Checking your PC");
-            ui.add_space(S2);
-            ui.label(RichText::new("This usually takes about a minute. You can keep using your PC while it runs.").color(p.muted));
-            ui.add_space(S5);
-        });
-        ui.vertical_centered(|ui| {
-            ui.set_max_width(ui.available_width().min(520.0));
-            widgets::card(ui, |ui| {
-                for st in STEPS.iter() {
-                    ui.horizontal(|ui| {
-                        match done.get(st.key) {
-                            Some(true) => {
-                                ui.label(ico(icon::CHECK, 16.0).color(p.green));
-                            }
-                            Some(false) => {
-                                ui.label(ico(icon::WARN, 16.0).color(p.amber)).on_hover_text("This part couldn't finish. The rest of the check still works.");
-                            }
-                            None => {
-                                ui.add(egui::Spinner::new().size(16.0).color(p.accent));
-                            }
-                        }
-                        ui.add_space(S2);
-                        let text = RichText::new(st.label);
-                        ui.label(if done.contains_key(st.key) { text.color(p.muted) } else { text });
-                    });
-                    ui.add_space(super::theme::S1);
-                }
-                ui.add_space(S3);
-                widgets::small(ui, format!("{secs} seconds so far"));
             });
         });
     }

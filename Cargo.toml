@@ -15,6 +15,7 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 regex = "1"
 png = "0.17"
+tiny-skia = "0.11.4"
 raw-window-handle = "0.6"
 rfd = "0.15"
 sysinfo = { version = "0.35", default-features = false, features = ["system"] }

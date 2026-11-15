@@ -2,9 +2,10 @@
 
 mod cleanup_page;
 mod home;
-mod keystone;
 mod live_page;
+mod mark;
 mod pages;
+mod run;
 mod schedule_ui;
 mod screens;
 mod system;
@@ -177,6 +178,13 @@ impl Page {
     }
 }
 
+/// Who shows the logo this frame: Home's hero, or the Queue screen above its boxes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    Home,
+    Run,
+}
+
 /// Something the person asked for that needs a confirmation first.
 #[derive(Clone)]
 pub enum Pending {
@@ -218,6 +226,11 @@ pub enum Job {
     NetChecked(crate::nettest::NetCheck),
     Scheduled(crate::schedule::Every, u8, Result<(), String>),
     Trends(Vec<crate::trends::Trend>),
+    /// One box of the queue finished: its index, the result, how long it took in ms, and what
+    /// clearing did when it was the leftover files.
+    Worked(usize, Result<(), String>, f32, Option<Vec<(&'static str, Result<crate::cleanup::Cleaned, String>)>>),
+    /// System Restore was turned on so a restore point could be saved.
+    TurnedOn(Result<(), String>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -256,17 +269,10 @@ pub fn saved_schedule() -> (crate::schedule::Every, u8) {
     (s.schedule, s.schedule_hour)
 }
 
-pub struct Checking {
-    rx: Receiver<Progress>,
-    done: HashMap<&'static str, bool>,
-    started: Instant,
-}
-
 #[derive(Default)]
 pub struct UiState {
-    /// Whether the keystone on Home was raised last time it was drawn, and when it began to drop.
-    pub keystone_raised: Option<bool>,
-    pub keystone_drop: Option<Instant>,
+    /// Where the logo goes this frame, and who asked for it.
+    pub mark_slot: Option<(Slot, egui::Rect)>,
     pub expanded: HashSet<String>,
     pub search: String,
     pub hide_personal: bool,
@@ -300,6 +306,59 @@ enum Shot {
     Menu,
     /// A confirmation open over the Crashes page.
     Dialog,
+    /// The Queue screen while choosing, part way through, and part way through with its details open.
+    Queue,
+    Fixing,
+    Details,
+}
+
+/// Where the logo was last drawn, and its flight from there when it changes hands between Home
+/// and the Queue screen.
+#[derive(Default)]
+struct Flight {
+    owner: Option<Slot>,
+    rect: Option<egui::Rect>,
+    pass: u64,
+    from: Option<(egui::Rect, f32)>,
+}
+
+impl Flight {
+    const MS: f32 = 620.0;
+
+    /// Where to draw the logo for `owner`, whose slot is `to`. `jump` skips the flight.
+    fn place(&mut self, owner: Slot, to: egui::Rect, now: f32, pass: u64, jump: bool) -> egui::Rect {
+        if self.owner != Some(owner) {
+            // Only from where it was just drawn: a logo that wasn't on screen appears in place.
+            let seen = self.pass + 3 >= pass;
+            self.from = self.rect.filter(|_| seen && !jump).map(|r| (r, now));
+            self.owner = Some(owner);
+        }
+        let r = match self.from {
+            Some((from, at)) if now - at < Self::MS => {
+                let t = (now - at) / Self::MS;
+                let e = run::ease_io(t);
+                let r = egui::Rect::from_min_max(from.min.lerp(to.min, e), from.max.lerp(to.max, e));
+                // Rising, it arcs a little on its way.
+                let arc = if to.center().y < from.center().y { -14.0 * (std::f32::consts::PI * t).sin() } else { 0.0 };
+                r.translate(egui::vec2(0.0, arc))
+            }
+            _ => {
+                self.from = None;
+                to
+            }
+        };
+        self.rect = Some(r);
+        self.pass = pass;
+        r
+    }
+}
+
+fn resume_path() -> Option<PathBuf> {
+    data_dir("").ok().map(|d| d.join("resume.json"))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 struct SnapMode {
@@ -318,7 +377,19 @@ pub struct App {
     findings: Vec<Finding>,
     changes: Vec<Change>,
     prev_taken: Option<String>,
-    checking: Option<Checking>,
+    /// The Queue screen, while a check-up or fixes are chosen, run or just over.
+    run: Option<run::Run>,
+    check_rx: Option<Receiver<Progress>>,
+    /// The logo, which is also the loader. One mark, so it can fly between Home and the queue.
+    mark: mark::Mark,
+    flight: Flight,
+    /// Milliseconds since the window opened, as the animations count them.
+    clock: f32,
+    /// When the page came back after the queue closed, to fade it in.
+    page_fade: Option<f32>,
+    /// A queue picked up after the restart as administrator: what to do next, and whether the
+    /// leftover files still need adding (and ticking).
+    resume_wait: Option<(run::Then, Option<bool>)>,
     check_error: Option<String>,
     tx: Sender<Job>,
     rx: Receiver<Job>,
@@ -349,7 +420,8 @@ pub struct App {
 
 impl App {
     /// `mica` says the window was created transparent so the Mica backdrop can show through.
-    pub fn new(cc: &eframe::CreationContext, snap_dir: Option<PathBuf>, mica: bool) -> Self {
+    /// `resume` picks up the queue saved before restarting as administrator.
+    pub fn new(cc: &eframe::CreationContext, snap_dir: Option<PathBuf>, mica: bool, resume: bool) -> Self {
         theme::apply(&cc.egui_ctx);
         let mica = mica
             && match system::apply_mica(cc) {
@@ -367,7 +439,13 @@ impl App {
             findings: vec![],
             changes: vec![],
             prev_taken: None,
-            checking: None,
+            run: None,
+            check_rx: None,
+            mark: mark::Mark::new(mark::Kind::Stones, 1.0),
+            flight: Flight::default(),
+            clock: 0.0,
+            page_fade: None,
+            resume_wait: None,
             check_error: None,
             tx,
             rx,
@@ -394,12 +472,14 @@ impl App {
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
         }
+        app.mark.set_lift(if app.raised() { 1.0 } else { 0.0 }, true);
         if let Some(dir) = snap_dir {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
-            queue.push(Shot::Dialog);
-            queue.push(Shot::Menu);
+            queue.extend([Shot::Dialog, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
+        } else if resume {
+            app.resume(&cc.egui_ctx);
         }
         app
     }
@@ -487,13 +567,286 @@ impl App {
     }
 
     pub fn start_check(&mut self) {
+        if self.run.as_ref().is_some_and(|r| r.running()) {
+            return;
+        }
         self.settings.privacy_ack = true;
         self.save_settings();
         let (tx, rx) = channel();
         std::thread::spawn(move || collect::collect(tx));
+        self.check_rx = Some(rx);
         self.check_error = None;
         self.force_welcome = false;
-        self.checking = Some(Checking { rx, done: HashMap::new(), started: Instant::now() });
+        self.ui.nav_open = false;
+        self.run = Some(run::Run::check(self.page, self.snap.is_none()));
+        self.set_mark_kind(mark::Kind::Stones);
+        self.mark.start();
+    }
+
+    /// Swaps the loader for the other kind while it rests; both rest as the same logo.
+    fn set_mark_kind(&mut self, kind: mark::Kind) {
+        if self.mark.kind() != kind && !self.mark.running() {
+            let reduced = self.mark.reduced;
+            self.mark = mark::Mark::new(kind, self.mark.lift());
+            self.mark.reduced = reduced;
+        }
+    }
+
+    /// Where the restore point gate starts for a new queue.
+    fn gate_now(&self) -> run::Gate {
+        use crate::util::J;
+        let restore = self.snap.as_ref().map(|s| s.security.g("restore"));
+        let latest = restore.and_then(|r| r.g("Latest").s("When"));
+        let on = restore.and_then(|r| r.b("COn"));
+        run::Gate::start(self.restore_saved, latest.as_deref(), on, chrono::Local::now().date_naive())
+    }
+
+    /// Opens fixes as a queue in place of the page, everything ticked.
+    pub(super) fn open_fixes(&mut self, items: Vec<run::Item>, origin: Page) {
+        if items.is_empty() || self.run.as_ref().is_some_and(|r| r.running()) {
+            return;
+        }
+        let gate = self.gate_now();
+        self.set_mark_kind(mark::Kind::Healing);
+        self.run = Some(run::Run::fixes(items, origin, gate));
+        self.ui.nav_open = false;
+    }
+
+    fn close_run(&mut self) {
+        let Some(q) = self.run.take() else { return };
+        self.resume_wait = None;
+        self.go(if q.mode == run::Mode::Check { Page::Home } else { q.origin });
+        self.page_fade = Some(self.clock);
+    }
+
+    /// Runs the ticked boxes one after another in the background.
+    fn start_fixing(&mut self, ctx: &egui::Context) {
+        let jobs: Vec<(usize, run::Work, String)> = {
+            let Some(q) = self.run.as_mut() else { return };
+            if q.stage != run::Stage::Choose || !q.ready() {
+                return;
+            }
+            q.start();
+            q.items.iter().enumerate().filter(|(_, it)| it.ticked).map(|(i, it)| (i, it.work.clone(), it.title.clone())).collect()
+        };
+        let ids: Vec<&'static str> = jobs.iter().flat_map(|(_, w, _)| if let run::Work::Clean(ids) = w { ids.clone() } else { vec![] }).collect();
+        let items = self.cleanup_items(&ids);
+        self.set_mark_kind(mark::Kind::Healing);
+        self.mark.start();
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            for (i, work, title) in jobs {
+                let t = Instant::now();
+                if matches!(work, run::Work::Step(_)) {
+                    continue;
+                }
+                // A panic inside one box ends that box, not the queue, which would wait for it forever.
+                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &work {
+                    run::Work::Fix(f) => (fixes::apply(f, &title).map_err(|e| format!("{e:#}")), None),
+                    _ => {
+                        let out = cleanup_page::clean_items(&items, |_| {});
+                        let errs: Vec<String> = out.iter().filter_map(|(_, r)| r.as_ref().err().cloned()).collect();
+                        (if errs.is_empty() { Ok(()) } else { Err(errs.join(" ")) }, Some(out))
+                    }
+                }));
+                let (r, cleaned) = done.unwrap_or_else(|_| (Err("Bootmend hit a problem of its own with this one.".to_string()), None));
+                // The window has closed; nobody is left to tell.
+                if tx.send(Job::Worked(i, r, t.elapsed().as_secs_f32() * 1000.0, cleaned)).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn run_act(&mut self, ctx: &egui::Context, act: run::Act) {
+        match act {
+            run::Act::Cancel | run::Act::Close => self.close_run(),
+            run::Act::SaveRestore if !self.elevated => self.elevate_for(ctx, run::Then::Restore),
+            run::Act::SaveRestore => {
+                if let Some(q) = &mut self.run {
+                    q.gate = run::Gate::Saving;
+                }
+                self.busy.insert("restore".into());
+                self.spawn(ctx, || Job::RestorePoint(fixes::restore_point("Before changes made with Bootmend").map_err(|e| format!("{e:#}"))));
+            }
+            run::Act::TurnOn if !self.elevated => self.elevate_for(ctx, run::Then::TurnOn),
+            run::Act::TurnOn => {
+                if let Some(q) = &mut self.run {
+                    q.gate = run::Gate::TurningOn;
+                }
+                self.spawn(ctx, || Job::TurnedOn(fixes::apply(&Fix::EnableSystemProtection, "System Restore is off").map_err(|e| format!("{e:#}"))));
+            }
+            run::Act::Start if !self.elevated && self.run.as_ref().is_some_and(|q| q.needs_admin()) => self.elevate_for(ctx, run::Then::Start),
+            run::Act::Start => self.start_fixing(ctx),
+        }
+    }
+
+    /// Saves the queue, asks Windows to start Bootmend again as administrator, and closes this
+    /// window. The new one picks the queue up and carries on with `then`.
+    fn elevate_for(&mut self, ctx: &egui::Context, then: run::Then) {
+        let Some(q) = &self.run else { return };
+        let saved = run::Resume::of(q, then, unix_now());
+        let Some(path) = resume_path() else {
+            self.toast("Bootmend couldn't find its own folder, so it can't ask Windows for permission.", false);
+            return;
+        };
+        let written = serde_json::to_vec(&saved).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            self.toast(format!("Couldn't get ready to ask Windows for permission: {e}"), false);
+            return;
+        }
+        match crate::elevate::relaunch_as_admin("--resume") {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("could not remove {}: {e}", path.display());
+                }
+                self.toast(format!("{e:#}"), false);
+            }
+        }
+    }
+
+    /// Picks up the queue saved before the restart as administrator, if it's recent.
+    fn resume(&mut self, ctx: &egui::Context) {
+        let Some(path) = resume_path() else { return };
+        let Ok(bytes) = std::fs::read(&path) else { return };
+        if let Err(e) = std::fs::remove_file(&path) {
+            eprintln!("could not remove {}: {e}", path.display());
+        }
+        let saved: run::Resume = match serde_json::from_slice(&bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("the saved queue couldn't be read: {e}");
+                return;
+            }
+        };
+        if !saved.fresh(unix_now()) {
+            return;
+        }
+        let mut items = vec![];
+        let mut leftovers = None;
+        for ri in &saved.items {
+            let Some(f) = &ri.fix else {
+                leftovers = Some(ri.ticked);
+                continue;
+            };
+            let found = self.findings.iter().find(|x| x.actions.iter().any(|a| matches!(a, rules::Action::Fix(y) if y == f)));
+            // A fix offered outside the plan, such as a background service, keeps its own name.
+            let mut it = match found {
+                Some(x) => run::Item::fix(f.clone(), x.title.clone(), x.area),
+                None => run::Item::fix(f.clone(), ri.title.clone(), rules::Area::Speed),
+            };
+            it.ticked = ri.ticked;
+            items.push(it);
+        }
+        if items.is_empty() && leftovers.is_none() {
+            return;
+        }
+        let origin = saved.origin();
+        let gate = self.gate_now();
+        self.page = origin;
+        self.set_mark_kind(mark::Kind::Healing);
+        self.run = Some(run::Run::fixes(items, origin, gate));
+        self.resume_wait = Some((saved.then, leftovers));
+        if leftovers.is_some() {
+            self.start_cleanup_look(ctx);
+        } else {
+            self.resume_then(ctx);
+        }
+    }
+
+    /// The leftover files were measured again: they go back into the picked-up queue.
+    fn resumed_leftovers(&mut self, ctx: &egui::Context) {
+        let Some((_, Some(ticked))) = self.resume_wait else { return };
+        let choosing = self.run.as_ref().is_some_and(|q| q.stage == run::Stage::Choose);
+        if let (Some(mut it), true) = (self.leftovers_item(), choosing) {
+            it.ticked = ticked;
+            if let Some(q) = &mut self.run {
+                q.items.push(it);
+            }
+        }
+        self.resume_then(ctx);
+    }
+
+    /// Carries on with what was pressed before the restart, now that there's permission.
+    fn resume_then(&mut self, ctx: &egui::Context) {
+        let Some((then, _)) = self.resume_wait.take() else { return };
+        let Some(q) = self.run.as_ref().filter(|q| q.stage == run::Stage::Choose) else { return };
+        let act = match then {
+            run::Then::Restore if q.gate != run::Gate::Saved => Some(run::Act::SaveRestore),
+            run::Then::TurnOn if q.gate == run::Gate::Off => Some(run::Act::TurnOn),
+            run::Then::Start if q.ready() => Some(run::Act::Start),
+            _ => None,
+        };
+        // Without the rights after all, it waits for a press rather than asking again by itself.
+        if let (Some(a), true) = (act, self.elevated) {
+            self.run_act(ctx, a);
+        }
+    }
+
+    /// Moves the queue and the loader on by one frame.
+    fn tick(&mut self, ctx: &egui::Context) {
+        // Screenshots are taken with everything standing still.
+        let dt = if self.snap_mode.is_some() { 0.0 } else { (ctx.input(|i| i.stable_dt) * 1000.0).min(50.0) };
+        let reduced = !theme::motion(ctx);
+        self.clock += dt;
+        self.mark.reduced = reduced;
+        let over = self.run.as_mut().and_then(|q| {
+            q.reduced = reduced;
+            q.step(dt).map(|ok| (q.mode, ok))
+        });
+        if let Some((mode, ok)) = over {
+            // The keystone seats only when the work went well and nothing that matters is left.
+            let all = match mode {
+                run::Mode::Check => {
+                    if let Some(s) = self.run.as_mut().and_then(|q| q.finished.take()) {
+                        self.set_snapshot(*s);
+                    }
+                    !self.raised()
+                }
+                run::Mode::Fix => ok && !self.raised(),
+            };
+            self.mark.finish(all);
+        }
+        if let Some(q) = self.run.as_ref().filter(|q| q.running()) {
+            self.mark.set(q.p);
+        }
+        let ev = self.mark.step(dt);
+        if let Some(q) = &mut self.run {
+            if ev.ticked {
+                q.ticked_now();
+            }
+            if ev.rested {
+                q.rested();
+            }
+        }
+        if self.mark.moving() || self.run.as_ref().is_some_and(|q| q.moving()) || self.flight.from.is_some() || self.page_fade.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// The Queue screen over the whole central panel.
+    fn run_screen(&mut self, ui: &mut egui::Ui, margin: f32) -> Option<run::Act> {
+        let esc = !self.ui.nav_open && self.confirm.is_none();
+        let elevated = self.elevated;
+        // Nothing here scrolls, so a screenshot of it is always one part.
+        if let Some(m) = &mut self.snap_mode {
+            m.more = false;
+        }
+        let q = self.run.as_mut()?;
+        // In a scope of its own, so its fade-in leaves the logo alone.
+        let (slot, act) = ui.scope_builder(egui::UiBuilder::new().max_rect(ui.max_rect()), |ui| q.ui(ui, margin, elevated, esc)).inner;
+        self.ui.mark_slot = Some((Slot::Run, slot));
+        act
+    }
+
+    /// Draws the logo wherever this frame asked for it, flying it there from where it was.
+    fn draw_mark(&mut self, ui: &egui::Ui) {
+        let Some((owner, rect)) = self.ui.mark_slot else { return };
+        let jump = self.snap_mode.is_some() || !theme::motion(ui.ctx());
+        let r = self.flight.place(owner, rect, self.clock, ui.ctx().cumulative_pass_nr(), jump);
+        self.mark.show(ui.painter(), r, egui::Id::new("bootmend-mark"));
     }
 
     fn go(&mut self, p: Page) {
@@ -502,8 +855,12 @@ impl App {
         self.ui.scroll_top = true;
     }
 
-    /// Opens a place at the tab last used there. Home always opens on its plan.
+    /// Opens a place at the tab last used there. Home always opens on its plan. A queue that
+    /// isn't running closes.
     fn go_place(&mut self, pl: Place) {
+        if self.run.as_ref().is_some_and(|q| !q.running()) {
+            self.close_run();
+        }
         let p = if pl == Place::Home { Page::Home } else { self.ui.last_tab.get(&pl).copied().unwrap_or(pl.first()) };
         self.go(p);
     }
@@ -730,28 +1087,43 @@ impl App {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        if let Some(c) = &mut self.checking {
-            let mut finished = None;
-            while let Ok(m) = c.rx.try_recv() {
-                match m {
-                    Progress::StepDone { key, ok } => {
-                        c.done.insert(key, ok);
+        let mut msgs = vec![];
+        if let Some(rx) = &self.check_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(m) => msgs.push(m),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        msgs.push(Progress::Failed("The check stopped part way through.".to_string()));
+                        break;
                     }
-                    Progress::Finished(s) => finished = Some(Ok(*s)),
-                    Progress::Failed(e) => finished = Some(Err(e)),
                 }
             }
-            match finished {
-                Some(Ok(s)) => {
-                    self.checking = None;
-                    self.set_snapshot(s);
-                    self.go(Page::Home);
+        }
+        for m in msgs {
+            match m {
+                Progress::StepDone { key, ok } => {
+                    if let Some(q) = &mut self.run {
+                        q.on_step(key, ok);
+                    }
                 }
-                Some(Err(e)) => {
-                    self.checking = None;
+                Progress::Finished(s) => {
+                    self.check_rx = None;
+                    if let Some(q) = &mut self.run {
+                        q.on_finished(s);
+                    }
+                }
+                Progress::Failed(e) => {
+                    self.check_rx = None;
+                    self.run = None;
+                    let reduced = self.mark.reduced;
+                    self.mark = mark::Mark::new(mark::Kind::Stones, self.mark.lift());
+                    self.mark.reduced = reduced;
+                    if self.snap.is_some() {
+                        self.toast(format!("The check didn't finish: {e}"), false);
+                    }
                     self.check_error = Some(e);
                 }
-                None => ctx.request_repaint_after(std::time::Duration::from_millis(250)),
             }
         }
         while let Ok(j) = self.rx.try_recv() {
@@ -767,9 +1139,19 @@ impl App {
                 }
                 Job::RestorePoint(r) => {
                     self.busy.remove("restore");
+                    // Saved for the queue, the queue says so; saved from the Security page, a toast does.
+                    let gate = self.run.as_mut().filter(|q| q.gate == run::Gate::Saving).map(|q| {
+                        q.gate = run::Gate::after(&r);
+                        q.gate == run::Gate::Saved
+                    });
+                    if gate == Some(true) {
+                        self.restore_saved = true;
+                    }
                     match r {
                         Ok(()) => {
-                            self.toast("Restore point saved.", true);
+                            if gate.is_none() {
+                                self.toast("Restore point saved.", true);
+                            }
                             self.restore_saved = true;
                             self.update_snapshot(|s| {
                                 if let Some(r) = s.security.get_mut("restore").and_then(|r| r.as_object_mut()) {
@@ -777,7 +1159,40 @@ impl App {
                                 }
                             });
                         }
-                        Err(e) => self.toast(format!("Couldn't save a restore point: {e}"), false),
+                        Err(e) if gate.is_none() => self.toast(format!("Couldn't save a restore point: {e}"), false),
+                        Err(_) => {}
+                    }
+                }
+                Job::TurnedOn(r) => {
+                    self.history = fixes::history();
+                    match r {
+                        Ok(()) => {
+                            self.update_snapshot(|s| {
+                                if let Some(r) = s.security.get_mut("restore").and_then(|r| r.as_object_mut()) {
+                                    r.insert("COn".into(), serde_json::Value::Bool(true));
+                                }
+                            });
+                            if let Some(q) = self.run.as_mut().filter(|q| q.stage == run::Stage::Choose) {
+                                q.gate = run::Gate::Needed;
+                                // Turning it on was this fix, so it's done already.
+                                q.items.retain(|i| i.work != run::Work::Fix(Fix::EnableSystemProtection));
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(q) = self.run.as_mut().filter(|q| q.stage == run::Stage::Choose) {
+                                q.gate = run::Gate::Off;
+                            }
+                            self.toast(format!("Couldn't turn System Restore on: {e}"), false);
+                        }
+                    }
+                }
+                Job::Worked(i, r, ms, cleaned) => {
+                    if let Some(c) = cleaned {
+                        self.apply_cleaned(c);
+                    }
+                    self.history = fixes::history();
+                    if let Some(q) = &mut self.run {
+                        q.on_result(i, r, ms);
                     }
                 }
                 Job::Undone(r) => {
@@ -852,7 +1267,10 @@ impl App {
                         Err(e) => self.toast(format!("Couldn't save the report: {e}"), false),
                     }
                 }
-                Job::CleanupFound(r) => self.cleanup_found(r),
+                Job::CleanupFound(r) => {
+                    self.cleanup_found(r);
+                    self.resumed_leftovers(ctx);
+                }
                 Job::Cleaned(r) => self.cleaned(r),
                 Job::RecycleEmptied(r) => self.recycle_emptied(r),
                 Job::Scheduled(every, hour, r) => self.scheduled(every, hour, r),
@@ -893,6 +1311,10 @@ impl App {
     /// The places. `overlay` is the folded sidebar opened over the page: it starts with the
     /// menu button that closes it again, and closes when a place is picked.
     fn sidebar(&mut self, ui: &mut egui::Ui, overlay: bool) {
+        // While work runs, the places wait.
+        if self.run.as_ref().is_some_and(|q| q.running()) {
+            ui.disable();
+        }
         if overlay {
             // The close button sits exactly where the menu button that opened the pane is, as in
             // WinUI, so the same spot opens and closes it.
@@ -908,7 +1330,7 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.add_space(S3);
-            keystone::mark(ui, 24.0);
+            mark::sidebar(ui, 24.0);
             ui.add_space(S1);
             ui.label(RichText::new("Bootmend").text_style(theme::title()));
         });
@@ -1181,6 +1603,9 @@ impl App {
                 Some(Shot::View(p)) => p.slug(),
                 Some(Shot::Menu) => "menu".to_string(),
                 Some(Shot::Dialog) => "dialog".to_string(),
+                Some(Shot::Queue) => "queue".to_string(),
+                Some(Shot::Fixing) => "fixing".to_string(),
+                Some(Shot::Details) => "fixing-details".to_string(),
                 _ => "welcome".to_string(),
             };
             let file = m.dir.join(if m.part == 0 { format!("{name}.png") } else { format!("{name}-{}.png", m.part + 1) });
@@ -1192,6 +1617,9 @@ impl App {
             } else {
                 if matches!(m.queue.first(), Some(Shot::Dialog)) {
                     self.confirm = None;
+                }
+                if matches!(m.queue.first(), Some(Shot::Queue | Shot::Fixing | Shot::Details)) {
+                    self.run = None;
                 }
                 m.queue.remove(0);
                 m.part = 0;
@@ -1211,10 +1639,25 @@ impl App {
                 self.ui.nav_open = matches!(target, Shot::Menu);
                 let page = match target {
                     Shot::View(p) => Some(p),
-                    Shot::Menu => Some(Page::Home),
+                    Shot::Menu | Shot::Queue | Shot::Fixing | Shot::Details => Some(Page::Home),
                     Shot::Dialog => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
+                if self.run.is_none() {
+                    let stage = if matches!(target, Shot::Queue) { run::Stage::Choose } else { run::Stage::Running };
+                    if matches!(target, Shot::Queue | Shot::Fixing | Shot::Details) {
+                        let q = run::sample(stage, matches!(target, Shot::Details));
+                        self.mark = mark::Mark::new(mark::Kind::Healing, 1.0);
+                        if stage == run::Stage::Running {
+                            self.mark.start();
+                            for _ in 0..90 {
+                                self.mark.set(q.p);
+                                self.mark.step(16.0);
+                            }
+                        }
+                        self.run = Some(q);
+                    }
+                }
                 open_dialog = matches!(target, Shot::Dialog) && self.confirm.is_none();
                 if let Some(p) = page {
                     if self.page != p {
@@ -1268,6 +1711,7 @@ impl eframe::App for App {
         self.sync_accent(ctx);
         self.sync_motion(ctx);
         self.snap_step(ctx);
+        self.tick(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1280,14 +1724,18 @@ impl eframe::App for App {
             self.ui.nav_refocus = false;
         }
 
-        let full_screen = self.checking.is_some() || self.snap.is_none() || self.force_welcome;
+        self.ui.mark_slot = None;
+        let mut act = None;
+        // The first check-up has the window to itself, like the welcome before it.
+        let full_screen = self.run.as_ref().map_or(self.snap.is_none() || self.force_welcome, |q| q.first);
         if full_screen {
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(fit.margin as i8))).show(ui, |ui| {
-                if self.checking.is_some() {
-                    self.checking_screen(ui);
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
+                if self.run.is_some() {
+                    act = self.run_screen(ui, fit.margin);
                 } else {
-                    self.welcome_screen(ui);
+                    egui::Frame::new().inner_margin(egui::Margin::same(fit.margin as i8)).show(ui, |ui| self.welcome_screen(ui));
                 }
+                self.draw_mark(ui);
             });
         } else {
             if fit.docked {
@@ -1302,29 +1750,47 @@ impl eframe::App for App {
                     .show(ui, |ui| self.sidebar(ui, false));
             }
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
-                let mut sa = egui::ScrollArea::vertical().auto_shrink(false);
-                if std::mem::take(&mut self.ui.scroll_top) {
-                    sa = sa.vertical_scroll_offset(0.0);
+                if self.run.is_some() {
+                    act = self.run_screen(ui, fit.margin);
+                    self.draw_mark(ui);
+                    return;
                 }
-                let view = ui.available_height();
-                if let Some(m) = &self.snap_mode {
-                    sa = sa.vertical_scroll_offset(m.part as f32 * (view - 48.0));
+                let fade = self.page_fade.map(|at| ((self.clock - at) / 240.0).clamp(0.0, 1.0));
+                if fade.is_some_and(|t| t >= 1.0) {
+                    self.page_fade = None;
                 }
-                let out = sa.show(ui, |ui| {
-                    // Fix the content width so wide rows never push past the window edge.
-                    let m = fit.margin;
-                    let w = (ui.available_width() - 2.0 * m).clamp(0.0, 1040.0);
-                    egui::Frame::new().inner_margin(egui::Margin { left: m as i8, right: m as i8, top: S5 as i8, bottom: S6 as i8 }).show(ui, |ui| {
-                        ui.set_width(w);
-                        self.page_ui(ui);
+                ui.scope(|ui| {
+                    if let Some(t) = fade {
+                        ui.multiply_opacity(t);
+                    }
+                    let mut sa = egui::ScrollArea::vertical().auto_shrink(false);
+                    if std::mem::take(&mut self.ui.scroll_top) {
+                        sa = sa.vertical_scroll_offset(0.0);
+                    }
+                    let view = ui.available_height();
+                    if let Some(m) = &self.snap_mode {
+                        sa = sa.vertical_scroll_offset(m.part as f32 * (view - 48.0));
+                    }
+                    let out = sa.show(ui, |ui| {
+                        // Fix the content width so wide rows never push past the window edge.
+                        let m = fit.margin;
+                        let w = (ui.available_width() - 2.0 * m).clamp(0.0, 1040.0);
+                        egui::Frame::new().inner_margin(egui::Margin { left: m as i8, right: m as i8, top: S5 as i8, bottom: S6 as i8 }).show(ui, |ui| {
+                            ui.set_width(w);
+                            self.page_ui(ui);
+                        });
                     });
+                    if let Some(m) = &mut self.snap_mode {
+                        m.more = out.content_size.y > (m.part + 1) as f32 * (view - 48.0) + 48.0;
+                    }
                 });
-                if let Some(m) = &mut self.snap_mode {
-                    m.more = out.content_size.y > (m.part + 1) as f32 * (view - 48.0) + 48.0;
-                }
+                self.draw_mark(ui);
             });
         }
-        // The folded sidebar belongs to the pages; the welcome and checking screens have none.
+        if let Some(a) = act {
+            self.run_act(&ctx, a);
+        }
+        // The folded sidebar belongs to the pages; the welcome and the first check-up have none.
         if !fit.docked && !full_screen {
             self.nav_overlay(&ctx);
         }

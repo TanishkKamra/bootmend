@@ -93,6 +93,23 @@ pub fn total(items: &[&Item]) -> (u64, bool) {
     (items.iter().filter_map(|i| i.bytes).sum(), items.iter().any(|i| i.bytes.is_none()))
 }
 
+/// Clears each item in turn, saying which one it's on.
+pub(super) fn clean_items(items: &[Item], on: impl Fn(usize)) -> Vec<(&'static str, Result<Cleaned, String>)> {
+    let drive = Places::current().map(|p| p.system_drive).unwrap_or_else(|| "C:\\".into());
+    let mut out = vec![];
+    for (n, item) in items.iter().enumerate() {
+        on(n);
+        // Checked again right before, because the person may have opened the app since the confirmation.
+        let open = item.close_first.as_ref().filter(|(_, procs)| !cleanup::running(procs).is_empty());
+        let r = match open {
+            Some((app, _)) => Err(format!("{app} was open, so this was left alone.")),
+            None => cleanup::clean(item, &drive).map_err(|e| format!("{e:#}")),
+        };
+        out.push((item.id, r));
+    }
+    out
+}
+
 impl App {
     pub(super) fn start_cleanup_look(&mut self, ctx: &egui::Context) {
         self.busy.insert("cleanup-look".into());
@@ -111,33 +128,38 @@ impl App {
         });
     }
 
+    /// The measured items with these ids, to clear.
+    pub(super) fn cleanup_items(&self, ids: &[&'static str]) -> Vec<Item> {
+        self.cleanup.as_ref().map_or_else(Vec::new, |v| v.found.items.iter().filter(|i| ids.contains(&i.id)).cloned().collect())
+    }
+
     pub(super) fn start_cleaning(&mut self, ctx: &egui::Context, ids: Vec<&'static str>) {
+        let items = self.cleanup_items(&ids);
         let Some(v) = &mut self.cleanup else { return };
-        let items: Vec<Item> = v.found.items.iter().filter(|i| ids.contains(&i.id)).cloned().collect();
         v.progress.store(0, Ordering::Relaxed);
         v.cleaning = items.iter().map(|i| i.id).collect();
         let progress = v.progress.clone();
         self.busy.insert("cleanup".into());
-        self.spawn(ctx, move || {
-            let drive = Places::current().map(|p| p.system_drive).unwrap_or_else(|| "C:\\".into());
-            let mut out = vec![];
-            for (n, item) in items.iter().enumerate() {
-                progress.store(n, Ordering::Relaxed);
-                // Checked again right before, because the person may have opened the app since the confirmation.
-                let open = item.close_first.as_ref().filter(|(_, procs)| !cleanup::running(procs).is_empty());
-                let r = match open {
-                    Some((app, _)) => Err(format!("{app} was open, so this was left alone.")),
-                    None => cleanup::clean(item, &drive).map_err(|e| format!("{e:#}")),
-                };
-                out.push((item.id, r));
-            }
-            Job::Cleaned(out)
-        });
+        self.spawn(ctx, move || Job::Cleaned(clean_items(&items, |n| progress.store(n, Ordering::Relaxed))));
     }
 
     pub(super) fn cleaned(&mut self, results: Vec<(&'static str, Result<Cleaned, String>)>) {
         self.busy.remove("cleanup");
-        let Some(v) = &mut self.cleanup else { return };
+        let Some((freed, skipped, failed)) = self.apply_cleaned(results) else { return };
+        let mut msg = format!("Freed {}.", size_text(freed));
+        if skipped > 0 {
+            msg.push_str(&format!(" {} in use, so they were left alone.", plural(skipped as usize, "file was", "files were")));
+        }
+        if failed > 0 {
+            msg.push_str(&format!(" {} couldn't be cleared; the list says why.", plural(failed, "item", "items")));
+        }
+        self.toast(msg, failed == 0);
+    }
+
+    /// Records what clearing did on the page, and returns the bytes freed, the files skipped
+    /// because they were in use, and the items that failed.
+    pub(super) fn apply_cleaned(&mut self, results: Vec<(&'static str, Result<Cleaned, String>)>) -> Option<(u64, u64, usize)> {
+        let v = self.cleanup.as_mut()?;
         let (mut freed, mut skipped, mut failed) = (0, 0, 0);
         for (id, r) in results {
             match &r {
@@ -155,14 +177,7 @@ impl App {
         if let Some(d) = Places::current() {
             v.found.free = cleanup::free_space(&d.system_drive);
         }
-        let mut msg = format!("Freed {}.", size_text(freed));
-        if skipped > 0 {
-            msg.push_str(&format!(" {} in use, so they were left alone.", plural(skipped as usize, "file was", "files were")));
-        }
-        if failed > 0 {
-            msg.push_str(&format!(" {} couldn't be cleared; the list says why.", plural(failed, "item", "items")));
-        }
-        self.toast(msg, failed == 0);
+        Some((freed, skipped, failed))
     }
 
     pub(super) fn recycle_emptied(&mut self, r: Result<(), String>) {

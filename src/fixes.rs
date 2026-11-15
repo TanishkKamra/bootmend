@@ -163,6 +163,37 @@ impl Fix {
         }
     }
 
+    /// What Bootmend is doing while the fix runs, said warmly and plainly, without a full stop.
+    pub fn doing(&self) -> String {
+        match self {
+            Fix::DisableStartup { name, .. } => format!("Stopping {} from opening when you sign in", name.trim_end_matches(".lnk")),
+            Fix::EnableStartup { name, .. } => format!("Letting {} open when you sign in again", name.trim_end_matches(".lnk")),
+            Fix::RemoveExclusion { value, .. } => format!("Asking Windows Security to check {value} again"),
+            Fix::EnablePua => "Asking Windows Security to block adware and unwanted apps".into(),
+            Fix::DisableRemoteAssistance => "Closing the door on Remote Assistance invitations".into(),
+            Fix::DisableFirewallRule { display, .. } => format!("Switching off the firewall rule \"{display}\""),
+            Fix::ServiceManual { display, .. } => format!("Letting {display} start only when it's needed"),
+            Fix::DisableSmb1 => "Retiring SMB1, an old way of sharing files".into(),
+            Fix::EnableSystemProtection => "Turning System Restore back on, so there's a way back".into(),
+            Fix::AllowAutoUpdates => "Letting Windows fetch its own updates again".into(),
+            Fix::EnableService { display, .. } => format!("Switching {display} back on"),
+            Fix::DisableAccount { name } => format!("Switching off the {name} account"),
+            Fix::EnableCloudProtection => "Letting Windows Security check new threats with Microsoft".into(),
+            Fix::EnableSampleSubmission => "Letting Windows Security send suspicious programs to Microsoft".into(),
+            Fix::EnableTrim => "Telling Windows to keep the SSD's free space tidy".into(),
+            Fix::ResumeEncryption { drive } => format!("Switching protection on {drive} back on"),
+            Fix::SystemManagedPagefile => "Handing the page file back to Windows".into(),
+            Fix::EnableDriverBlocklist => "Turning on Microsoft's list of unsafe drivers".into(),
+            Fix::EnableLsaProtection => "Putting a guard on your sign-in details".into(),
+            Fix::EnableCrashFiles => "Asking Windows to keep notes the next time something crashes".into(),
+            Fix::TurnOffProxy { .. } => "Sending web traffic straight to the internet again".into(),
+            Fix::DnsAutomatic { adapter, .. } => format!("Letting {adapter} use your router's DNS again"),
+            Fix::RemoveBrowserPolicies { browser, .. } => format!("Unlocking {browser}'s settings, with a copy kept"),
+            Fix::EnableRecovery => "Switching Windows' repair tools back on".into(),
+            Fix::RemoveUpdateBlock { .. } => "Unblocking Windows Update".into(),
+        }
+    }
+
     /// Per-user startup entries can be changed without administrator rights; everything else needs them.
     pub fn needs_admin(&self) -> bool {
         match self {
@@ -401,7 +432,7 @@ pub fn apply(fix: &Fix, title: &str) -> Result<()> {
 pub fn restore_point(description: &str) -> Result<()> {
     let d = ps_quote(description);
     run_ps(&format!(
-        "$t = Get-Date\nCheckpoint-Computer -Description {d} -RestorePointType MODIFY_SETTINGS -WarningAction SilentlyContinue\n$l = Get-ComputerRestorePoint | Select-Object -Last 1\nif (-not $l -or [Management.ManagementDateTimeConverter]::ToDateTime($l.CreationTime) -lt $t.AddMinutes(-1)) {{ throw 'Windows skipped it because it already saved a restore point in the last 24 hours' }}"
+        "$t = Get-Date\nCheckpoint-Computer -Description {d} -RestorePointType MODIFY_SETTINGS -WarningAction SilentlyContinue\n$l = Get-ComputerRestorePoint | Select-Object -Last 1\n$w = if ($l) {{ [Management.ManagementDateTimeConverter]::ToDateTime($l.CreationTime) }} else {{ $null }}\nif (-not $w -or $w -lt $t.AddHours(-24)) {{ throw \"Windows didn't save a restore point. System Restore may be off for this drive.\" }}\nif ($w -lt $t.AddMinutes(-1)) {{ throw 'Windows skipped it because it already saved a restore point in the last 24 hours' }}"
     ))
 }
 
@@ -518,6 +549,23 @@ mod tests {
             let (a, u) = fx.scripts();
             assert!(!a.is_empty() && !u.is_empty() && a != u, "{fx:?}");
         }
+    }
+
+    /// The line shown while a fix runs reads as a sentence in progress, names what it acts on,
+    /// and stays short enough for one line beside the progress bar.
+    #[test]
+    fn every_fix_says_what_it_is_doing() {
+        let mut fixes = every_fix();
+        fixes.push(Fix::EnableStartup { name: "Steam.lnk".into(), approved_key: r"HKCU:\Software\X\Run".into() });
+        for fx in fixes {
+            let d = fx.doing();
+            assert!(d.chars().next().is_some_and(char::is_uppercase), "{fx:?}: {d}");
+            assert!(!d.ends_with('.') && !d.contains(".lnk"), "{fx:?}: {d}");
+            assert!(d.split_whitespace().next().is_some_and(|w| w.ends_with("ing")), "{fx:?}: {d}");
+            assert!(d.chars().count() <= 70, "{fx:?}: {d}");
+        }
+        let named = Fix::DisableFirewallRule { name: "r".into(), display: "Rule".into() }.doing();
+        assert!(named.contains("Rule"), "{named}");
     }
 
     fn every_fix() -> Vec<Fix> {

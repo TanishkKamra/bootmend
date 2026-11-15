@@ -2,14 +2,13 @@
 
 use super::theme::{self, pal, RADIUS, S1, S2, S3, S4, S5, S6};
 use super::widgets::{self, icon, small};
-use super::{keystone, App, Page, Pending, COMPACT};
+use super::{run, App, Page, Slot, COMPACT};
 use crate::cleanup::size_text;
 use crate::fixes::Fix;
 use crate::rules::{plural, Action, Area, Finding, Level};
 use crate::snapshot::Snapshot;
 use eframe::egui::{self, CornerRadius, Margin, RichText, Sense, Stroke, Ui};
 use std::sync::Arc;
-use std::time::Instant;
 
 /// How far through the plan the person is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -81,8 +80,6 @@ pub fn leftovers_level(findings: &[Finding]) -> Level {
 /// Leftovers smaller than this aren't worth a line on the plan.
 const LEFTOVERS_MIN: u64 = 1 << 30;
 const LEFTOVERS: &str = "leftovers";
-/// With animation effects off, the keystone fades into its seat over this long instead of moving.
-const FADE_MS: f32 = 200.0;
 
 /// The leftover files Bootmend clears by itself, as a line on the plan.
 struct Leftovers {
@@ -90,7 +87,13 @@ struct Leftovers {
     done: bool,
     /// What's still to clear, and its size.
     ids: Vec<&'static str>,
-    left: u64,
+}
+
+/// The plan on Home: every to-do and whether it's done, the leftovers line, and the count.
+struct Plan {
+    todos: Vec<(Finding, bool)>,
+    leftovers: Option<Leftovers>,
+    prog: Progress,
 }
 
 impl App {
@@ -119,20 +122,10 @@ impl App {
         let todo = Finding::new(LEFTOVERS, Area::Speed, leftovers_level(&self.findings), format!("Clear {} of leftover files", size_text(bytes)))
             .why("Temporary files, caches and old update files. Your own files are never touched.")
             .details(safe.iter().map(|i| format!("{}: {}", i.title, i.bytes.map_or("size shows after clearing".to_string(), size_text))));
-        Some(Leftovers {
-            todo,
-            done: left_items.is_empty(),
-            ids: left_items.iter().map(|i| i.id).collect(),
-            left: left_items.iter().filter_map(|i| i.bytes).sum(),
-        })
+        Some(Leftovers { todo, done: left_items.is_empty(), ids: left_items.iter().map(|i| i.id).collect() })
     }
 
-    pub(super) fn home(&mut self, ui: &mut Ui, snap: &Arc<Snapshot>) {
-        let p = pal(ui.ctx());
-        // Measuring leftovers only reads folder sizes; clearing waits for a press.
-        if self.cleanup.is_none() && !self.busy.contains("cleanup-look") {
-            self.start_cleanup_look(&ui.ctx().clone());
-        }
+    fn plan(&self) -> Plan {
         let mut todos: Vec<(Finding, bool)> = self.findings.iter().filter(|f| f.level != Level::AllGood).map(|f| (f.clone(), self.todo_done(f))).collect();
         let leftovers = self.leftovers();
         if let Some(l) = &leftovers {
@@ -141,9 +134,47 @@ impl App {
         // Stable, so the leftovers line comes last within its level.
         todos.sort_by_key(|(f, _)| f.level);
         let prog = progress(todos.iter().map(|(f, d)| (f.level, *d)));
-        let safe = leftovers.as_ref().filter(|l| !l.done).map(|l| (l.ids.clone(), l.left));
+        Plan { todos, leftovers, prog }
+    }
 
-        self.hero(ui, snap, prog, safe.as_ref());
+    /// Whether the keystone waits above its seat: something that matters is still open.
+    pub(super) fn raised(&self) -> bool {
+        self.plan().prog.raised()
+    }
+
+    /// The leftovers line, for picking up a queue after a restart.
+    pub(super) fn leftovers_item(&self) -> Option<run::Item> {
+        self.leftovers().filter(|l| !l.done).map(|l| run::Item::clean(l.ids, l.todo.title))
+    }
+
+    /// The safe work Bootmend can do by itself, in the plan's order: each open to-do that one
+    /// fix settles, and the leftover files.
+    fn safe_queue(&self, plan: &Plan) -> Vec<run::Item> {
+        plan.todos
+            .iter()
+            .filter(|(_, done)| !done)
+            .filter_map(|(f, _)| {
+                if f.id == LEFTOVERS {
+                    return plan.leftovers.as_ref().map(|l| run::Item::clean(l.ids.clone(), f.title.clone()));
+                }
+                match fixes_of(f).as_slice() {
+                    [fx] => Some(run::Item::fix((*fx).clone(), f.title.clone(), f.area)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn home(&mut self, ui: &mut Ui, snap: &Arc<Snapshot>) {
+        let p = pal(ui.ctx());
+        // Measuring leftovers only reads folder sizes; clearing waits for a press.
+        if self.cleanup.is_none() && !self.busy.contains("cleanup-look") {
+            self.start_cleanup_look(&ui.ctx().clone());
+        }
+        let plan = self.plan();
+        let queue = self.safe_queue(&plan);
+        let safe: Vec<&'static str> = plan.leftovers.as_ref().filter(|l| !l.done).map(|l| l.ids.clone()).unwrap_or_default();
+        self.hero(ui, snap, plan.prog, queue);
         if !snap.errors.is_empty() {
             ui.add_space(S5);
             widgets::note(ui, p.amber, p.amber_bg, icon::WARN, |ui| {
@@ -156,13 +187,13 @@ impl App {
             });
         }
         ui.add_space(S6);
-        self.plan_list(ui, &todos, safe.as_ref().map_or(&[][..], |s| &s.0[..]));
+        self.plan_list(ui, &plan.todos, &safe);
         self.schedule_offer(ui);
     }
 
     /// The verdict as the page title beside the Keystone, the progress line and the one button
-    /// that does the safe work.
-    fn hero(&mut self, ui: &mut Ui, snap: &Snapshot, prog: Progress, safe: Option<&(Vec<&'static str>, u64)>) {
+    /// that opens the safe work as a queue.
+    fn hero(&mut self, ui: &mut Ui, snap: &Snapshot, prog: Progress, queue: Vec<run::Item>) {
         let p = pal(ui.ctx());
         let (title, lede) = verdict(prog);
         let avail = ui.available_width();
@@ -171,10 +202,15 @@ impl App {
         // both, the way Settings moves the Windows Update tile under the PC's name.
         let compact = avail < COMPACT;
         let size = if wide { 112.0 } else { 72.0 };
-        let keys = self.keystone_keys(ui.ctx(), prog.raised());
+        // The keystone drops into its seat the moment the last thing that matters is fixed, and
+        // rises at once if something new turns up.
+        if !self.mark.running() {
+            self.mark.set_lift(if prog.raised() { 1.0 } else { 0.0 }, self.snap_mode.is_some());
+        }
         let cleaning = self.busy.contains("cleanup");
-        let mut clear = false;
-        let rest = |ui: &mut Ui, clear: &mut bool| {
+        let n = queue.len();
+        let mut fix = false;
+        let rest = |ui: &mut Ui, fix: &mut bool| {
             ui.add(egui::Label::new(RichText::new(&lede).text_style(theme::lede()).color(p.muted)).wrap());
             if prog.total() > 0 {
                 ui.add_space(S1);
@@ -185,21 +221,15 @@ impl App {
                     small(ui, format!("{} of {} done", prog.done, prog.total()));
                 });
             }
-            if let Some((_, left)) = safe {
+            if n > 0 {
                 ui.add_space(S2);
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     if cleaning {
                         ui.add(egui::Spinner::new().color(p.accent));
                         widgets::muted(ui, "Clearing leftover files");
                     } else {
-                        *clear = widgets::primary(ui, "Fix the safe one for me").clicked();
-                        // Short of room, the note goes under the button rather than wrapping around it.
-                        if compact {
-                            ui.end_row();
-                        } else {
-                            ui.add_space(S3);
-                        }
-                        small(ui, format!("Clears {} of leftover files. Nothing else changes.", size_text(*left)));
+                        let label = if n == 1 { "Fix the safe one for me".to_string() } else { format!("Fix the {n} safe ones for me") };
+                        *fix = widgets::primary(ui, &label).clicked();
                     }
                 });
             }
@@ -217,53 +247,23 @@ impl App {
                 let r = ui.add(egui::Label::new(RichText::new(&title).text_style(style)).wrap());
                 widgets::heading_role(ui, &r, 1, &title);
                 if !compact {
-                    rest(ui, &mut clear);
+                    rest(ui, &mut fix);
                 }
             });
             slot
         });
         let centre = egui::pos2(row.inner.center().x, row.response.rect.center().y);
-        keystone::paint(ui, egui::Rect::from_center_size(centre, egui::vec2(size, size)), &keys);
+        self.ui.mark_slot = Some((Slot::Home, egui::Rect::from_center_size(centre, egui::vec2(size, size))));
         if compact {
             ui.add_space(S3);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = S2;
-                rest(ui, &mut clear);
+                rest(ui, &mut fix);
             });
         }
-        if clear {
-            if let Some((ids, _)) = safe {
-                self.start_cleaning(&ui.ctx().clone(), ids.clone());
-            }
+        if fix {
+            self.open_fixes(queue, Page::Home);
         }
-    }
-
-    /// Where to draw the keystone this frame. It drops into its seat the moment the last thing
-    /// that matters is fixed, and rises at once if something new turns up.
-    fn keystone_keys(&mut self, ctx: &egui::Context, raised: bool) -> Vec<(f32, f32)> {
-        if self.ui.keystone_raised == Some(true) && !raised {
-            self.ui.keystone_drop = Some(Instant::now());
-        }
-        self.ui.keystone_raised = Some(raised);
-        if raised {
-            self.ui.keystone_drop = None;
-            return vec![(keystone::RAISED, 1.0)];
-        }
-        let Some(start) = self.ui.keystone_drop else { return vec![(0.0, 1.0)] };
-        let ms = start.elapsed().as_secs_f32() * 1000.0;
-        let (t, keys) = if theme::motion(ctx) {
-            let t = ms / keystone::DROP_MS;
-            (t, vec![(keystone::lift_at(t), 1.0)])
-        } else {
-            let t = (ms / FADE_MS).min(1.0);
-            (t, vec![(keystone::RAISED, 1.0 - t), (0.0, t)])
-        };
-        if t < 1.0 {
-            ctx.request_repaint();
-        } else {
-            self.ui.keystone_drop = None;
-        }
-        keys
     }
 
     /// One card holding the whole plan, grouped by level, then what was checked and found fine.
@@ -333,7 +333,7 @@ impl App {
     /// when one change does it; "Walk me through it" opens the steps in place.
     fn todo_row(&mut self, ui: &mut Ui, f: &Finding, done: bool, safe_ids: &[&'static str]) {
         let p = pal(ui.ctx());
-        let fixes: Vec<&Fix> = f.actions.iter().filter_map(|a| if let Action::Fix(x) = a { Some(x) } else { None }).collect();
+        let fixes = fixes_of(f);
         let leftovers = f.id == LEFTOVERS;
         let one_fix = leftovers || fixes.len() == 1;
         let more = !f.steps.is_empty() || !f.details.is_empty() || f.actions.len() > usize::from(fixes.len() == 1);
@@ -344,9 +344,7 @@ impl App {
         let compact = avail < COMPACT;
         // The mark, the gap the layout puts after it, and the space before the words.
         let indent = 20.0 + ui.spacing().item_spacing.x + S4;
-        // A fix greyed out for want of administrator rights says so beside it, which takes room.
-        let blocked = !done && !self.elevated && !leftovers && matches!(fixes.as_slice(), [fx] if fx.needs_admin());
-        let action_w = 230.0 + if blocked { widgets::off_reason_width(ui, widgets::NEEDS_ADMIN) + ui.spacing().item_spacing.x } else { 0.0 };
+        let action_w = 230.0;
         let text_w = if compact { avail - indent } else { (avail - indent - action_w).max(160.0) };
         let title = egui::WidgetText::from(RichText::new(&f.title).family(theme::semibold())).into_galley(
             ui,
@@ -409,7 +407,7 @@ impl App {
             }
         }
         if clear {
-            self.start_cleaning(&ui.ctx().clone(), safe_ids.to_vec());
+            self.open_fixes(vec![run::Item::clean(safe_ids.to_vec(), f.title.clone())], Page::Home);
         }
         if open && more {
             ui.horizontal(|ui| {
@@ -464,30 +462,19 @@ impl App {
                 clear = widgets::secondary(ui, "Fix it for me").clicked();
             }
         } else if let [fx] = fixes {
-            if self.busy.contains(&format!("fix:{fx:?}")) {
-                status(ui, rtl, spinner, |ui| {
-                    widgets::muted(ui, "Working on it");
-                });
-            } else {
-                let blocked = fx.needs_admin() && !self.elevated;
-                // Filled from the right, the reason goes in first so it lands right of the button.
-                if blocked && rtl {
-                    widgets::admin_note(ui);
-                }
-                let r = widgets::secondary_enabled(ui, "Fix it for me", !blocked).on_hover_text(fx.label());
-                let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart Bootmend as administrator first.") } else { r };
-                if blocked && !rtl {
-                    widgets::admin_note(ui);
-                }
-                if r.clicked() {
-                    self.ask(Pending::Fix((*fx).clone(), f.title.clone()));
-                }
+            if widgets::secondary(ui, "Fix it for me").on_hover_text(fx.label()).clicked() {
+                self.open_fixes(vec![run::Item::fix((*fx).clone(), f.title.clone(), f.area)], Page::Home);
             }
         } else {
             toggle = widgets::secondary(ui, if open { "Hide the steps" } else { "Walk me through it" }).clicked();
         }
         (toggle, clear)
     }
+}
+
+/// The fixes a to-do offers.
+fn fixes_of(f: &Finding) -> Vec<&Fix> {
+    f.actions.iter().filter_map(|a| if let Action::Fix(x) = a { Some(x) } else { None }).collect()
 }
 
 /// An icon or spinner and its words, in reading order whichever way the row is filled.

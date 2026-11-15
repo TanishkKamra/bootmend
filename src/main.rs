@@ -27,6 +27,7 @@ Usage:
                                         Run a check without a window and save a report
   bootmend --screenshots <folder> [--theme light|dark] [--size WxH]
                                         Save a picture of every page (for testing)
+  bootmend --resume                     Carry on with fixes after restarting as administrator
 ";
 
 struct Args {
@@ -37,10 +38,11 @@ struct Args {
     screenshots: Option<PathBuf>,
     theme: Option<String>,
     size: Option<(f32, f32)>,
+    resume: bool,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut a = Args { report: None, pdf: false, show_personal: false, scheduled: false, screenshots: None, theme: None, size: None };
+    let mut a = Args { report: None, pdf: false, show_personal: false, scheduled: false, screenshots: None, theme: None, size: None, resume: false };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         let mut val = |name: &str| it.next().ok_or_else(|| anyhow!("{name} needs a value"));
@@ -49,6 +51,7 @@ fn parse_args() -> Result<Args> {
             "--pdf" => a.pdf = true,
             "--show-personal" => a.show_personal = true,
             "--scheduled" => a.scheduled = true,
+            "--resume" => a.resume = true,
             "--screenshots" => a.screenshots = Some(val("--screenshots")?.into()),
             "--theme" => {
                 let t = val("--theme")?;
@@ -192,6 +195,7 @@ fn main() {
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let theme = args.theme;
+    let resume = args.resume;
     if let Some(dir) = &shots {
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("Couldn't create {}: {e}", dir.display());
@@ -202,7 +206,7 @@ fn main() {
         util::APP,
         options,
         Box::new(move |cc| {
-            let app = gui::App::new(cc, shots, mica);
+            let app = gui::App::new(cc, shots, mica, resume);
             match theme.as_deref() {
                 Some("dark") => cc.egui_ctx.set_theme(eframe::egui::Theme::Dark),
                 Some("light") => cc.egui_ctx.set_theme(eframe::egui::Theme::Light),

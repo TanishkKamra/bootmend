@@ -2,10 +2,10 @@
 
 use super::theme::{self, pal, S1, S2, S3, S4, S5};
 use super::widgets::{self, card, ico, icon, kv, muted, section, small, table};
-use super::{App, Page, Pending};
+use super::{run, App, Page, Pending};
 use crate::diff::Kind as ChangeKind;
 use crate::fixes::Fix;
-use crate::rules::{plural, Action, Finding};
+use crate::rules::{plural, Action, Area, Finding};
 use crate::scan;
 use crate::snapshot::Snapshot;
 use crate::util::{shell_open, J};
@@ -206,23 +206,18 @@ impl App {
     fn actions(&mut self, ui: &mut Ui, f: &Finding) {
         let fixes: Vec<&Fix> = f.actions.iter().filter_map(|a| if let Action::Fix(x) = a { Some(x) } else { None }).collect();
         if fixes.len() > 1 {
-            let mut blocked = false;
             for fx in &fixes {
                 ui.horizontal(|ui| {
-                    blocked |= self.fix_button_as(ui, fx, &f.title, true);
+                    self.fix_button_as(ui, fx, &f.title, f.area, true);
                     ui.add(egui::Label::new(fix_target(fx)).truncate());
                 });
-            }
-            // Said once under the list rather than on every row.
-            if blocked {
-                ui.horizontal(widgets::admin_note);
             }
             ui.add_space(S2);
         }
         ui.horizontal_wrapped(|ui| {
             for a in &f.actions {
                 match a {
-                    Action::Fix(fx) if fixes.len() == 1 => self.fix_button(ui, fx, &f.title),
+                    Action::Fix(fx) if fixes.len() == 1 => self.fix_button_as(ui, fx, &f.title, f.area, true),
                     Action::Fix(_) => {}
                     Action::Open { label, target } => {
                         if widgets::icon_button(ui, icon::OPEN, label, true).clicked() {
@@ -248,33 +243,19 @@ impl App {
         });
     }
 
-    fn fix_button(&mut self, ui: &mut Ui, fx: &Fix, title: &str) {
-        if self.fix_button_as(ui, fx, title, true) {
-            widgets::admin_note(ui);
-        }
-    }
-
-    /// `primary: false` for long lists, where a filled button on every row would shout. Returns
-    /// whether it's greyed out for want of administrator rights, so the caller can say so.
-    fn fix_button_as(&mut self, ui: &mut Ui, fx: &Fix, title: &str, primary: bool) -> bool {
+    /// A fix's button, which opens it as a queue of one. `primary: false` for long lists, where
+    /// a filled button on every row would shout.
+    fn fix_button_as(&mut self, ui: &mut Ui, fx: &Fix, title: &str, area: Area, primary: bool) {
         let p = pal(ui.ctx());
         if self.fixed(fx) {
             ui.label(ico(icon::CHECK, 14.0).color(p.green));
             ui.label(RichText::new("Done").color(p.green));
-            return false;
+            return;
         }
-        if self.busy.contains(&format!("fix:{fx:?}")) {
-            ui.add(egui::Spinner::new().color(p.accent));
-            muted(ui, "Working on it");
-            return false;
-        }
-        let blocked = fx.needs_admin() && !self.elevated;
-        let r = if primary { widgets::primary_enabled(ui, fx.label(), !blocked) } else { widgets::secondary_enabled(ui, fx.label(), !blocked) };
-        let r = if blocked { r.on_disabled_hover_text("Needs administrator rights. Restart Bootmend as administrator first.") } else { r };
+        let r = if primary { widgets::primary(ui, fx.label()) } else { widgets::secondary(ui, fx.label()) };
         if r.clicked() {
-            self.ask(Pending::Fix(fx.clone(), title.to_string()));
+            self.open_fixes(vec![run::Item::fix(fx.clone(), title, area)], self.page);
         }
-        blocked
     }
 
     fn restore_point_button(&mut self, ui: &mut Ui) {
@@ -512,7 +493,7 @@ impl App {
                 if on == Some(true) {
                     self.restore_point_button(ui);
                 } else {
-                    self.fix_button(ui, &Fix::EnableSystemProtection, "System Restore is off");
+                    self.fix_button_as(ui, &Fix::EnableSystemProtection, "System Restore is off", Area::Security, true);
                 }
                 if widgets::icon_button(ui, icon::OPEN, "Open System Restore", true).clicked() {
                     if let Err(e) = shell_open("rstrui.exe") {
@@ -771,11 +752,6 @@ impl App {
             );
             ui.add_space(S2);
             let services = snap.software.a("services");
-            // Said once over the list rather than beside every greyed-out button.
-            if !self.elevated && services.iter().any(|sv| s(sv, "StartMode") == "Auto") {
-                ui.horizontal(widgets::admin_note);
-                ui.add_space(S2);
-            }
             for (i, sv) in services.iter().enumerate() {
                 let (name, disp) = (s(sv, "Name"), s(sv, "Display"));
                 if i > 0 {
@@ -783,7 +759,7 @@ impl App {
                 }
                 row(ui, |ui| {
                     if s(sv, "StartMode") == "Auto" {
-                        self.fix_button_as(ui, &Fix::ServiceManual { name: name.clone(), display: disp.clone() }, &disp, false);
+                        self.fix_button_as(ui, &Fix::ServiceManual { name: name.clone(), display: disp.clone() }, &disp, Area::Speed, false);
                     } else {
                         small(ui, "Starts when needed");
                     }
