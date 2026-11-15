@@ -253,6 +253,14 @@ impl Default for Settings {
     }
 }
 
+/// How a background job ended, for the log.
+fn ended<T>(r: &Result<T, String>) -> String {
+    match r {
+        Ok(_) => "worked".into(),
+        Err(e) => format!("failed: {e}"),
+    }
+}
+
 fn settings_path() -> Option<PathBuf> {
     data_dir("").ok().map(|d| d.join("settings.json"))
 }
@@ -428,7 +436,7 @@ impl App {
             && match system::apply_mica(cc) {
                 Ok(()) => true,
                 Err(e) => {
-                    eprintln!("The window stays solid because Mica couldn't be turned on: {e}");
+                    log!("window", "the window stays solid because Mica couldn't be turned on: {e}");
                     false
                 }
             };
@@ -521,7 +529,9 @@ impl App {
     }
 
     fn toast(&mut self, text: impl Into<String>, ok: bool) {
-        self.toasts.push((text.into(), ok, Instant::now()));
+        let text = text.into();
+        log!("toast", "{text}");
+        self.toasts.push((text, ok, Instant::now()));
     }
 
     /// Follows the Windows accent colour while accent sync is on. Reading it is cheap, and every
@@ -533,6 +543,7 @@ impl App {
         self.accent_read = Some(Instant::now());
         let now = system::windows_accent();
         if now != self.win_accent {
+            log!("window", "the Windows accent colour {}", if now.is_some() { "changed" } else { "couldn't be read" });
             self.win_accent = now;
             theme::set_accent(ctx, now.as_ref());
         }
@@ -546,11 +557,13 @@ impl App {
         self.motion_read = Some(Instant::now());
         let on = system::animations_on();
         if on != theme::motion(ctx) {
+            log!("window", "Windows animation effects are now {}", if on { "on" } else { "off" });
             theme::set_motion(ctx, on);
         }
     }
 
     fn set_accent_sync(&mut self, ctx: &egui::Context, on: bool) {
+        log!("settings", "using the Windows accent colour turned {}", if on { "on" } else { "off" });
         self.settings.use_windows_accent = on;
         self.save_settings();
         self.win_accent = None;
@@ -563,7 +576,7 @@ impl App {
     fn save_settings(&self) {
         if let Some(p) = settings_path() {
             if let Err(e) = std::fs::write(&p, serde_json::to_vec(&self.settings).unwrap_or_default()) {
-                eprintln!("could not save settings: {e}");
+                log!("settings", "couldn't save settings: {e}");
             }
         }
     }
@@ -572,6 +585,7 @@ impl App {
         if self.run.as_ref().is_some_and(|r| r.running()) {
             return;
         }
+        log!("action", "started a check-up");
         self.settings.privacy_ack = true;
         self.save_settings();
         let (tx, rx) = channel();
@@ -609,6 +623,7 @@ impl App {
             return;
         }
         let gate = self.gate_now();
+        log!("queue", "opened from {origin:?} with {}", items.iter().map(|i| i.title.as_str()).collect::<Vec<_>>().join(", "));
         self.set_mark_kind(mark::Kind::Healing);
         self.run = Some(run::Run::fixes(items, origin, gate));
         self.ui.nav_open = false;
@@ -616,6 +631,7 @@ impl App {
 
     fn close_run(&mut self) {
         let Some(q) = self.run.take() else { return };
+        log!("queue", "closed while {:?} ({:?})", q.stage, q.mode);
         self.resume_wait = None;
         self.go(if q.mode == run::Mode::Check { Page::Home } else { q.origin });
         self.page_fade = Some(self.clock);
@@ -629,6 +645,14 @@ impl App {
                 return;
             }
             q.start();
+            let left: Vec<&str> = q.items.iter().filter(|it| !it.ticked).map(|it| it.title.as_str()).collect();
+            log!(
+                "queue",
+                "started {} of {}{}",
+                q.ticked(),
+                q.items.len(),
+                if left.is_empty() { String::new() } else { format!(", leaving out {}", left.join(", ")) }
+            );
             q.items.iter().enumerate().filter(|(_, it)| it.ticked).map(|(i, it)| (i, it.work.clone(), it.title.clone())).collect()
         };
         let ids: Vec<&'static str> = jobs.iter().flat_map(|(_, w, _)| if let run::Work::Clean(ids) = w { ids.clone() } else { vec![] }).collect();
@@ -642,6 +666,7 @@ impl App {
                 if matches!(work, run::Work::Step(_)) {
                     continue;
                 }
+                log!("queue", "{title}: started");
                 // A panic inside one box ends that box, not the queue, which would wait for it forever.
                 let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &work {
                     run::Work::Fix(f) => (fixes::apply(f, &title).map_err(|e| format!("{e:#}")), None),
@@ -652,6 +677,7 @@ impl App {
                     }
                 }));
                 let (r, cleaned) = done.unwrap_or_else(|_| (Err("Bootmend hit a problem of its own with this one.".to_string()), None));
+                log!("queue", "{title}: {} after {:.1}s", ended(&r), t.elapsed().as_secs_f32());
                 // The window has closed; nobody is left to tell.
                 if tx.send(Job::Worked(i, r, t.elapsed().as_secs_f32() * 1000.0, cleaned)).is_err() {
                     return;
@@ -662,6 +688,7 @@ impl App {
     }
 
     fn run_act(&mut self, ctx: &egui::Context, act: run::Act) {
+        log!("queue", "pressed {act:?}");
         match act {
             run::Act::Cancel | run::Act::Close => self.close_run(),
             run::Act::SaveRestore if !self.elevated => self.elevate_for(ctx, run::Then::Restore),
@@ -698,11 +725,12 @@ impl App {
             self.toast(format!("Couldn't get ready to ask Windows for permission: {e}"), false);
             return;
         }
+        log!("action", "restarting as administrator to carry on with the queue");
         match crate::elevate::relaunch_as_admin("--resume") {
             Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(e) => {
                 if let Err(e) = std::fs::remove_file(&path) {
-                    eprintln!("could not remove {}: {e}", path.display());
+                    log!("action", "couldn't remove {}: {e}", path.display());
                 }
                 self.toast(format!("{e:#}"), false);
             }
@@ -714,12 +742,12 @@ impl App {
         let Some(path) = resume_path() else { return };
         let Ok(bytes) = std::fs::read(&path) else { return };
         if let Err(e) = std::fs::remove_file(&path) {
-            eprintln!("could not remove {}: {e}", path.display());
+            log!("action", "couldn't remove {}: {e}", path.display());
         }
         let saved: run::Resume = match serde_json::from_slice(&bytes) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("the saved queue couldn't be read: {e}");
+                log!("action", "the saved queue couldn't be read: {e}");
                 return;
             }
         };
@@ -747,6 +775,10 @@ impl App {
         }
         let origin = saved.origin();
         let gate = self.gate_now();
+        log!("queue", "picked up after restarting as administrator, back to {origin:?}");
+        if self.page != origin {
+            log!("page", "{:?} -> {origin:?}", self.page);
+        }
         self.page = origin;
         self.set_mark_kind(mark::Kind::Healing);
         self.run = Some(run::Run::fixes(items, origin, gate));
@@ -855,6 +887,9 @@ impl App {
     }
 
     fn go(&mut self, p: Page) {
+        if self.page != p {
+            log!("page", "{:?} -> {p:?}", self.page);
+        }
         self.page = p;
         self.ui.last_tab.insert(p.place(), p);
         self.ui.scroll_top = true;
@@ -1009,10 +1044,28 @@ impl App {
                 action,
             },
         };
+        log!("dialog", "shown: {}", c.title);
         self.confirm = Some(c);
     }
 
     fn run(&mut self, ctx: &egui::Context, action: Pending) {
+        let what = match &action {
+            Pending::Fix(f, title) => format!("fix {f:?} ({title})"),
+            Pending::Undo(i, title) => format!("undo change {i} ({title})"),
+            Pending::Upgrade(id, _) => format!("update the app {id}"),
+            Pending::Scan(kind, target) => {
+                format!("{} scan{}", kind.label().to_lowercase(), target.as_ref().map(|t| format!(" of {}", t.display())).unwrap_or_default())
+            }
+            Pending::CheckUpdates => "check for app updates".into(),
+            Pending::AnalyzeDumps => "read the crash files".into(),
+            Pending::Elevate => "restart as administrator".into(),
+            Pending::DeleteData => "delete everything Bootmend saved".into(),
+            Pending::RestorePoint => "save a restore point".into(),
+            Pending::Clean(ids) => format!("clear {}", ids.join(", ")),
+            Pending::EmptyRecycleBin => "empty the Recycle Bin".into(),
+            Pending::NetCheck => "test the connection".into(),
+        };
+        log!("action", "{what}");
         match action {
             Pending::Fix(fix, title) => {
                 self.busy.insert(format!("fix:{fix:?}"));
@@ -1107,6 +1160,7 @@ impl App {
                     }
                 }
                 Progress::Failed(e) => {
+                    log!("check", "the check-up didn't finish: {e}");
                     self.check_rx = None;
                     self.run = None;
                     let reduced = self.mark.reduced;
@@ -1122,6 +1176,7 @@ impl App {
         while let Ok(j) = self.rx.try_recv() {
             match j {
                 Job::Fixed(title, r, note) => {
+                    log!("action", "fix \"{title}\" {}{}", ended(&r), note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default());
                     self.busy.retain(|b| !b.starts_with("fix:"));
                     self.history = fixes::history();
                     let note = note.map(|n| format!(" {n}")).unwrap_or_default();
@@ -1131,6 +1186,7 @@ impl App {
                     }
                 }
                 Job::RestorePoint(r) => {
+                    log!("action", "restore point {}", ended(&r));
                     self.busy.remove("restore");
                     // Saved for the queue, the queue says so; saved from the Security page, a toast does.
                     let gate = self.run.as_mut().filter(|q| q.gate == run::Gate::Saving).map(|q| {
@@ -1157,6 +1213,7 @@ impl App {
                     }
                 }
                 Job::TurnedOn(r) => {
+                    log!("action", "turning System Restore on {}", ended(&r));
                     self.history = fixes::history();
                     match r {
                         Ok(()) => {
@@ -1189,6 +1246,7 @@ impl App {
                     }
                 }
                 Job::Undone(r) => {
+                    log!("action", "undo {}", ended(&r));
                     self.busy.retain(|b| !b.starts_with("undo:"));
                     self.history = fixes::history();
                     match r {
@@ -1197,6 +1255,10 @@ impl App {
                     }
                 }
                 Job::Scanned(r) => {
+                    match &r {
+                        Ok(res) => log!("action", "{} finished with {}", res.kind, rules::plural(res.threats.len(), "threat", "threats")),
+                        Err(e) => log!("action", "the scan failed: {e}"),
+                    }
                     self.busy.remove("scan");
                     self.ui.scan_cancel = None;
                     match r {
@@ -1208,6 +1270,10 @@ impl App {
                     }
                 }
                 Job::Upgrades(r) => {
+                    match &r {
+                        Ok(list) => log!("action", "{} have updates available", rules::plural(list.len(), "app", "apps")),
+                        Err(e) => log!("action", "checking for app updates failed: {e}"),
+                    }
                     self.busy.remove("winget");
                     match r {
                         Ok(list) => {
@@ -1225,6 +1291,7 @@ impl App {
                     }
                 }
                 Job::Upgraded(id, r) => {
+                    log!("action", "update of {id} {}", ended(&r));
                     self.busy.remove(&format!("upgrade:{id}"));
                     match r {
                         Ok(_) => {
@@ -1239,6 +1306,7 @@ impl App {
                     }
                 }
                 Job::Dumps(found, errs) => {
+                    log!("action", "read {}, {} couldn't be read", rules::plural(found.len(), "crash file", "crash files"), errs.len());
                     self.busy.remove("dumps");
                     let n = found.len();
                     if !found.is_empty() {
@@ -1251,6 +1319,7 @@ impl App {
                     }
                 }
                 Job::Saved(r) => {
+                    log!("action", "saving the report {}", ended(&r));
                     self.busy.remove("report");
                     match r {
                         Ok(p) => {
@@ -1268,10 +1337,12 @@ impl App {
                 Job::RecycleEmptied(r) => self.recycle_emptied(r),
                 Job::Scheduled(every, hour, r) => self.scheduled(every, hour, r),
                 Job::Trends(t) => {
+                    log!("action", "loaded {}", rules::plural(t.len(), "trend chart", "trend charts"));
                     self.busy.remove("trends");
                     self.trends = t;
                 }
                 Job::NetChecked(c) => {
+                    log!("action", "the connection check {}", if c.down_mbps.is_some() { "finished" } else { "couldn't finish" });
                     self.busy.remove("net");
                     self.toast(
                         if c.down_mbps.is_some() { "Connection check finished." } else { "The connection check couldn't finish. The Network page says why." },
@@ -1280,6 +1351,7 @@ impl App {
                     self.net = Some(c);
                 }
                 Job::Deleted(r) => {
+                    log!("action", "deleting everything saved {}", ended(&r));
                     self.busy.remove("delete");
                     match r {
                         Ok(()) => {
@@ -1549,6 +1621,7 @@ impl App {
             decision = Some(false);
         }
         if let Some(d) = decision {
+            log!("dialog", "{}: {title}", if d { "accepted" } else { "cancelled" });
             let c = self.confirm.take();
             if let (true, Some(c)) = (d, c) {
                 self.run(ctx, c.action);
@@ -1603,7 +1676,7 @@ impl App {
             };
             let file = m.dir.join(if m.part == 0 { format!("{name}.png") } else { format!("{name}-{}.png", m.part + 1) });
             if let Err(e) = save_png(&img, &file) {
-                eprintln!("screenshot {}: {e}", file.display());
+                log!("window", "screenshot {}: {e}", file.display());
             }
             if m.more && m.part < 8 {
                 m.part += 1;

@@ -121,10 +121,18 @@ pub fn set(every: Every, hour: u8) -> Result<()> {
             xml = ps_quote(&xml),
         )
     };
-    let out = powershell(&script, Duration::from_secs(60))?;
+    let what = if every == Every::Off {
+        "removing the scheduled check-up".to_string()
+    } else {
+        format!("scheduling check-ups: {} at {}", every.label(), hour_label(hour))
+    };
+    log!("schedule", "{what}");
+    let out = powershell(&script, Duration::from_secs(60)).inspect_err(|e| log!("schedule", "failed: {e:#}"))?;
     if out.code != Some(0) {
+        log!("schedule", "failed: Task Scheduler said: {}", out.stderr.trim());
         return Err(anyhow!("Task Scheduler said: {}", out.stderr.trim()));
     }
+    log!("schedule", "{}", if every == Every::Off { "scheduled check-up removed" } else { "scheduled check-up saved" });
     Ok(())
 }
 
@@ -136,6 +144,7 @@ pub fn move_old_task(every: Every, hour: u8) -> Result<()> {
     if found.stdout.trim() != "yes" {
         return Ok(());
     }
+    log!("schedule", "moving the check-up set up under the old app name");
     if every != Every::Off {
         set(every, hour)?;
     }
@@ -149,8 +158,10 @@ pub fn move_old_task(every: Every, hour: u8) -> Result<()> {
         Duration::from_secs(60),
     )?;
     if out.code != Some(0) {
+        log!("schedule", "removing the old check-up failed: Task Scheduler said: {}", out.stderr.trim());
         return Err(anyhow!("Task Scheduler said: {}", out.stderr.trim()));
     }
+    log!("schedule", "old check-up removed");
     Ok(())
 }
 
@@ -184,8 +195,10 @@ pub fn notify(xml: &str) -> Result<()> {
     );
     let out = powershell(&script, Duration::from_secs(30))?;
     if out.code != Some(0) {
+        log!("schedule", "notification failed: {}", out.stderr.trim());
         return Err(anyhow!("Windows didn't show the notification: {}", out.stderr.trim()));
     }
+    log!("schedule", "notification shown");
     Ok(())
 }
 
@@ -196,16 +209,21 @@ pub fn prune(host: &str, keep: usize) -> Result<usize> {
     for f in &files[..extra] {
         std::fs::remove_file(f)?;
     }
+    if extra > 0 {
+        log!("history", "removed {extra} old saved check{}", if extra == 1 { "" } else { "s" });
+    }
     Ok(extra)
 }
 
 /// What `bootmend --scheduled` does: check, save, and tell the person only about new suggestions.
 pub fn run_scheduled(snap: Snapshot) -> Result<()> {
+    log!("schedule", "scheduled check-up running");
     let before = snapshot::previous(&snap.host, &snap.id).map(|p| crate::rules::evaluate(&p)).unwrap_or_default();
     snapshot::save(&snap)?;
     prune(&snap.host, KEEP)?;
     let now = crate::rules::evaluate(&snap);
     let new = new_items(&before, &now);
+    log!("schedule", "scheduled check-up finished: {} new suggestion{}", new.len(), if new.len() == 1 { "" } else { "s" });
     if !new.is_empty() {
         notify(&toast_xml(&new))?;
     }

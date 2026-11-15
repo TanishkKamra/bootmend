@@ -16,6 +16,7 @@ impl App {
     }
 
     pub(super) fn set_schedule(&mut self, ctx: &egui::Context, every: Every, hour: u8) {
+        log!("settings", "asked for check-ups {} at {}", every.label().to_lowercase(), schedule::hour_label(hour));
         self.settings.schedule_asked = true;
         self.save_settings();
         self.busy.insert("schedule".into());
@@ -24,6 +25,7 @@ impl App {
 
     pub(super) fn scheduled(&mut self, every: Every, hour: u8, r: Result<(), String>) {
         self.busy.remove("schedule");
+        log!("settings", "changing check-ups {}", super::ended(&r));
         match r {
             Ok(()) => {
                 self.settings.schedule = every;
@@ -76,6 +78,7 @@ impl App {
         });
         match pick {
             Some(Every::Off) => {
+                log!("settings", "said no to regular check-ups");
                 self.settings.schedule_asked = true;
                 self.save_settings();
             }

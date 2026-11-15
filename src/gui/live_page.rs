@@ -100,6 +100,7 @@ impl App {
             muted(ui, "Updates every two seconds while this page is open. To close an app that has stopped responding, use Task Manager.");
             ui.add_space(S2);
             if widgets::icon_button(ui, icon::OPEN, "Open Task Manager", true).clicked() {
+                log!("action", "opening Task Manager");
                 if let Err(e) = shell_open("taskmgr.exe") {
                     self.toast(format!("{e:#}"), false);
                 }

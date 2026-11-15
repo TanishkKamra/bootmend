@@ -204,7 +204,7 @@ pub fn drive_health(storage: &Value) -> Vec<DriveHealth> {
                         h.predict_failure = Some(n.critical_warning != 0);
                         h.source = "NVMe health log".into();
                     }
-                    Err(e) => eprintln!("NVMe health for disk {}: {e}", h.disk),
+                    Err(e) => log!("drives", "NVMe health for disk {} ({}) could not be read: {e:#}", h.disk, h.model),
                 }
             } else if let Some(a) = ata.iter().find(|a| a.s("Instance").is_some_and(|i| instance_matches(&i, &model))) {
                 let bytes: Vec<u8> = a.a("Data").iter().filter_map(|x| x.as_u64()).map(|x| x as u8).collect();
@@ -231,6 +231,7 @@ pub fn drive_health(storage: &Value) -> Vec<DriveHealth> {
                 h.attributes = attrs;
                 h.source = "SMART table".into();
             }
+            log!("drives", "disk {} ({}) read from: {}", h.disk, h.model, h.source);
             h
         })
         .collect()

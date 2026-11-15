@@ -118,6 +118,10 @@ impl App {
     }
 
     pub(super) fn cleanup_found(&mut self, r: Result<Found, String>) {
+        match &r {
+            Ok(f) => log!("action", "measured {}", crate::rules::plural(f.items.len(), "cleanup item", "cleanup items")),
+            Err(e) => log!("action", "measuring for cleanup failed: {e}"),
+        }
         self.busy.remove("cleanup-look");
         self.cleanup = Some(match r {
             Ok(f) => CleanupView::new(f, self.elevated),
@@ -164,11 +168,15 @@ impl App {
         for (id, r) in results {
             match &r {
                 Ok(c) => {
+                    log!("action", "cleanup {id}: freed {}, {} in use skipped", size_text(c.bytes), c.skipped);
                     freed += c.bytes;
                     skipped += c.skipped;
                     v.ticked.remove(id);
                 }
-                Err(_) => failed += 1,
+                Err(e) => {
+                    log!("action", "cleanup {id} failed: {e}");
+                    failed += 1;
+                }
             }
             v.done.insert(id, r);
         }
@@ -310,7 +318,9 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     empty_bin = widgets::secondary_enabled(ui, "Empty the Recycle Bin", !cleaning && !self.busy.contains("recycle")).clicked();
                     if widgets::icon_button(ui, icon::OPEN, "Look inside first", true).clicked() {
+                        log!("action", "opening the Recycle Bin");
                         if let Err(e) = shell_open("shell:RecycleBinFolder") {
+                            log!("toast", "{e:#}");
                             self.toasts.push((format!("{e:#}"), false, std::time::Instant::now()));
                         }
                     }
@@ -331,6 +341,7 @@ impl App {
                 ui.label("To remove it sooner, open Storage settings, then Temporary files, and tick Previous Windows installation.");
                 ui.add_space(S1);
                 if widgets::secondary(ui, "Open storage settings").clicked() {
+                    log!("action", "opening Storage settings");
                     let _ = shell_open("ms-settings:storagesense");
                 }
             });

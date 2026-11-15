@@ -123,10 +123,17 @@ fn host_dir(host: &str) -> Result<PathBuf> {
 }
 
 pub fn save(s: &Snapshot) -> Result<PathBuf> {
-    let p = host_dir(&s.host)?.join(format!("{}.json", s.id));
-    let json = serde_json::to_vec_pretty(s)?;
-    std::fs::write(&p, json).with_context(|| format!("saving {}", p.display()))?;
-    Ok(p)
+    let r = (|| {
+        let p = host_dir(&s.host)?.join(format!("{}.json", s.id));
+        let json = serde_json::to_vec_pretty(s)?;
+        std::fs::write(&p, json).with_context(|| format!("saving {}", p.display()))?;
+        Ok(p)
+    })();
+    match &r {
+        Ok(p) => log!("history", "saved check {} to {}", s.id, p.display()),
+        Err(e) => log!("history", "saving check {} failed: {e:#}", s.id),
+    }
+    r
 }
 
 /// All saved checks for this PC, oldest first.
@@ -138,8 +145,13 @@ pub fn list(host: &str) -> Result<Vec<PathBuf>> {
 }
 
 pub fn load(p: &PathBuf) -> Result<Snapshot> {
-    let b = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
-    serde_json::from_slice(&b).with_context(|| format!("parsing {}", p.display()))
+    let r = std::fs::read(p)
+        .with_context(|| format!("reading {}", p.display()))
+        .and_then(|b| serde_json::from_slice(&b).with_context(|| format!("parsing {}", p.display())));
+    if let Err(e) = &r {
+        log!("history", "loading a saved check failed: {e:#}");
+    }
+    r
 }
 
 /// The newest saved check other than `except_id`.
@@ -147,14 +159,14 @@ pub fn previous(host: &str, except_id: &str) -> Option<Snapshot> {
     let files = match list(host) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("could not list saved checks: {e}");
+            log!("history", "could not list saved checks: {e:#}");
             return None;
         }
     };
     files.iter().rev().filter(|p| !p.to_string_lossy().contains(except_id)).find_map(|p| match load(p) {
         Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("skipping unreadable saved check {}: {e}", p.display());
+        Err(_) => {
+            log!("history", "skipping unreadable saved check {}", p.display());
             None
         }
     })

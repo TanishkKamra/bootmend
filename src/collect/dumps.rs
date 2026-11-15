@@ -5,7 +5,7 @@ use crate::util::{data_dir, run_hidden};
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn cdb_path() -> Option<PathBuf> {
     ["ProgramFiles(x86)", "ProgramFiles"]
@@ -102,14 +102,19 @@ pub fn parse_analyze(text: &str) -> DumpAnalysis {
 
 /// Analyze one dump. The first run downloads matching debug symbols from Microsoft.
 pub fn analyze(cdb: &Path, dump: &Path) -> Result<DumpAnalysis> {
+    log!("dumps", "analysing crash dump {}", dump.display());
+    let t0 = Instant::now();
     let sym = format!("srv*{}*https://msdl.microsoft.com/download/symbols", data_dir("symbols")?.display());
     let d = dump.to_string_lossy().to_string();
-    let out = run_hidden(&cdb.to_string_lossy(), &["-z", &d, "-y", &sym, "-c", "!analyze -v; q"], Duration::from_secs(600))?;
+    let out = run_hidden(&cdb.to_string_lossy(), &["-z", &d, "-y", &sym, "-c", "!analyze -v; q"], Duration::from_secs(600))
+        .inspect_err(|e| log!("dumps", "could not run the debugger on {}: {e:#}", dump.display()))?;
     if out.timed_out {
+        log!("dumps", "the debugger took too long on {}", dump.display());
         return Err(anyhow!("the debugger took too long on {}", dump.display()));
     }
     let mut a = parse_analyze(&out.stdout);
     if a.code.is_empty() {
+        log!("dumps", "the debugger could not read {}", dump.display());
         return Err(anyhow!("the debugger could not read {}", dump.display()));
     }
     a.file = d;
@@ -117,6 +122,7 @@ pub fn analyze(cdb: &Path, dump: &Path) -> Result<DumpAnalysis> {
         .and_then(|m| m.modified())
         .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default();
+    log!("dumps", "analysed {} in {:.0}s: {} {}", dump.display(), t0.elapsed().as_secs_f32(), a.code, a.name);
     Ok(a)
 }
 

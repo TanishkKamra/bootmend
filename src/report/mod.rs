@@ -11,9 +11,18 @@ use std::time::Duration;
 
 pub use html::render;
 
-pub fn write_html(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
+fn save_html(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
     let snap = if hide_personal { redact::redact(s) } else { s.clone() };
     std::fs::write(out, render(&snap, hide_personal)).with_context(|| format!("saving {}", out.display()))
+}
+
+pub fn write_html(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
+    let r = save_html(s, hide_personal, out);
+    match &r {
+        Ok(()) => log!("report", "web page report written to {} (personal details hidden: {})", out.display(), hide_personal),
+        Err(e) => log!("report", "web page report failed: {e:#}"),
+    }
+    r
 }
 
 fn edge() -> Option<PathBuf> {
@@ -26,11 +35,13 @@ fn edge() -> Option<PathBuf> {
 
 /// Render the HTML report to PDF with Microsoft Edge in headless mode.
 pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
-    let edge =
-        edge().ok_or_else(|| anyhow!("Saving as PDF uses Microsoft Edge, which wasn't found. Save as a web page instead and print it from any browser."))?;
+    let edge = edge().ok_or_else(|| {
+        log!("report", "PDF report failed: Microsoft Edge was not found");
+        anyhow!("Saving as PDF uses Microsoft Edge, which wasn't found. Save as a web page instead and print it from any browser.")
+    })?;
     let tmp = data_dir("tmp")?;
     let html = tmp.join(format!("report-{}.html", s.id));
-    write_html(s, hide_personal, &html)?;
+    save_html(s, hide_personal, &html).inspect_err(|e| log!("report", "PDF report failed: {e:#}"))?;
     let profile = tmp.join("edge-print-profile");
     let url = format!("file:///{}", html.to_string_lossy().replace('\\', "/"));
     let r = run_hidden(
@@ -47,12 +58,14 @@ pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
         Duration::from_secs(120),
     );
     if let Err(e) = std::fs::remove_file(&html) {
-        eprintln!("could not remove temporary report: {e}");
+        log!("report", "could not remove temporary report: {e}");
     }
-    r?;
+    r.inspect_err(|e| log!("report", "PDF report failed: {e:#}"))?;
     if out.is_file() {
+        log!("report", "PDF report written to {} (personal details hidden: {})", out.display(), hide_personal);
         Ok(())
     } else {
+        log!("report", "PDF report failed: Edge did not produce the file");
         Err(anyhow!("Edge did not produce the PDF"))
     }
 }

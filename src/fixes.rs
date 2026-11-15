@@ -3,7 +3,7 @@
 use crate::util::{data_dir, powershell, ps_quote};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Fix {
@@ -390,7 +390,7 @@ pub fn history() -> Vec<HistoryEntry> {
     let Ok(p) = history_path() else { return vec![] };
     match std::fs::read(&p) {
         Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
-            eprintln!("history file unreadable ({e}); starting a new one");
+            log!("history", "history file unreadable ({e}); starting a new one");
             vec![]
         }),
         Err(_) => vec![],
@@ -422,18 +422,30 @@ fn run_ps(body: &str) -> Result<()> {
 /// Apply a fix and record how to undo it.
 pub fn apply(fix: &Fix, title: &str) -> Result<()> {
     let (apply, undo) = fix.scripts();
-    run_ps(&apply)?;
+    log!("fix", "applying \"{}\"", title);
+    let t0 = Instant::now();
+    run_ps(&apply).inspect_err(|e| log!("fix", "\"{}\" failed: {e:#}", title))?;
     let mut h = history();
     h.push(HistoryEntry { when: crate::util::now_stamp(), title: title.to_string(), fix: fix.clone(), undo_script: undo, undone: None });
-    save_history(&h)
+    // The change is already made, so the log says so when only the undo record is missing.
+    save_history(&h).inspect_err(|e| log!("fix", "\"{}\" was applied but its undo step could not be saved: {e:#}", title))?;
+    log!("fix", "\"{}\" done in {:.1}s", title, t0.elapsed().as_secs_f32());
+    Ok(())
 }
 
 /// Save a System Restore point. Windows normally allows one a day, so this checks that one was really made.
 pub fn restore_point(description: &str) -> Result<()> {
     let d = ps_quote(description);
-    run_ps(&format!(
+    log!("restore", "creating a restore point");
+    let t0 = Instant::now();
+    let r = run_ps(&format!(
         "$t = Get-Date\nCheckpoint-Computer -Description {d} -RestorePointType MODIFY_SETTINGS -WarningAction SilentlyContinue\n$l = Get-ComputerRestorePoint | Select-Object -Last 1\n$w = if ($l) {{ [Management.ManagementDateTimeConverter]::ToDateTime($l.CreationTime) }} else {{ $null }}\nif (-not $w -or $w -lt $t.AddHours(-24)) {{ throw \"Windows didn't save a restore point. System Restore may be off for this drive.\" }}\nif ($w -lt $t.AddMinutes(-1)) {{ throw 'Windows skipped it because it already saved a restore point in the last 24 hours' }}"
-    ))
+    ));
+    match &r {
+        Ok(()) => log!("restore", "restore point saved in {:.1}s", t0.elapsed().as_secs_f32()),
+        Err(e) => log!("restore", "restore point failed: {e:#}"),
+    }
+    r
 }
 
 /// Undo the history entry at `index`.
@@ -443,9 +455,13 @@ pub fn undo(index: usize) -> Result<()> {
     if e.undone.is_some() {
         return Err(anyhow!("that change was already undone"));
     }
-    run_ps(&e.undo_script)?;
+    let title = e.title.clone();
+    log!("undo", "undoing \"{}\"", title);
+    run_ps(&e.undo_script).inspect_err(|e| log!("undo", "\"{}\" failed: {e:#}", title))?;
     e.undone = Some(crate::util::now_stamp());
-    save_history(&h)
+    save_history(&h).inspect_err(|e| log!("undo", "\"{}\" was undone but the history could not be saved: {e:#}", title))?;
+    log!("undo", "\"{}\" undone", title);
+    Ok(())
 }
 
 #[cfg(test)]

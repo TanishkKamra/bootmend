@@ -47,6 +47,16 @@ bootmend --screenshots <folder> [--theme light|dark] [--size WxH]
 
 Saved checks live in `%LOCALAPPDATA%\Bootmend\snapshots\<PC name>\`.
 
+Everything the app does is written to a log, one file per day, in a `logs` folder beside `bootmend.exe` (or `%LOCALAPPDATA%\Bootmend\logs` when that folder can't be written to). It records:
+
+- each check step and how long it took
+- every program the app runs, with its exit code
+- fixes, undos, scans and schedule changes
+- page visits, settings changes and every message shown
+- crashes, with where they happened
+
+The Windows username, home folder and PC name are replaced with placeholders. App, file and extension names stay in, so look through a log before sharing it. Logs older than 14 days are deleted, and a day's file stops growing at 5 MB. Settings has an "Open the log" link.
+
 Bootmend used to be called rigscan. The first time it runs, it moves the old `%LOCALAPPDATA%\rigscan` folder (saved checks, settings and undo history) to the new name, and moves a regular check-up set up under the old name over too.
 
 ## Test

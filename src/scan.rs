@@ -66,7 +66,10 @@ pub fn parse_output(text: &str) -> (Vec<String>, Vec<String>) {
 
 /// Run a scan. Blocks until it finishes or `cancel` is set.
 pub fn run(kind: Kind, target: Option<&Path>, exclusions: &[String], cancel: Arc<AtomicBool>) -> Result<ScanResult> {
-    let exe = mpcmdrun().ok_or_else(|| anyhow!("Microsoft Defender's scanner was not found on this PC"))?;
+    let exe = mpcmdrun().ok_or_else(|| {
+        log!("scan", "{} could not start: Defender's scanner was not found", kind.label());
+        anyhow!("Microsoft Defender's scanner was not found on this PC")
+    })?;
     let mut args: Vec<String> = vec!["-Scan".into()];
     let target_s = target.map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
     match kind {
@@ -74,11 +77,13 @@ pub fn run(kind: Kind, target: Option<&Path>, exclusions: &[String], cancel: Arc
         Kind::Full => args.extend(["-ScanType".into(), "2".into()]),
         Kind::Folder => {
             if target_s.is_empty() {
+                log!("scan", "folder check could not start: no folder chosen");
                 return Err(anyhow!("choose a folder or drive first"));
             }
             args.extend(["-ScanType".into(), "3".into(), "-File".into(), target_s.clone(), "-DisableRemediation".into()]);
         }
     }
+    log!("scan", "{} started on {}", kind.label(), if target_s.is_empty() { "this PC" } else { &target_s });
     let started = chrono::Local::now();
     let t0 = Instant::now();
     let mut child = Command::new(&exe)
@@ -88,7 +93,8 @@ pub fn run(kind: Kind, target: Option<&Path>, exclusions: &[String], cancel: Arc
         .stderr(Stdio::null())
         .creation_flags(crate::util::CREATE_NO_WINDOW)
         .spawn()
-        .context("starting Microsoft Defender's scanner")?;
+        .context("starting Microsoft Defender's scanner")
+        .inspect_err(|e| log!("scan", "{} could not start: {e:#}", kind.label()))?;
     let mut so = child.stdout.take().ok_or_else(|| anyhow!("no output from the scanner"))?;
     let reader = std::thread::spawn(move || {
         let mut b = Vec::new();
@@ -101,13 +107,14 @@ pub fn run(kind: Kind, target: Option<&Path>, exclusions: &[String], cancel: Arc
         }
         if cancel.load(Ordering::Relaxed) {
             stopped = true;
+            log!("scan", "{} cancelled", kind.label());
             if let Err(e) = child.kill() {
-                eprintln!("could not stop the scan: {e}");
+                log!("scan", "could not stop the scan: {e}");
             }
             // Quick and full scans keep running inside Defender's service unless cancelled there too.
             if kind != Kind::Folder {
                 if let Err(e) = crate::util::run_hidden(&exe.to_string_lossy(), &["-Scan", "-Cancel"], Duration::from_secs(30)) {
-                    eprintln!("could not cancel the Defender scan: {e}");
+                    log!("scan", "could not cancel the Defender scan: {e:#}");
                 }
             }
             break child.wait().ok();
@@ -135,6 +142,15 @@ pub fn run(kind: Kind, target: Option<&Path>, exclusions: &[String], cancel: Arc
     } else {
         format!("The scanner stopped with code {}.", code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into()))
     };
+    log!(
+        "scan",
+        "{} finished in {:.1} min, exit code {}: {}{}",
+        kind.label(),
+        t0.elapsed().as_secs_f64() / 60.0,
+        code.map(|c| c.to_string()).unwrap_or_else(|| "none".into()),
+        message,
+        if threats.is_empty() { String::new() } else { format!(" ({})", threats.join(", ")) }
+    );
     Ok(ScanResult {
         kind: kind.label().into(),
         target: if target_s.is_empty() { "This PC".into() } else { target_s },

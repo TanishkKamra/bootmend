@@ -115,6 +115,7 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
+        .inspect_err(|e| log!("run", "couldn't start {program}: {e}"))
         .with_context(|| format!("starting {program}"))?;
     // Drain pipes on threads so a chatty child can't block on a full pipe.
     let mut so = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
@@ -136,7 +137,7 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
         if start.elapsed() > timeout {
             timed_out = true;
             if let Err(e) = child.kill() {
-                eprintln!("could not stop {program} after timeout: {e}");
+                log!("run", "couldn't stop {program} after it took too long: {e}");
             }
             break child.wait().ok();
         }
@@ -148,7 +149,18 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
             _ => String::new(),
         }
     };
-    Ok(Output { stdout: decode(t_out.join()), stderr: decode(t_err.join()), code: status.and_then(|s| s.code()), timed_out })
+    let out = Output { stdout: decode(t_out.join()), stderr: decode(t_err.join()), code: status.and_then(|s| s.code()), timed_out };
+    let took = start.elapsed().as_secs_f32();
+    let cmd = format!("{program} {}", args.join(" "));
+    if timed_out {
+        log!("run", "{cmd} was stopped after {took:.1} s for taking too long");
+    } else if out.code == Some(0) {
+        log!("run", "{cmd} finished in {took:.1} s");
+    } else {
+        let err = out.stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("no error text");
+        log!("run", "{cmd} ended with code {:?} after {took:.1} s: {err}", out.code);
+    }
+    Ok(out)
 }
 
 /// PowerShell and Windows tools mix UTF-8, UTF-16LE and the OEM code page. Handle the first two.
@@ -172,7 +184,7 @@ pub fn powershell(script: &str, timeout: Duration) -> Result<Output> {
     let f = file.to_string_lossy().to_string();
     let out = run_hidden("powershell.exe", &["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", &f], timeout);
     if let Err(e) = std::fs::remove_file(&file) {
-        eprintln!("could not remove temp script {}: {e}", file.display());
+        log!("run", "couldn't remove the temporary script {}: {e}", file.display());
     }
     out
 }

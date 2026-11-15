@@ -4,7 +4,7 @@
 use crate::snapshot::AppUpgrade;
 use crate::util::run_hidden;
 use anyhow::{anyhow, Result};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn available() -> bool {
     std::env::var_os("LOCALAPPDATA").map(|l| std::path::PathBuf::from(l).join(r"Microsoft\WindowsApps\winget.exe").exists()).unwrap_or(false)
@@ -42,26 +42,35 @@ pub fn parse_upgrades(text: &str) -> Vec<AppUpgrade> {
 }
 
 pub fn check() -> Result<Vec<AppUpgrade>> {
+    log!("winget", "checking for app updates");
+    let t0 = Instant::now();
     let out = run_hidden(
         "winget",
         &["upgrade", "--include-unknown", "--source", "winget", "--accept-source-agreements", "--disable-interactivity"],
         Duration::from_secs(180),
-    )?;
+    )
+    .inspect_err(|e| log!("winget", "update check failed: {e:#}"))?;
     if out.timed_out {
+        log!("winget", "update check failed: winget took too long to answer");
         return Err(anyhow!("winget took too long to answer"));
     }
     let list = parse_upgrades(&out.stdout);
     if list.is_empty() && out.code != Some(0) && !out.stdout.contains("No installed package") {
+        log!("winget", "update check failed: winget stopped with code {:?}", out.code);
         return Err(anyhow!("winget could not check for updates (code {:?})", out.code));
     }
+    log!("winget", "update check found {} app{} to update in {:.1}s", list.len(), if list.len() == 1 { "" } else { "s" }, t0.elapsed().as_secs_f32());
     Ok(list)
 }
 
 /// Update one app silently through winget.
 pub fn upgrade(id: &str) -> Result<String> {
     if id.is_empty() || id.chars().any(|c| c.is_whitespace() || c == '"') {
+        log!("winget", "refused to update an app id that does not look right");
         return Err(anyhow!("that app id does not look right"));
     }
+    log!("winget", "updating {id}");
+    let t0 = Instant::now();
     let out = run_hidden(
         "winget",
         &[
@@ -77,11 +86,14 @@ pub fn upgrade(id: &str) -> Result<String> {
             "--disable-interactivity",
         ],
         Duration::from_secs(900),
-    )?;
+    )
+    .inspect_err(|e| log!("winget", "updating {id} failed: {e:#}"))?;
     if out.code == Some(0) {
+        log!("winget", "{id} updated in {:.0}s", t0.elapsed().as_secs_f32());
         Ok(format!("{id} is up to date"))
     } else {
         let last = out.stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no details").trim().to_string();
+        log!("winget", "updating {id} failed: {last}");
         Err(anyhow!("winget could not update {id}: {last}"))
     }
 }

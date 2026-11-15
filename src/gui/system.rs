@@ -35,7 +35,11 @@ pub fn animations_on() -> bool {
     match read {
         Ok(()) => on.as_bool(),
         Err(e) => {
-            eprintln!("couldn't read the Animation effects setting, so motion stays on: {e}");
+            // Read about once a second, so only the first failure is worth a line.
+            static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !TOLD.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log!("window", "couldn't read the Animation effects setting, so motion stays on: {e}");
+            }
             true
         }
     }
@@ -96,18 +100,18 @@ impl Taskbar {
             // The window has usually set COM up already, in which case this only confirms it.
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             if hr.is_err() && hr != RPC_E_CHANGED_MODE {
-                eprintln!("taskbar progress is off: COM wouldn't start ({hr:?})");
+                log!("window", "taskbar progress is off: COM wouldn't start ({hr:?})");
                 return None;
             }
             let list: ITaskbarList3 = match CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("taskbar progress is off: {e}");
+                    log!("window", "taskbar progress is off: {e}");
                     return None;
                 }
             };
             if let Err(e) = list.HrInit() {
-                eprintln!("taskbar progress is off: {e}");
+                log!("window", "taskbar progress is off: {e}");
                 return None;
             }
             Some(Taskbar { list, hwnd, shown: None, broken: false })
@@ -133,7 +137,7 @@ impl Taskbar {
         match r {
             Ok(()) => self.shown = v,
             Err(e) => {
-                eprintln!("taskbar progress stopped: {e}");
+                log!("window", "taskbar progress stopped: {e}");
                 self.broken = true;
             }
         }

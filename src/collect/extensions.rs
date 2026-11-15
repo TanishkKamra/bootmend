@@ -34,6 +34,15 @@ pub fn collect() -> Vec<Extension> {
         firefox(&r.join(r"Mozilla\Firefox\Profiles"), &mut out);
     }
     out.sort_by(|a, b| (&a.browser, a.name.to_lowercase()).cmp(&(&b.browser, b.name.to_lowercase())));
+    let mut per: Vec<(&str, usize)> = Vec::new();
+    for e in &out {
+        match per.last_mut() {
+            Some((b, n)) if *b == e.browser => *n += 1,
+            _ => per.push((&e.browser, 1)),
+        }
+    }
+    let per: Vec<String> = per.iter().map(|(b, n)| format!("{b} {n}")).collect();
+    log!("extensions", "found {} browser extension{} ({})", out.len(), if out.len() == 1 { "" } else { "s" }, per.join(", "));
     out
 }
 
@@ -72,7 +81,11 @@ pub fn manage_target(e: &Extension) -> Option<(&'static str, String)> {
 pub fn open_manage(e: &Extension) -> anyhow::Result<()> {
     let (exe, url) = manage_target(e).ok_or_else(|| anyhow::anyhow!("Bootmend doesn't know how to open {}", e.browser))?;
     let params = if e.profile_dir.is_empty() { url } else { format!("--profile-directory=\"{}\" {url}", e.profile_dir) };
-    crate::util::shell_run(exe, &params).map_err(|_| anyhow::anyhow!("Windows couldn't open {}. Open it yourself and look under Extensions.", e.browser))
+    log!("extensions", "opening the page for {} in {}", e.name, e.browser);
+    crate::util::shell_run(exe, &params).map_err(|err| {
+        log!("extensions", "could not open {}: {err:#}", e.browser);
+        anyhow::anyhow!("Windows couldn't open {}. Open it yourself and look under Extensions.", e.browser)
+    })
 }
 
 /// Extension settings live in both Preferences and Secure Preferences; merge them.

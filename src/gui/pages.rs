@@ -221,6 +221,7 @@ impl App {
                     Action::Fix(_) => {}
                     Action::Open { label, target } => {
                         if widgets::icon_button(ui, icon::OPEN, label, true).clicked() {
+                            log!("action", "opening {}", target);
                             if let Err(e) = shell_open(target) {
                                 self.toast(format!("{e:#}"), false);
                             }
@@ -496,6 +497,7 @@ impl App {
                     self.fix_button_as(ui, &Fix::EnableSystemProtection, "System Restore is off", Area::Security, true);
                 }
                 if widgets::icon_button(ui, icon::OPEN, "Open System Restore", true).clicked() {
+                    log!("action", "opening rstrui.exe");
                     if let Err(e) = shell_open("rstrui.exe") {
                         self.toast(format!("{e:#}"), false);
                     }
@@ -557,6 +559,7 @@ impl App {
                     ("Location settings", "ms-settings:privacy-location"),
                 ] {
                     if widgets::icon_button(ui, icon::OPEN, label, true).clicked() {
+                        log!("action", "opening {}", target);
                         if let Err(e) = shell_open(target) {
                             self.toast(format!("{e:#}"), false);
                         }
@@ -650,6 +653,7 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.ui.search).hint_text("Search apps").desired_width(ui.available_width().min(280.0)));
                 if ui.link("Open Installed apps in Settings").clicked() {
+                    log!("action", "opening ms-settings:appsfeatures");
                     if let Err(e) = shell_open("ms-settings:appsfeatures") {
                         self.toast(format!("{e:#}"), false);
                     }
@@ -965,6 +969,7 @@ impl App {
                     };
                     if setting(ui, &title, &detail, |ui| widgets::secondary(ui, "Stop").clicked()) {
                         if let Some(c) = &self.ui.scan_cancel {
+                            log!("action", "asked to stop the {}", self.ui.scan_label.to_lowercase());
                             c.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
@@ -1024,6 +1029,7 @@ impl App {
                 if !r.threats.is_empty() {
                     ui.add_space(S2);
                     if widgets::icon_button(ui, icon::OPEN, "Open Windows Security", true).clicked() {
+                        log!("action", "opening windowsdefender://threat");
                         if let Err(e) = shell_open("windowsdefender://threat") {
                             self.toast(format!("{e:#}"), false);
                         }
@@ -1086,6 +1092,7 @@ impl App {
             if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
                 match crate::util::data_dir("") {
                     Ok(d) => {
+                        log!("action", "opening {}", &d.to_string_lossy());
                         if let Err(e) = shell_open(&d.to_string_lossy()) {
                             self.toast(format!("{e:#}"), false);
                         }
@@ -1103,7 +1110,9 @@ impl App {
         card(ui, |ui| {
             ui.label("The report includes the suggestions, hardware details, drive health, security settings and the list of apps and extensions. It's saved only where you choose.");
             ui.add_space(S3);
-            ui.checkbox(&mut self.ui.hide_personal, "Hide personal details");
+            if ui.checkbox(&mut self.ui.hide_personal, "Hide personal details").changed() {
+                log!("settings", "hide personal details in the report turned {}", if self.ui.hide_personal { "on" } else { "off" });
+            }
             small(
                 ui,
                 "Removes serial numbers, network addresses, the PC name, account names and email addresses. Keep this on if you'll send the report to someone.",
@@ -1119,6 +1128,7 @@ impl App {
                         if let Some(path) = rfd::FileDialog::new().set_title("Save the report").set_file_name(&name).add_filter(filter, &[ext]).save_file() {
                             let s2 = snap.clone();
                             let hide = self.ui.hide_personal;
+                            log!("action", "saving the report as {ext} to {}{}", path.display(), if hide { ", personal details hidden" } else { "" });
                             self.busy.insert("report".into());
                             self.spawn(ui.ctx(), move || {
                                 let r = if pdf { crate::report::write_pdf(&s2, hide, &path) } else { crate::report::write_html(&s2, hide, &path) };
@@ -1137,6 +1147,7 @@ impl App {
                 ui.horizontal(|ui| {
                     small(ui, format!("Last saved: {}", path.display()));
                     if ui.link("Open it").clicked() {
+                        log!("action", "opening {}", &path.to_string_lossy());
                         if let Err(e) = shell_open(&path.to_string_lossy()) {
                             self.toast(format!("{e:#}"), false);
                         }
@@ -1152,7 +1163,28 @@ impl App {
         self.schedule_setting(ui);
         self.appearance(ui);
         self.privacy(ui);
-        about(ui);
+        if about(ui) {
+            self.open_log();
+        }
+    }
+
+    /// Opens the folder the log is kept in, for someone who's been asked to send it.
+    fn open_log(&mut self) {
+        log!("action", "pressed Open the log");
+        let opened = match crate::log::dir().map(|d| shell_open(&d.to_string_lossy())) {
+            Some(Ok(())) => true,
+            Some(Err(e)) => {
+                log!("action", "couldn't open the log folder: {e:#}");
+                false
+            }
+            None => {
+                log!("action", "couldn't open the log folder because logging never started");
+                false
+            }
+        };
+        if !opened {
+            self.toast("Couldn't open the log folder.", false);
+        }
     }
 
     fn appearance(&mut self, ui: &mut Ui) {
@@ -1187,6 +1219,7 @@ impl App {
             ui.separator();
             setting(ui, "Mode and transparency effects", "Bootmend follows the light or dark mode and the transparency effects set in Windows.", |ui| {
                 if widgets::icon_button(ui, icon::OPEN, "Colour settings", true).clicked() {
+                    log!("action", "opening ms-settings:colors");
                     if let Err(e) = shell_open("ms-settings:colors") {
                         self.toast(format!("Windows Settings didn't open: {e:#}"), false);
                     }
@@ -1224,6 +1257,7 @@ impl App {
             ui.horizontal(|ui| {
                 if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
                     if let Ok(d) = crate::util::data_dir("") {
+                        log!("action", "opening {}", &d.to_string_lossy());
                         if let Err(e) = shell_open(&d.to_string_lossy()) {
                             self.toast(format!("{e:#}"), false);
                         }
@@ -1654,7 +1688,9 @@ fn network(ui: &mut Ui, snap: &Snapshot) {
     }
 }
 
-fn about(ui: &mut Ui) {
+/// Whether the quiet "Open the log" link was pressed.
+fn about(ui: &mut Ui) -> bool {
+    let mut open_log = false;
     section(ui, "About");
     card(ui, |ui| {
         ui.label(RichText::new(format!("Bootmend {}", env!("CARGO_PKG_VERSION"))).text_style(theme::title()));
@@ -1665,7 +1701,11 @@ fn about(ui: &mut Ui) {
             egui::Label::new("Every check is a small, readable script built into the app, and every fix shows exactly what it changes before it runs.").wrap(),
         );
         ui.add_space(S3);
-        small(ui, "MIT licence. Built with Rust and egui.");
+        ui.horizontal_wrapped(|ui| {
+            small(ui, "MIT licence. Built with Rust and egui.");
+            open_log = ui.link(RichText::new("Open the log").small()).clicked();
+        });
     });
     ui.add_space(S5);
+    open_log
 }

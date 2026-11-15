@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use std::collections::HashSet;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
@@ -554,15 +554,41 @@ pub fn recycle_bin() -> Option<(u64, u64)> {
 pub fn empty_recycle_bin() -> Result<()> {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::{SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND};
-    if recycle_bin().is_some_and(|(_, n)| n == 0) {
+    let before = recycle_bin();
+    if before.is_some_and(|(_, n)| n == 0) {
+        log!("cleanup", "recycle bin was already empty");
         return Ok(());
     }
-    unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) }
-        .context("Windows couldn't empty the Recycle Bin")
+    let r = unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) }
+        .context("Windows couldn't empty the Recycle Bin");
+    match &r {
+        Ok(()) => log!("cleanup", "emptied the recycle bin ({} MB)", before.map_or(0, |(b, _)| b) / 1_000_000),
+        Err(e) => log!("cleanup", "emptying the recycle bin failed: {e:#}"),
+    }
+    r
 }
 
 /// Clear one item. Apps listed in `close_first` must be closed; the caller checks with `running`.
 pub fn clean(item: &Item, system_drive: &Path) -> Result<Cleaned> {
+    log!("cleanup", "cleaning \"{}\"", item.title);
+    let t0 = Instant::now();
+    let r = clean_item(item, system_drive);
+    match &r {
+        Ok(c) => log!(
+            "cleanup",
+            "freed {} MB from \"{}\" in {:.1}s, {} file{} skipped",
+            c.bytes / 1_000_000,
+            item.title,
+            t0.elapsed().as_secs_f32(),
+            c.skipped,
+            if c.skipped == 1 { "" } else { "s" }
+        ),
+        Err(e) => log!("cleanup", "\"{}\" failed: {e:#}", item.title),
+    }
+    r
+}
+
+fn clean_item(item: &Item, system_drive: &Path) -> Result<Cleaned> {
     match &item.how {
         How::Files { roots, only } => Ok(clean_files(roots, *only, SystemTime::now())),
         How::Recycle(files) => {

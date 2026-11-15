@@ -25,10 +25,13 @@ pub fn relaunch_as_admin(args: &str) -> Result<()> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     let exe = std::env::current_exe()?;
+    log!("admin", "asking Windows to restart Bootmend as administrator");
     let r = unsafe { ShellExecuteW(None, &HSTRING::from("runas"), &HSTRING::from(exe.as_os_str()), &HSTRING::from(args), None, SW_SHOWNORMAL) };
     if r.0 as isize > 32 {
+        log!("admin", "administrator restart accepted");
         Ok(())
     } else {
+        log!("admin", "administrator restart declined or failed (code {})", r.0 as isize);
         Err(anyhow!("Windows did not start Bootmend as administrator. The prompt may have been cancelled."))
     }
 }

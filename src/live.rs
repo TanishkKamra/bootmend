@@ -104,6 +104,7 @@ pub struct Monitor {
 impl Drop for Monitor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        log!("live", "live monitor stopped");
     }
 }
 
@@ -111,6 +112,7 @@ impl Monitor {
     pub fn start(on_sample: impl Fn() + Send + 'static) -> Monitor {
         let data = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
+        log!("live", "live monitor started");
         let (d, s) = (data.clone(), stop.clone());
         std::thread::spawn(move || sample_loop(d, s, on_sample));
         Monitor { data, stop }

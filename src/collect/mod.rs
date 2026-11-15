@@ -61,9 +61,17 @@ pub fn run_section(key: &str, body: &str, timeout: Duration) -> Result<Value> {
 
 /// Collect a full snapshot. Blocks; call from a background thread.
 pub fn collect(tx: Sender<Progress>) {
+    let started = std::time::Instant::now();
+    log!("check", "started");
     match collect_inner(&tx) {
-        Ok(s) => send(&tx, Progress::Finished(Box::new(s))),
-        Err(e) => send(&tx, Progress::Failed(format!("{e:#}"))),
+        Ok(s) => {
+            log!("check", "finished in {:.0} s with {} parts it couldn't read", started.elapsed().as_secs_f32(), s.errors.len());
+            send(&tx, Progress::Finished(Box::new(s)))
+        }
+        Err(e) => {
+            log!("check", "didn't finish: {e:#}");
+            send(&tx, Progress::Failed(format!("{e:#}")))
+        }
     }
 }
 
@@ -85,7 +93,12 @@ fn collect_inner(tx: &Sender<Progress>) -> Result<Snapshot> {
             .map(|(st, body)| {
                 let tx = tx.clone();
                 sc.spawn(move || {
+                    let t = std::time::Instant::now();
                     let r = run_section(st.key, body, Duration::from_secs(st.timeout_s));
+                    match &r {
+                        Ok(_) => log!("check", "{} done in {:.1} s", st.key, t.elapsed().as_secs_f32()),
+                        Err(e) => log!("check", "{} incomplete after {:.1} s: {e:#}", st.key, t.elapsed().as_secs_f32()),
+                    }
                     send(&tx, Progress::StepDone { key: st.key, ok: r.is_ok() });
                     (st.key, r)
                 })
@@ -93,18 +106,25 @@ fn collect_inner(tx: &Sender<Progress>) -> Result<Snapshot> {
             .collect();
         let ext = sc.spawn(|| {
             let e = extensions::collect();
+            log!("check", "extensions done: {} found", e.len());
             send(tx, Progress::StepDone { key: "extensions", ok: true });
             e
         });
         for h in handles {
             match h.join() {
                 Ok(r) => sections.push(r),
-                Err(_) => snap.errors.push("A check stopped unexpectedly".into()),
+                Err(_) => {
+                    log!("check", "a step crashed");
+                    snap.errors.push("A check stopped unexpectedly".into())
+                }
             }
         }
         match ext.join() {
             Ok(e) => snap.extensions = e,
-            Err(_) => snap.errors.push("Reading browser extensions stopped unexpectedly".into()),
+            Err(_) => {
+                log!("check", "reading browser extensions crashed");
+                snap.errors.push("Reading browser extensions stopped unexpectedly".into())
+            }
         }
     });
 
@@ -117,6 +137,7 @@ fn collect_inner(tx: &Sender<Progress>) -> Result<Snapshot> {
             }
         };
         for e in v.strs("errors") {
+            log!("check", "{key} couldn't read a part: {e}");
             snap.errors.push(format!("{key}: {e}"));
         }
         match key {
@@ -131,6 +152,7 @@ fn collect_inner(tx: &Sender<Progress>) -> Result<Snapshot> {
     }
 
     snap.drives = smart::drive_health(&snap.storage);
+    log!("check", "drive health read for {} drives", snap.drives.len());
     send(tx, Progress::StepDone { key: "drives", ok: true });
 
     snap.host = snap.system.g("device").s("Hostname").or_else(|| std::env::var("COMPUTERNAME").ok()).unwrap_or_else(|| "this-pc".into());

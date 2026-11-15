@@ -136,6 +136,30 @@ fn dns_lookup(name: &str) -> Result<f64> {
 
 /// Runs the whole check. `router` is the default gateway, when Windows reported one.
 pub fn run(router: Option<Ipv4Addr>) -> NetCheck {
+    log!("net", "connection check started");
+    let t0 = Instant::now();
+    let c = check(router);
+    let ms = |v: Option<f64>| v.map_or("n/a".to_string(), |v| format!("{v:.0} ms"));
+    let mbps = |v: Option<f64>| v.map_or("n/a".to_string(), |v| format!("{v:.0} Mbps"));
+    log!(
+        "net",
+        "connection check finished in {:.0}s: router {} ({} of {} pings lost), dns {}, internet {}, down {}, up {}",
+        t0.elapsed().as_secs_f32(),
+        ms(c.router_ms),
+        c.router_lost,
+        c.router_sent,
+        ms(c.dns_ms),
+        ms(c.internet_ms),
+        mbps(c.down_mbps),
+        mbps(c.up_mbps)
+    );
+    for p in &c.problems {
+        log!("net", "problem: {p}");
+    }
+    c
+}
+
+fn check(router: Option<Ipv4Addr>) -> NetCheck {
     let mut c = NetCheck::default();
     if let Some(r) = router {
         c.router_sent = 10;

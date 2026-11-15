@@ -1,5 +1,8 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+#[macro_use]
+mod log;
+
 mod cleanup;
 mod collect;
 mod diff;
@@ -97,18 +100,9 @@ fn collect_now() -> Result<snapshot::Snapshot> {
     }
 }
 
-/// Work that runs without a window has nowhere to show errors, so they go to a small log next to the saved checks.
+/// Work that runs without a window has nowhere to show errors, so they go to the log.
 fn log_error(e: &anyhow::Error) {
-    if let Ok(d) = util::data_dir("") {
-        let line = format!("{} {e:#}\n", util::now_stamp());
-        let log = d.join("check-up-errors.txt");
-        let old = std::fs::read_to_string(&log).unwrap_or_default();
-        // Keep only the recent end so the log never grows large.
-        let keep: String = old.lines().rev().take(50).collect::<Vec<_>>().into_iter().rev().map(|l| format!("{l}\n")).collect();
-        if let Err(w) = std::fs::write(&log, keep + &line) {
-            eprintln!("{e:#} (and the log couldn't be written: {w})");
-        }
-    }
+    log!("error", "{e:#}");
 }
 
 fn scheduled() {
@@ -119,10 +113,14 @@ fn scheduled() {
 
 /// The app used to be called rigscan. The first time it runs under the new name, its saved checks
 /// move to the new folder, and check-ups set up under the old name move over in the background.
-fn move_from_old_name() {
-    let Some(base) = std::env::var_os("LOCALAPPDATA") else { return };
-    match util::move_old_data(std::path::Path::new(&base)) {
-        Ok(true) => {
+fn move_from_old_name() -> Option<Result<bool>> {
+    std::env::var_os("LOCALAPPDATA").map(|base| util::move_old_data(std::path::Path::new(&base)))
+}
+
+fn after_move(moved: Option<Result<bool>>) {
+    match moved {
+        Some(Ok(true)) => {
+            log!("app", "moved saved checks, settings and undo history over from the old rigscan folder");
             std::thread::spawn(|| {
                 let (every, hour) = gui::saved_schedule();
                 if let Err(e) = schedule::move_old_task(every, hour) {
@@ -130,8 +128,8 @@ fn move_from_old_name() {
                 }
             });
         }
-        Ok(false) => {}
-        Err(e) => log_error(&e),
+        Some(Ok(false)) | None => {}
+        Some(Err(e)) => log_error(&e),
     }
 }
 
@@ -148,20 +146,34 @@ fn headless(out: PathBuf, pdf: bool, hide: bool) -> Result<()> {
     } else {
         report::write_html(&snap, hide, &path)?;
     }
+    log!("report", "saved {}", path.display());
     println!("Saved {}", path.display());
     Ok(())
 }
 
 fn main() {
+    // The move only runs while the new folder doesn't exist yet, and starting the log can create it.
+    let moved = move_from_old_name();
+    log::init();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
+            log!("app", "couldn't read the command line: {e}");
             console();
             eprintln!("{e}\n\n{HELP}");
             std::process::exit(2);
         }
     };
-    move_from_old_name();
+    let mode = match () {
+        _ if args.scheduled => "a scheduled check-up",
+        _ if args.report.is_some() => "a check without a window",
+        _ if args.screenshots.is_some() => "screenshots",
+        _ if args.resume => "the window, carrying on with fixes",
+        _ => "the window",
+    };
+    let admin = if elevate::is_elevated() { " as administrator" } else { "" };
+    log!("app", "Bootmend {} started{admin} for {mode}", env!("CARGO_PKG_VERSION"));
+    after_move(moved);
     if args.scheduled {
         scheduled();
         return;
@@ -169,6 +181,7 @@ fn main() {
     if let Some(out) = args.report {
         console();
         if let Err(e) = headless(out, args.pdf, !args.show_personal) {
+            log_error(&e);
             eprintln!("{e:#}");
             std::process::exit(1);
         }
@@ -180,7 +193,7 @@ fn main() {
     // Without this, eframe puts its own default icon in the title bar.
     match eframe::icon_data::from_png_bytes(include_bytes!("../assets/bootmend-256.png")) {
         Ok(icon) => viewport = viewport.with_icon(icon),
-        Err(e) => eprintln!("Couldn't load the window icon: {e}"),
+        Err(e) => log!("app", "couldn't load the window icon: {e}"),
     }
     let shots = args.screenshots;
     if shots.is_some() {
@@ -216,8 +229,10 @@ fn main() {
         }),
     );
     if let Err(e) = r {
+        log!("app", "couldn't open the window: {e}");
         console();
         eprintln!("Bootmend couldn't open its window: {e}");
         std::process::exit(1);
     }
+    log!("app", "closed");
 }
