@@ -32,15 +32,16 @@ The **Keystone** is an arch of five stones on two legs, with its top stone, the 
   - `assets/bootmend.ico` holds 16, 20, 24, 30, 32, 36, 40, 48, 64 and 256 px.
   - The exe and the window both use it.
 - **Files:**
-  - `design/logo/mark8.js` is the source.
-  - `node design/logo/gen.mjs` writes the SVGs.
-  - The PNGs come from `design/logo/png/r.html#<size>`, rendered with headless Edge (`--default-background-color=00000000 --window-size=<size>,<size> --screenshot=...`).
+  - `src/gui/mark.rs` is the source. The app draws the logo and both loaders from it, so the files can't drift from what's on screen.
+  - Every joint is 1.6 units wide as the eye sees it, after the 1.08 sideways stretch.
+  - `cargo test logo_files -- --ignored` writes the SVGs, the icon PNGs in `design/logo/png/` and `assets/bootmend-256.png`.
   - `python design/logo/make_ico.py` packs the PNGs into the .ico.
+  - `design/logo/mark8.js` and `gen.mjs` hold the earlier exploration; their cut is older than mark.rs's.
 - **Don't:**
   - Recolour the stones.
   - Add a tagline or an outline.
   - Seat the keystone in the app icon. A seated keystone is kept for "all fixed" inside the app.
-- **Motion:** the keystone dropping in is the app's motion character. It takes about 360 ms: a firm landing and a tiny settle, with no bounce. When Windows' Animation effects are off, it fades in instead.
+- **Motion:** the keystone dropping in is the app's motion character. It takes about 420 ms: a firm landing and a tiny settle, with no bounce. When Windows' Animation effects are off, it fades between its places over 200 ms instead.
 
 ## Tokens (`src/gui/theme.rs`)
 

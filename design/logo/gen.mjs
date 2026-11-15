@@ -1,4 +1,5 @@
-// Exports the final Bootmend mark from mark8.js: node gen.mjs
+// Superseded for the shipped files: src/gui/mark.rs writes them (cargo test logo_files -- --ignored),
+// cutting every joint 1.6 wide after the sideways stretch. Running this writes the older cut over them.
 import fs from 'node:fs';
 import vm from 'node:vm';
 const ctx = {};

@@ -1541,4 +1541,153 @@ mod tests {
         let want = frame(|cv| with_keys(cv, &[(RAISED, 1.0 - t), (0.0, t)]));
         assert!(got.data() == want.data(), "draws both keystones, crossfaded");
     }
+
+    // -----------------------------------------------------------------------------------------
+    // The logo's files, drawn from this geometry so they can't drift from the app.
+
+    /// SVG numbers: three decimals at most, no trailing zeros.
+    fn n(v: f32) -> String {
+        let s = format!("{v:.3}");
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        if s == "-0" {
+            "0".into()
+        } else {
+            s.into()
+        }
+    }
+
+    fn stretched(p: P) -> P {
+        [CX + (p[0] - CX) * ASX, p[1]]
+    }
+
+    fn poly_d(pts: &[P]) -> String {
+        let mut d = String::new();
+        for (i, p) in pts.iter().enumerate() {
+            let q = stretched(*p);
+            d += &format!("{}{} {}", if i == 0 { "M" } else { "L" }, n(q[0]), n(q[1]));
+        }
+        d + "Z"
+    }
+
+    /// A stone as an SVG path with true arcs, cut and stretched as the app draws it, `dy` units down.
+    fn wedge_d(r1: f32, r2: f32, lo: f32, hi: f32, dy: f32) -> String {
+        let span = |r: f32| (lo + joint_off(lo, r, GAP, ASX), hi - joint_off(hi, r, GAP, ASX));
+        let ((o0, o1), (i0, i1)) = (span(r2), span(r1));
+        let at = |r: f32, a: f32| {
+            let p = stretched(pol(CX, CY, r, a));
+            format!("{} {}", n(p[0]), n(p[1] + dy))
+        };
+        format!("M{}A{} {} 0 0 1 {}L{}A{} {} 0 0 0 {}Z", at(r2, o0), n(r2 * ASX), n(r2), at(r2, o1), at(r1, i1), n(r1 * ASX), n(r1), at(r1, i0))
+    }
+
+    /// The logo with its keystone raised, as an SVG. Each stone is shaded on its own, top to
+    /// bottom, like the app draws it; `app` lifts it a little and adds the icon's soft shadow.
+    fn logo_svg(stone: [&str; 2], key: [&str; 2], app: bool) -> String {
+        let pcs = pieces(GAP, 1.0, ASX);
+        let (k0, k1) = bbox_y(&pcs[K].pts);
+        let grad = |id: &str, y0: f32, y1: f32, c: [&str; 2]| {
+            if c[0] == c[1] {
+                return String::new();
+            }
+            format!(
+                r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" x1="0" y1="{}" x2="0" y2="{}"><stop offset="0" stop-color="{}"/><stop offset="1" stop-color="{}"/></linearGradient>"#,
+                n(y0),
+                n(y1),
+                c[0],
+                c[1]
+            )
+        };
+        let fill = |id: &str, c: [&str; 2]| if c[0] == c[1] { c[0].to_string() } else { format!("url(#{id})") };
+        let mut defs = grad("v", CY - R2, CY, stone) + &grad("l", CY, FOOT, stone) + &grad("k", k0 - RAISED, k1 - RAISED, key);
+        if app {
+            defs += r##"<filter id="sh" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="0.6" stdDeviation="0.6" flood-color="#000" flood-opacity=".25"/></filter>"##;
+        }
+        let legs = poly_d(&pcs[L].pts) + &poly_d(&pcs[R].pts);
+        let stones: String = [180.0, 216.0, 288.0, 324.0].iter().map(|&lo| wedge_d(R1, R2, lo, lo + 36.0, 0.0)).collect();
+        let body = format!(
+            r#"<path fill="{}" d="{legs}"/><path fill="{}" d="{stones}"/><path fill="{}" d="{}"/>"#,
+            fill("l", stone),
+            fill("v", stone),
+            fill("k", key),
+            wedge_d(KR1, KR2, 252.0, 288.0, -RAISED)
+        );
+        let body = if app { format!(r#"<g transform="translate(0 -2)" filter="url(#sh)">{body}</g>"#) } else { body };
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="256" height="256"><defs>{defs}</defs>{body}</svg>"#)
+    }
+
+    /// Softens a black shape into a shadow of `opacity`, like SVG's feDropShadow: three box blurs
+    /// come close to its Gaussian of `sigma` pixels.
+    fn soften(pm: &mut Pixmap, sigma: f32, opacity: f32) {
+        let (w, h) = (pm.width() as usize, pm.height() as usize);
+        let mut a: Vec<f32> = pm.pixels().iter().map(|p| f32::from(p.alpha()) / 255.0).collect();
+        let r = (((4.0 * sigma * sigma + 1.0).sqrt() - 1.0) / 2.0).round() as usize;
+        if r > 0 {
+            for _ in 0..3 {
+                for (len, stride, lines, step) in [(w, 1, h, w), (h, w, w, 1)] {
+                    for line in 0..lines {
+                        let at = |i: usize| line * step + i * stride;
+                        let src: Vec<f32> = (0..len).map(|i| a[at(i)]).collect();
+                        for i in 0..len {
+                            let s: f32 = src[i.saturating_sub(r)..=(i + r).min(len - 1)].iter().sum();
+                            a[at(i)] = s / (2 * r + 1) as f32;
+                        }
+                    }
+                }
+            }
+        }
+        for (p, v) in pm.pixels_mut().iter_mut().zip(a) {
+            *p = tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, (v * opacity * 255.0).round() as u8).expect("black is premultiplied");
+        }
+    }
+
+    /// The app icon at `px` square, as bootmend-icon.svg draws it.
+    fn icon_png(px: u32) -> Pixmap {
+        let k = px as f32 / 48.0;
+        let at = |dy: f32| Transform::from_row(k, 0.0, 0.0, k, 0.0, (dy - 2.0) * k);
+        let pal = Pal { stone: [rgb(0x828A97), rgb(0x666D7A)], key: [rgb(0x5B86FF), rgb(0x3A66F2)], accent: [0.0; 3], track: [0.0; 3], sheen: 0.0 };
+        let mut shadow = Pixmap::new(px, px).expect("a pixmap");
+        let black = Pal { stone: [[0.0; 3]; 2], key: [[0.0; 3]; 2], ..pal };
+        with_keys(&mut Canvas { pm: &mut shadow, t: at(0.6), a: 1.0, pal: black }, &[(RAISED, 1.0)]);
+        soften(&mut shadow, 0.6 * k, 0.25);
+        let mut pm = Pixmap::new(px, px).expect("a pixmap");
+        pm.draw_pixmap(0, 0, shadow.as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
+        with_keys(&mut Canvas { pm: &mut pm, t: at(0.0), a: 1.0, pal }, &[(RAISED, 1.0)]);
+        pm
+    }
+
+    #[test]
+    fn the_svg_stones_end_where_the_app_cuts_them() {
+        let pcs = pieces(GAP, 1.0, ASX);
+        for (i, lo) in [(V1, 180.0), (V2, 216.0), (V3, 288.0), (V4, 324.0)] {
+            let pts = &pcs[i].pts;
+            let (a, b) = (stretched(pts[0]), stretched(*pts.last().expect("points")));
+            let d = wedge_d(R1, R2, lo, lo + 36.0, 0.0);
+            assert!(d.starts_with(&format!("M{} {}A", n(a[0]), n(a[1]))), "stone at {lo}: {d}");
+            assert!(d.ends_with(&format!("{} {}Z", n(b[0]), n(b[1]))), "stone at {lo}: {d}");
+        }
+        assert_eq!(n(-0.0001), "0");
+        assert_eq!(n(24.5), "24.5");
+    }
+
+    /// Writes the logo's files from this geometry: the SVG marks, the icon's PNGs (packed into
+    /// assets/bootmend.ico by design/logo/make_ico.py) and the window icon. Run with
+    /// `cargo test logo_files -- --ignored`, then `python design/logo/make_ico.py`.
+    #[test]
+    #[ignore]
+    fn logo_files() {
+        let dir = std::path::Path::new("design/logo");
+        let cobalt = ["#6A92FF", "#2F5BEA"];
+        for (name, svg) in [
+            ("bootmend-icon.svg", logo_svg(["#828A97", "#666D7A"], ["#5B86FF", "#3A66F2"], true)),
+            ("bootmend-mark-light.svg", logo_svg(["#474B54", "#1D1F24"], cobalt, false)),
+            ("bootmend-mark-dark.svg", logo_svg(["#F4F5F7", "#B4BAC4"], cobalt, false)),
+            ("bootmend-mark-mono.svg", logo_svg(["#000", "#000"], ["#000", "#000"], false)),
+        ] {
+            std::fs::write(dir.join(name), svg + "\n").expect("the SVG is written");
+        }
+        for z in [16, 20, 24, 30, 32, 36, 40, 48, 64, 256] {
+            icon_png(z).save_png(dir.join(format!("png/icon-{z}.png"))).expect("the PNG is written");
+        }
+        icon_png(256).save_png("assets/bootmend-256.png").expect("the window icon is written");
+    }
 }
