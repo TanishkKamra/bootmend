@@ -421,14 +421,30 @@ fn run_ps(body: &str) -> Result<()> {
 
 /// Apply a fix and record how to undo it.
 pub fn apply(fix: &Fix, title: &str) -> Result<()> {
+    apply_with(fix, title, history(), &mut |h| save_history(h), &run_ps)
+}
+
+type Save<'a> = &'a mut dyn FnMut(&[HistoryEntry]) -> Result<()>;
+type Run<'a> = &'a dyn Fn(&str) -> Result<()>;
+
+/// The undo step is saved before anything changes, so Bootmend never makes a change it can't take back.
+fn apply_with(fix: &Fix, title: &str, mut h: Vec<HistoryEntry>, save: Save, run: Run) -> Result<()> {
     let (apply, undo) = fix.scripts();
     log!("fix", "applying \"{}\"", title);
     let t0 = Instant::now();
-    run_ps(&apply).inspect_err(|e| log!("fix", "\"{}\" failed: {e:#}", title))?;
-    let mut h = history();
     h.push(HistoryEntry { when: crate::util::now_stamp(), title: title.to_string(), fix: fix.clone(), undo_script: undo, undone: None });
-    // The change is already made, so the log says so when only the undo record is missing.
-    save_history(&h).inspect_err(|e| log!("fix", "\"{}\" was applied but its undo step could not be saved: {e:#}", title))?;
+    save(&h).map_err(|e| {
+        log!("fix", "\"{}\" wasn't run because its undo step couldn't be saved: {e:#}", title);
+        anyhow!("Bootmend couldn't save how to undo it, so nothing was changed")
+    })?;
+    if let Err(e) = run(&apply) {
+        log!("fix", "\"{}\" failed: {e:#}", title);
+        h.pop();
+        if let Err(s) = save(&h) {
+            log!("fix", "\"{}\" failed, and its undo step couldn't be taken out of History: {s:#}", title);
+        }
+        return Err(e);
+    }
     log!("fix", "\"{}\" done in {:.1}s", title, t0.elapsed().as_secs_f32());
     Ok(())
 }
@@ -450,16 +466,30 @@ pub fn restore_point(description: &str) -> Result<()> {
 
 /// Undo the history entry at `index`.
 pub fn undo(index: usize) -> Result<()> {
-    let mut h = history();
+    undo_with(index, history(), &mut |h| save_history(h), &run_ps)
+}
+
+/// Recorded as undone before the undo runs, so History never offers to undo a change twice.
+fn undo_with(index: usize, mut h: Vec<HistoryEntry>, save: Save, run: Run) -> Result<()> {
     let e = h.get_mut(index).ok_or_else(|| anyhow!("that change is no longer in the history"))?;
     if e.undone.is_some() {
         return Err(anyhow!("that change was already undone"));
     }
-    let title = e.title.clone();
+    let (title, script) = (e.title.clone(), e.undo_script.clone());
     log!("undo", "undoing \"{}\"", title);
-    run_ps(&e.undo_script).inspect_err(|e| log!("undo", "\"{}\" failed: {e:#}", title))?;
     e.undone = Some(crate::util::now_stamp());
-    save_history(&h).inspect_err(|e| log!("undo", "\"{}\" was undone but the history could not be saved: {e:#}", title))?;
+    save(&h).map_err(|e| {
+        log!("undo", "\"{}\" wasn't undone because History couldn't be updated: {e:#}", title);
+        anyhow!("Bootmend couldn't update History, so nothing was changed")
+    })?;
+    if let Err(e) = run(&script) {
+        log!("undo", "\"{}\" failed: {e:#}", title);
+        h[index].undone = None;
+        if let Err(s) = save(&h) {
+            log!("undo", "\"{}\" failed, and History still shows it as undone: {s:#}", title);
+        }
+        return Err(e);
+    }
     log!("undo", "\"{}\" undone", title);
     Ok(())
 }
@@ -467,6 +497,105 @@ pub fn undo(index: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn steam() -> Fix {
+        Fix::DisableStartup { name: "Steam".into(), approved_key: r"HKCU:\Software\X\Run".into() }
+    }
+
+    fn applied() -> Vec<HistoryEntry> {
+        vec![HistoryEntry { when: "2026-11-15 18:00".into(), title: "Steam".into(), fix: steam(), undo_script: "undo".into(), undone: None }]
+    }
+
+    #[test]
+    fn a_fix_whose_undo_step_cannot_be_saved_is_never_run() {
+        let ran = Cell::new(false);
+        let r = apply_with(&steam(), "Steam", vec![], &mut |_| Err(anyhow!("disk full")), &|_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert!(!ran.get(), "nothing may change when it couldn't be undone");
+    }
+
+    #[test]
+    fn a_fix_that_fails_leaves_nothing_to_undo() {
+        // What's on disk, starting from the history passed in.
+        let mut saved = vec![];
+        let r = apply_with(
+            &steam(),
+            "Steam",
+            vec![],
+            &mut |h| {
+                saved = h.to_vec();
+                Ok(())
+            },
+            &|_| Err(anyhow!("access denied")),
+        );
+        assert!(r.is_err());
+        assert!(saved.is_empty());
+    }
+
+    #[test]
+    fn a_fix_that_works_can_be_undone_from_history() {
+        let mut saved = vec![];
+        apply_with(
+            &steam(),
+            "Steam",
+            vec![],
+            &mut |h| {
+                saved = h.to_vec();
+                Ok(())
+            },
+            &|_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].undone.is_none() && saved[0].undo_script == steam().scripts().1);
+    }
+
+    #[test]
+    fn an_undo_that_cannot_be_recorded_is_never_run() {
+        let ran = Cell::new(false);
+        let r = undo_with(0, applied(), &mut |_| Err(anyhow!("disk full")), &|_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert!(!ran.get(), "History would still offer an undo that already happened");
+    }
+
+    #[test]
+    fn an_undo_that_fails_can_be_tried_again() {
+        let mut saved = applied();
+        let r = undo_with(
+            0,
+            applied(),
+            &mut |h| {
+                saved = h.to_vec();
+                Ok(())
+            },
+            &|_| Err(anyhow!("access denied")),
+        );
+        assert!(r.is_err());
+        assert!(saved[0].undone.is_none());
+    }
+
+    #[test]
+    fn an_undo_that_works_is_marked_done() {
+        let mut saved = vec![];
+        undo_with(
+            0,
+            applied(),
+            &mut |h| {
+                saved = h.to_vec();
+                Ok(())
+            },
+            &|s| if s == "undo" { Ok(()) } else { Err(anyhow!("wrong script")) },
+        )
+        .unwrap();
+        assert!(saved[0].undone.is_some());
+    }
 
     #[test]
     fn startup_scripts_flip_the_approved_flag() {
