@@ -390,6 +390,7 @@ pub struct App {
     /// A queue picked up after the restart as administrator: what to do next, and whether the
     /// leftover files still need adding (and ticking).
     resume_wait: Option<(run::Then, Option<bool>)>,
+    taskbar: Option<system::Taskbar>,
     check_error: Option<String>,
     tx: Sender<Job>,
     rx: Receiver<Job>,
@@ -446,6 +447,7 @@ impl App {
             clock: 0.0,
             page_fade: None,
             resume_wait: None,
+            taskbar: if snap_dir.is_none() { system::Taskbar::new(cc) } else { None },
             check_error: None,
             tx,
             rx,
@@ -785,7 +787,7 @@ impl App {
         }
     }
 
-    /// Moves the queue and the loader on by one frame.
+    /// Moves the queue, the loader and the taskbar on by one frame.
     fn tick(&mut self, ctx: &egui::Context) {
         // Screenshots are taken with everything standing still.
         let dt = if self.snap_mode.is_some() { 0.0 } else { (ctx.input(|i| i.stable_dt) * 1000.0).min(50.0) };
@@ -820,6 +822,9 @@ impl App {
             if ev.rested {
                 q.rested();
             }
+        }
+        if let Some(tb) = &mut self.taskbar {
+            tb.show(self.run.as_ref().filter(|q| q.running()).map(|q| q.p));
         }
         if self.mark.moving() || self.run.as_ref().is_some_and(|q| q.moving()) || self.flight.from.is_some() || self.page_fade.is_some() {
             ctx.request_repaint();

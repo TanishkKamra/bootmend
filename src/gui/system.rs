@@ -72,6 +72,74 @@ pub fn apply_mica(cc: &eframe::CreationContext) -> windows::core::Result<()> {
     unsafe { DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, std::ptr::from_ref(&kind).cast(), size_of_val(&kind) as u32) }
 }
 
+/// The app's taskbar button, which fills as the queue works through its boxes.
+pub struct Taskbar {
+    list: windows::Win32::UI::Shell::ITaskbarList3,
+    hwnd: windows::Win32::Foundation::HWND,
+    /// What it shows now, in thousandths; None is no progress at all.
+    shown: Option<u64>,
+    broken: bool,
+}
+
+impl Taskbar {
+    pub fn new(cc: &eframe::CreationContext) -> Option<Taskbar> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
+        let hwnd = match cc.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => HWND(h.hwnd.get() as *mut core::ffi::c_void),
+            _ => return None,
+        };
+        // Safety: plain COM calls on the window's own thread; the list is released when dropped.
+        unsafe {
+            // The window has usually set COM up already, in which case this only confirms it.
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if hr.is_err() && hr != RPC_E_CHANGED_MODE {
+                eprintln!("taskbar progress is off: COM wouldn't start ({hr:?})");
+                return None;
+            }
+            let list: ITaskbarList3 = match CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("taskbar progress is off: {e}");
+                    return None;
+                }
+            };
+            if let Err(e) = list.HrInit() {
+                eprintln!("taskbar progress is off: {e}");
+                return None;
+            }
+            Some(Taskbar { list, hwnd, shown: None, broken: false })
+        }
+    }
+
+    /// Shows `p` (0 to 1) on the button, or clears it with None. Nothing done yet shows as busy.
+    pub fn show(&mut self, p: Option<f32>) {
+        use windows::Win32::UI::Shell::{TBPF_INDETERMINATE, TBPF_NOPROGRESS};
+        let v = p.map(|p| (p.clamp(0.0, 1.0) * 1000.0).round() as u64);
+        if v == self.shown || self.broken {
+            return;
+        }
+        // Safety: the handle is this window's, which outlives the app.
+        let r = unsafe {
+            match v {
+                None => self.list.SetProgressState(self.hwnd, TBPF_NOPROGRESS),
+                Some(0) => self.list.SetProgressState(self.hwnd, TBPF_INDETERMINATE),
+                // A value also switches the button from busy to filling.
+                Some(v) => self.list.SetProgressValue(self.hwnd, v, 1000),
+            }
+        };
+        match r {
+            Ok(()) => self.shown = v,
+            Err(e) => {
+                eprintln!("taskbar progress stopped: {e}");
+                self.broken = true;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
