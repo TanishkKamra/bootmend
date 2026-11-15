@@ -1092,19 +1092,7 @@ impl App {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        let mut msgs = vec![];
-        if let Some(rx) = &self.check_rx {
-            loop {
-                match rx.try_recv() {
-                    Ok(m) => msgs.push(m),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        msgs.push(Progress::Failed("The check stopped part way through.".to_string()));
-                        break;
-                    }
-                }
-            }
-        }
+        let msgs = self.check_rx.as_ref().map(drain_check).unwrap_or_default();
         for m in msgs {
             match m {
                 Progress::StepDone { key, ok } => {
@@ -1805,9 +1793,55 @@ impl eframe::App for App {
     }
 }
 
+/// Everything the check has sent since the last frame. The check hangs up as soon as it has
+/// sent its result, so a hang-up only means it crashed when no result came first.
+fn drain_check(rx: &Receiver<Progress>) -> Vec<Progress> {
+    let mut msgs = vec![];
+    loop {
+        match rx.try_recv() {
+            Ok(m) => {
+                let last = matches!(m, Progress::Finished(_) | Progress::Failed(_));
+                msgs.push(m);
+                if last {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                msgs.push(Progress::Failed("The check stopped part way through.".to_string()));
+                break;
+            }
+        }
+    }
+    msgs
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Page, Place};
+
+    #[test]
+    fn a_check_that_finishes_and_hangs_up_is_not_reported_as_failed() {
+        use super::{drain_check, Progress};
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Progress::StepDone { key: "drives", ok: true }).unwrap();
+        tx.send(Progress::Finished(Box::default())).unwrap();
+        drop(tx);
+        let msgs = drain_check(&rx);
+        assert_eq!(msgs.len(), 2, "nothing comes after the result");
+        assert!(matches!(msgs[1], Progress::Finished(_)));
+    }
+
+    #[test]
+    fn a_check_that_hangs_up_without_a_result_is_reported_as_failed() {
+        use super::{drain_check, Progress};
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Progress::StepDone { key: "system", ok: true }).unwrap();
+        drop(tx);
+        let msgs = drain_check(&rx);
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(msgs[1], Progress::Failed(_)));
+    }
 
     #[test]
     fn every_view_has_one_home_and_every_tab_points_back_to_it() {
