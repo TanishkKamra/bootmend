@@ -36,7 +36,7 @@ The **Keystone** is an arch of five stones on two legs, with its top stone, the 
   - Every joint is 1.6 units wide as the eye sees it, after the 1.08 sideways stretch.
   - `cargo test logo_files -- --ignored` writes the SVGs, the icon PNGs in `design/logo/png/` and `assets/bootmend-256.png`.
   - `python design/logo/make_ico.py` packs the PNGs into the .ico.
-  - `design/logo/mark8.js` and `gen.mjs` hold the earlier exploration; their cut is older than mark.rs's.
+  - `design/logo/mark8.js` holds the earlier exploration boards; its cut is older than mark.rs's.
 - **Don't:**
   - Recolour the stones.
   - Add a tagline or an outline.
