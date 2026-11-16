@@ -1,6 +1,6 @@
 //! What changed between two checks of the same PC.
 
-use crate::snapshot::Snapshot;
+use crate::snapshot::{DriveHealth, Snapshot};
 use crate::util::J;
 use std::collections::BTreeMap;
 
@@ -35,6 +35,11 @@ fn compare(out: &mut Vec<Change>, group: &'static str, old: BTreeMap<String, Str
     for k in old.keys().filter(|k| !new.contains_key(*k)) {
         out.push(Change { group, kind: Kind::Removed, text: k.clone(), notable: false });
     }
+}
+
+/// A drive's serial number, which stays with it when Windows renumbers the disks.
+fn serial(s: &Snapshot, disk: i64) -> Option<String> {
+    s.storage.a("disks").into_iter().find(|x| x.i("Number") == Some(disk)).and_then(|x| x.s("Serial")).filter(|v| !v.trim().is_empty())
 }
 
 pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
@@ -91,7 +96,19 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
     }
 
     for d in &new.drives {
-        if let Some(o) = old.drives.iter().find(|o| o.model == d.model) {
+        // Windows can renumber disks between starts, so a drive is followed by its serial number when
+        // both checks have one. Without it, two drives of the same model are told apart by disk number,
+        // and a model found once in both checks is matched even if its number changed.
+        let twin = |o: &&DriveHealth| o.model == d.model;
+        let lone = |list: &[DriveHealth]| list.iter().filter(twin).count() == 1;
+        let by_serial = serial(new, d.disk)
+            .filter(|_| old.drives.iter().filter(twin).any(|o| serial(old, o.disk).is_some()))
+            .map(|sn| old.drives.iter().filter(twin).find(|o| serial(old, o.disk).as_ref() == Some(&sn)));
+        let by_number = || {
+            let same_disk = old.drives.iter().filter(twin).find(|o| o.disk == d.disk);
+            same_disk.or_else(|| if lone(&old.drives) && lone(&new.drives) { old.drives.iter().find(twin) } else { None })
+        };
+        if let Some(o) = by_serial.unwrap_or_else(by_number) {
             for (label, a, b) in [
                 ("reallocated sectors", o.reallocated, d.reallocated),
                 ("pending sectors", o.pending, d.pending),
@@ -122,6 +139,29 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn twin_drives_are_each_compared_with_themselves() {
+        let drive =
+            |disk, wear| crate::snapshot::DriveHealth { disk, model: "Samsung SSD 980 PRO 2TB".into(), life_used_pct: Some(wear), ..Default::default() };
+        let a = Snapshot { drives: vec![drive(0, 5.0), drive(1, 12.0)], ..Default::default() };
+        assert!(diff(&a, &a).is_empty(), "{:?}", diff(&a, &a));
+        let b = Snapshot { drives: vec![drive(0, 6.0), drive(1, 12.0)], ..Default::default() };
+        let texts: Vec<_> = diff(&a, &b).into_iter().map(|c| c.text).collect();
+        assert_eq!(texts, ["Samsung SSD 980 PRO 2TB: wear went from 5% to 6%"]);
+        // A lone drive is still followed when Windows numbers it differently, say after a USB drive was plugged in.
+        let (one, moved) = (Snapshot { drives: vec![drive(0, 5.0)], ..Default::default() }, Snapshot { drives: vec![drive(1, 7.0)], ..Default::default() });
+        assert_eq!(diff(&one, &moved).len(), 1);
+        // A second drive of the same model added since is new, not the first one worn out.
+        assert!(diff(&one, &a).is_empty(), "{:?}", diff(&one, &a));
+        // Twins whose numbers swapped since are still told apart by serial number.
+        let worn = |disk, bad| crate::snapshot::DriveHealth { disk, model: "Samsung SSD 980 PRO 2TB".into(), reallocated: Some(bad), ..Default::default() };
+        let disks = |a: &str, b: &str| json!({"disks": [{"Number": 0, "Serial": a}, {"Number": 1, "Serial": b}]});
+        let before = Snapshot { drives: vec![worn(0, 0.0), worn(1, 8.0)], storage: disks("S1", "S2"), ..Default::default() };
+        let swapped = Snapshot { drives: vec![worn(0, 9.0), worn(1, 0.0)], storage: disks("S2", "S1"), ..Default::default() };
+        let texts: Vec<_> = diff(&before, &swapped).into_iter().map(|c| c.text).collect();
+        assert_eq!(texts, ["Samsung SSD 980 PRO 2TB: reallocated sectors went from 8 to 9"]);
+    }
 
     #[test]
     fn detects_added_removed_and_updated() {
