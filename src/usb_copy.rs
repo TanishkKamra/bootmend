@@ -254,6 +254,16 @@ pub fn fresh_dir(root: &Path, now: chrono::NaiveDateTime) -> Result<PathBuf> {
     Err(anyhow!("The drive already has 99 copies from this minute"))
 }
 
+/// Where the files copied before a stop are, so they can be found.
+fn so_far(c: &Copied) -> String {
+    match c.files {
+        0 => "Nothing was copied".into(),
+        n => {
+            format!("The {} in \"{}\"", plural(n, "file copied so far is", "files copied so far are"), c.dir.file_name().unwrap_or_default().to_string_lossy())
+        }
+    }
+}
+
 /// Copies everything found into `dir`, keeping `done` at the bytes gone through so far. A file
 /// that can't be copied is listed and skipped, as is one bigger than `max_file`; a full or missing
 /// drive stops the copy, and so do many failures in a row.
@@ -286,7 +296,7 @@ pub fn copy_to(found: &Found, dir: &Path, max_file: Option<u64>, done: &AtomicU6
             }
             Err(e) if e.kind() == ErrorKind::StorageFull => {
                 log!("copy", "the drive filled up after {} files", c.files);
-                return Err(anyhow!("The drive is full, so copying stopped after {}", plural(c.files, "file", "files")));
+                return Err(anyhow!("The drive is full. {}", so_far(&c)));
             }
             Err(e) => {
                 if !dir.exists() {
@@ -303,8 +313,8 @@ pub fn copy_to(found: &Found, dir: &Path, max_file: Option<u64>, done: &AtomicU6
                     if in_a_row >= GIVE_UP {
                         log!("copy", "{GIVE_UP} files in a row couldn't be copied after {} files", c.files);
                         return Err(anyhow!(
-                            "{GIVE_UP} files in a row couldn't be read, so copying stopped after {}. The drive with your files may have stopped answering",
-                            plural(c.files, "file", "files")
+                            "{GIVE_UP} files in a row couldn't be read, so the drive with your files may have stopped answering. {}",
+                            so_far(&c)
                         ));
                     }
                 }
@@ -565,12 +575,21 @@ mod tests {
     #[test]
     fn many_failures_in_a_row_stop_the_copy() {
         let s = Scratch::new("dying");
+        s.file("docs/!keep.jpg", 10);
         let gone: Vec<PathBuf> = (0..GIVE_UP + 5).map(|i| s.file(&format!("docs/{i:03}.jpg"), 10)).collect();
-        let found = survey(&folders(&s));
+        let mut found = survey(&folders(&s));
+        found.files.sort_by(|a, b| a.rel.cmp(&b.rel));
         for g in &gone {
             std::fs::remove_file(g).unwrap();
         }
         let e = copy_to(&found, &s.0.join("usb"), None, &AtomicU64::new(0), &AtomicBool::new(false)).unwrap_err().to_string();
-        assert!(e.contains("in a row couldn't be read, so copying stopped after 0 files"), "{e}");
+        assert_eq!(
+            e,
+            format!(
+                "{GIVE_UP} files in a row couldn't be read, so the drive with your files may have stopped answering. The 1 file copied so far is in \"usb\""
+            )
+        );
+        let none = Copied { dir: s.0.join("usb"), files: 0, bytes: 0, failed: vec![], in_use: vec![], too_big: vec![], stopped: false };
+        assert_eq!(so_far(&none), "Nothing was copied");
     }
 }
