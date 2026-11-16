@@ -62,15 +62,20 @@ fn utf16_number(b: &[u8]) -> Option<u32> {
     String::from_utf16(&text).ok()?.trim().parse().ok()
 }
 
+/// The window's Win32 handle.
+pub fn hwnd(cc: &eframe::CreationContext) -> Option<windows::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => Some(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut core::ffi::c_void)),
+        _ => None,
+    }
+}
+
 /// Puts the Mica backdrop behind the window, which must have been created transparent.
 pub fn apply_mica(cc: &eframe::CreationContext) -> windows::core::Result<()> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{E_FAIL, HWND};
+    use windows::Win32::Foundation::E_FAIL;
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE};
-    let hwnd = match cc.window_handle().map(|h| h.as_raw()) {
-        Ok(RawWindowHandle::Win32(h)) => HWND(h.hwnd.get() as *mut core::ffi::c_void),
-        _ => return Err(windows::core::Error::new(E_FAIL, "the window has no Win32 handle")),
-    };
+    let hwnd = hwnd(cc).ok_or_else(|| windows::core::Error::new(E_FAIL, "the window has no Win32 handle"))?;
     let kind = DWMSBT_MAINWINDOW;
     // Safety: `kind` lives across the call and the size passed is its size.
     unsafe { DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, std::ptr::from_ref(&kind).cast(), size_of_val(&kind) as u32) }
@@ -87,14 +92,10 @@ pub struct Taskbar {
 
 impl Taskbar {
     pub fn new(cc: &eframe::CreationContext) -> Option<Taskbar> {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};
+        use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
         use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
         use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
-        let hwnd = match cc.window_handle().map(|h| h.as_raw()) {
-            Ok(RawWindowHandle::Win32(h)) => HWND(h.hwnd.get() as *mut core::ffi::c_void),
-            _ => return None,
-        };
+        let hwnd = hwnd(cc)?;
         // Safety: plain COM calls on the window's own thread; the list is released when dropped.
         unsafe {
             // The window has usually set COM up already, in which case this only confirms it.

@@ -440,6 +440,9 @@ impl App {
                     false
                 }
             };
+        if let Some(h) = system::hwnd(cc) {
+            crate::cleanup::OWNER.store(h.0 as isize, std::sync::atomic::Ordering::Relaxed);
+        }
         let (tx, rx) = channel();
         let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this-pc".into());
         let mut app = App {

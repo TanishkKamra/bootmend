@@ -524,11 +524,19 @@ pub fn free_space(drive: &Path) -> Option<u64> {
     Some(free)
 }
 
-/// Move files to the Recycle Bin without any Windows dialogs.
+/// The app window, set when it opens, so Windows' one prompt during clearing opens in front of it.
+pub static OWNER: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Move files to the Recycle Bin without any Windows dialogs, except one: a file too big for the
+/// Recycle Bin would otherwise be deleted for good without asking, so Windows asks first.
 fn to_recycle_bin(files: &[PathBuf]) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::Ordering;
     use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW,
+    };
     let mut from: Vec<u16> = vec![];
     for f in files {
         from.extend(f.as_os_str().encode_wide());
@@ -536,13 +544,17 @@ fn to_recycle_bin(files: &[PathBuf]) -> Result<()> {
     }
     from.push(0);
     let mut op = SHFILEOPSTRUCTW {
+        hwnd: HWND(OWNER.load(Ordering::Relaxed) as *mut core::ffi::c_void),
         wFunc: FO_DELETE,
         pFrom: PCWSTR(from.as_ptr()),
-        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI).0 as u16,
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_SILENT | FOF_NOERRORUI).0 as u16,
         ..Default::default()
     };
     let code = unsafe { SHFileOperationW(&mut op) };
-    if code != 0 {
+    // Saying no to Windows' prompt isn't a failure: the file stays put and is counted as left alone.
+    // Other errors also mark the operation aborted, so only these two codes mean "declined".
+    const DECLINED: [i32; 2] = [1223, 0x75]; // ERROR_CANCELLED, DE_OPCANCELLED
+    if code != 0 && !DECLINED.contains(&code) {
         return Err(anyhow!("Windows couldn't move the files to the Recycle Bin (code {code})"));
     }
     Ok(())
