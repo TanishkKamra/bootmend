@@ -1121,6 +1121,70 @@ mod tests {
     }
 
     /// Bootmend copies the person's folders off a failing drive only when they're on it.
+    /// Blue screens on these dates, and a graphics driver and its sound part updated together.
+    fn crashed_after_update(crashes: &[&str]) -> Snapshot {
+        let mut s = base();
+        let gpu = r"PCI\VEN_1002&DEV_73DF\6&15bb039d&0&00000019";
+        s.health = json!({
+            "bugchecks": crashes.iter().map(|d| json!({"Date": d, "Text": "The bugcheck was: 0x0000003b (0x0, 0x0)."})).collect::<Vec<_>>(),
+            "driverUpdates": [
+                {"Device": gpu, "Name": "AMD Radeon RX 6750 XT", "Class": "Display", "Image": "amdkmdag.sys", "Version": "32.0.21045.20006", "Before": "32.0.21045.16010", "Date": "2026-11-05 10:34"},
+                {"Device": r"HDAUDIO\FUNC_01&VEN_1002\7&1b7372a&0&0001", "Name": "AMD High Definition Audio Device", "Class": "MEDIA", "Image": "AtihdWT6.sys", "Version": "10.0.1.43", "Before": "10.0.1.42", "Date": "2026-11-05 10:34"}
+            ]
+        });
+        s
+    }
+
+    fn rollback(s: &Snapshot) -> Option<(Fix, Confidence)> {
+        let f = evaluate(s).into_iter().find(|f| f.id == "bsod")?;
+        f.actions.iter().find_map(|a| match a {
+            Action::Fix(x @ Fix::RollBackDriver { .. }) => Some((x.clone(), f.confidence)),
+            _ => None,
+        })
+    }
+
+    fn gpu_rollback() -> Fix {
+        Fix::RollBackDriver { device: r"PCI\VEN_1002&DEV_73DF\6&15bb039d&0&00000019".into(), name: "AMD Radeon RX 6750 XT".into() }
+    }
+
+    fn dump(image: &str, date: &str) -> crate::snapshot::DumpAnalysis {
+        crate::snapshot::DumpAnalysis { image: Some(image.into()), date: date.into(), code: "0x3B".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn crash_files_naming_a_freshly_updated_driver_offer_the_version_before() {
+        let mut s = crashed_after_update(&["2026-11-20 21:00", "2026-11-21 22:00"]);
+        s.dumps = vec![dump("amdkmdag.sys", "2026-11-20 21:01")];
+        assert_eq!(rollback(&s), Some((gpu_rollback(), Confidence::Measured)), "measured even though the crashes began two weeks later");
+    }
+
+    #[test]
+    fn blue_screens_soon_after_an_update_offer_the_graphics_driver_as_a_best_guess() {
+        let s = crashed_after_update(&["2026-11-07 09:00", "2026-11-08 18:30", "2026-11-12 20:00"]);
+        assert_eq!(rollback(&s), Some((gpu_rollback(), Confidence::BestGuess)), "the graphics driver wins over its sound part");
+    }
+
+    #[test]
+    fn no_rollback_without_a_clear_link_to_the_update() {
+        // Crashing before the update too: the old version crashed as well.
+        assert_eq!(rollback(&crashed_after_update(&["2026-10-20 10:00", "2026-11-07 09:00"])), None);
+        // First crash more than a week after it.
+        assert_eq!(rollback(&crashed_after_update(&["2026-11-20 10:00"])), None);
+        // The crash files name a driver that crashed before its update as well.
+        let mut s = crashed_after_update(&["2026-11-20 21:00"]);
+        s.dumps = vec![dump("amdkmdag.sys", "2026-11-01 08:00"), dump("amdkmdag.sys", "2026-11-20 21:01")];
+        assert_eq!(rollback(&s), None);
+        // The last change went down a version: that was a rollback already.
+        let mut s = crashed_after_update(&["2026-11-07 09:00"]);
+        s.health["driverUpdates"].as_array_mut().unwrap().truncate(1);
+        s.health["driverUpdates"][0]["Before"] = json!("32.0.21045.30000");
+        assert_eq!(rollback(&s), None);
+        // Two updates nothing tells apart.
+        let mut s = crashed_after_update(&["2026-11-07 09:00"]);
+        s.health["driverUpdates"][0]["Class"] = json!("Net");
+        assert_eq!(rollback(&s), None);
+    }
+
     #[test]
     fn big_counts_are_grouped_in_thousands() {
         assert_eq!(plural(1, "file", "files"), "1 file");

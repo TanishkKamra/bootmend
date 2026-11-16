@@ -77,6 +77,13 @@ pub enum Fix {
     },
     /// DISM, then System File Checker. It only puts back Windows' own copies, so there's nothing to undo.
     RepairWindowsFiles,
+    /// Puts back the driver Windows kept from before the device's last update. Windows then removes
+    /// the newer one, so there's nothing to undo.
+    RollBackDriver {
+        /// The device instance ID: "PCI\VEN_1002&DEV_73DF\6&15bb039d&0&00000019".
+        device: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -133,6 +140,7 @@ impl Fix {
             Fix::EnableRecovery => "Switch on Windows Recovery",
             Fix::RemoveUpdateBlock { .. } => "Unblock Windows Update",
             Fix::RepairWindowsFiles => "Repair Windows files",
+            Fix::RollBackDriver { .. } => "Go back to the previous driver",
         }
     }
 
@@ -165,6 +173,7 @@ impl Fix {
             Fix::EnableRecovery => "Windows' recovery tools will be switched back on, so it can repair itself or reset if it ever fails to start. You can switch them off again from History.".into(),
             Fix::RemoveUpdateBlock { .. } => "The settings blocking Windows Update will be removed, after saving a copy so you can put them back from History. Windows then gets updates from Microsoft again.".into(),
             Fix::RepairWindowsFiles => "Windows will replace its damaged files with fresh copies from Microsoft, so it needs the internet. It can take up to 30 minutes, and you can keep using your PC. Your own files and apps aren't touched, so there's nothing to undo.".into(),
+            Fix::RollBackDriver { name, .. } => format!("Windows will put back the driver the {name} used before its last update. The screen may flicker, and the PC may need a restart. This can't be undone from History, and Windows Update may offer the newer driver again."),
         }
     }
 
@@ -197,17 +206,28 @@ impl Fix {
             Fix::EnableRecovery => "Switching Windows' repair tools back on".into(),
             Fix::RemoveUpdateBlock { .. } => "Unblocking Windows Update".into(),
             Fix::RepairWindowsFiles => "Repairing Windows' own files, which can take up to 30 minutes".into(),
+            Fix::RollBackDriver { name, .. } => format!("Going back to the previous driver for the {name}"),
         }
     }
 
     /// Whether History can take it back.
     pub fn undoable(&self) -> bool {
-        !matches!(self, Fix::RepairWindowsFiles)
+        !matches!(self, Fix::RepairWindowsFiles | Fix::RollBackDriver { .. })
+    }
+
+    /// Whether "Fix the safe ones for me" may include it. Going back to an older driver is a
+    /// judgement call that can't be undone, so it's only offered on its own to-do.
+    pub fn safe(&self) -> bool {
+        !matches!(self, Fix::RollBackDriver { .. })
     }
 
     /// The longest it usually takes, for the fixes that take minutes rather than seconds.
     pub fn up_to_minutes(&self) -> Option<u32> {
-        matches!(self, Fix::RepairWindowsFiles).then_some(30)
+        match self {
+            Fix::RepairWindowsFiles => Some(30),
+            Fix::RollBackDriver { .. } => Some(5),
+            _ => None,
+        }
     }
 
     /// Generous, so a slow PC isn't cut off part-way.
@@ -375,9 +395,46 @@ if ("$((Repair-WindowsImage -Online -CheckHealth).ImageHealthState)" -ne 'Health
                 ),
                 String::new(),
             ),
+            // Device Manager's "Roll Back Driver", without its questions. Windows keeps one earlier
+            // driver per device; 259 (ERROR_NO_MORE_ITEMS) means it has none.
+            Fix::RollBackDriver { device, .. } => (ROLL_BACK.replace("{DEVICE}", &ps_quote(device)), String::new()),
         }
     }
 }
+
+const ROLL_BACK: &str = r#"Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class BootmendRollBack {
+    [StructLayout(LayoutKind.Sequential)]
+    struct DevInfo { public int Size; public Guid Class; public int Inst; public IntPtr Reserved; }
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern IntPtr SetupDiCreateDeviceInfoList(IntPtr cls, IntPtr hwnd);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiOpenDeviceInfoW(IntPtr set, string id, IntPtr hwnd, int flags, ref DevInfo info);
+    [DllImport("setupapi.dll")]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+    [DllImport("newdev.dll", SetLastError = true)]
+    static extern bool DiRollbackDriver(IntPtr set, ref DevInfo info, IntPtr hwnd, int flags, out bool restart);
+    // 0 when the earlier driver is back, else the Windows error code.
+    public static int Run(string id) {
+        IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+        if (set == new IntPtr(-1)) return Marshal.GetLastWin32Error();
+        try {
+            DevInfo info = new DevInfo();
+            info.Size = Marshal.SizeOf(info);
+            if (!SetupDiOpenDeviceInfoW(set, id, IntPtr.Zero, 0, ref info)) return Marshal.GetLastWin32Error();
+            bool restart;
+            // 1 is ROLLBACK_FLAG_NO_UI.
+            return DiRollbackDriver(set, ref info, IntPtr.Zero, 1, out restart) ? 0 : Marshal.GetLastWin32Error();
+        } finally { SetupDiDestroyDeviceInfoList(set); }
+    }
+}
+'@
+$e = [BootmendRollBack]::Run({DEVICE})
+if ($e -eq 259) { throw "Windows no longer has the earlier driver, so it can't go back to it" }
+if ($e -eq -536870389) { throw "That device isn't plugged in any more" }
+if ($e -ne 0) { throw ("Windows couldn't go back to the earlier driver (error {0})" -f $e) }"#;
 
 /// Saves a copy of a policy key, then removes the named settings from it: values, or subkeys (lists,
 /// Firefox's groups). A name with a backslash is in a subkey ("AU\UseWUServer"). Undo imports the copy.
@@ -628,6 +685,22 @@ mod tests {
         assert_eq!(files, 2, "the new history and the kept copy, with no temporary file left behind");
     }
 
+    /// Windows removes the newer driver, so History lists the change with nothing to undo, and it
+    /// never joins the safe ones.
+    #[test]
+    fn going_back_to_an_earlier_driver_names_the_device_and_has_nothing_to_undo() {
+        let fx = Fix::RollBackDriver { device: r"PCI\VEN_1002&DEV_73DF\6&15bb'039d".into(), name: "AMD Radeon RX 6750 XT".into() };
+        let (a, u) = fx.scripts();
+        assert!(a.contains(r"[BootmendRollBack]::Run('PCI\VEN_1002&DEV_73DF\6&15bb''039d')"), "{a}");
+        assert!(
+            a.contains("DiRollbackDriver(set, ref info, IntPtr.Zero, 1,") && a.contains("259"),
+            "no questions, and plain words when there's nothing to go back to: {a}"
+        );
+        assert!(u.is_empty() && !fx.undoable() && fx.needs_admin() && !fx.safe() && Fix::RepairWindowsFiles.safe());
+        assert_eq!(fx.up_to_minutes(), Some(5));
+        assert!(fx.describe().contains("AMD Radeon RX 6750 XT") && fx.doing().contains("AMD Radeon RX 6750 XT"));
+    }
+
     /// It only puts back Windows' own copies, so History lists it with nothing to undo.
     #[test]
     fn repairing_windows_files_is_listed_but_has_nothing_to_undo() {
@@ -637,7 +710,7 @@ mod tests {
         assert!(dism < sfc && sfc < check, "DISM first, then sfc, then Windows' own verdict: {a}");
         assert!(a.contains("3010") && a.contains("-2146498529"), "a restart-needed result is fine; missing source files get plain words: {a}");
         assert!(u.is_empty() && !fx.undoable() && fx.needs_admin());
-        assert!(every_fix().iter().filter(|f| **f != fx).all(Fix::undoable));
+        assert!(every_fix().iter().filter(|f| **f != fx && !matches!(f, Fix::RollBackDriver { .. })).all(Fix::undoable));
         assert!(fx.timeout() >= Duration::from_secs(45 * 60) && Fix::EnablePua.timeout() == Duration::from_secs(300));
         assert_eq!((fx.up_to_minutes(), Fix::EnablePua.up_to_minutes()), (Some(30), None));
 
@@ -927,6 +1000,7 @@ mod tests {
                 settings: vec!["WUServer".into(), r"AU\UseWUServer".into()],
             },
             Fix::RepairWindowsFiles,
+            Fix::RollBackDriver { device: r"PCI\VEN_1002&DEV_73DF\6&15bb039d&0&00000019".into(), name: "AMD Radeon RX 6750 XT".into() },
         ]
     }
 

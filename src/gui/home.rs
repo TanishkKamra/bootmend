@@ -158,7 +158,7 @@ impl App {
                     return plan.leftovers.as_ref().map(|l| run::Item::clean(l.ids.clone(), f.title.clone()));
                 }
                 match fixes_of(f).as_slice() {
-                    [fx] => Some(run::Item::fix((*fx).clone(), f.title.clone(), f.area)),
+                    [fx] if fx.safe() => Some(run::Item::fix((*fx).clone(), f.title.clone(), f.area)),
                     _ => None,
                 }
             })
