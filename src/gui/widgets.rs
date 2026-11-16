@@ -154,7 +154,10 @@ pub fn icon_button(ui: &mut Ui, ic: &str, text: &str, enabled: bool) -> Response
     let color = pal(ui.ctx()).ink;
     job.append(ic, 0.0, egui::TextFormat { font_id: egui::FontId::new(14.0, theme::icons()), color, valign: egui::Align::Center, ..Default::default() });
     job.append(text, S2, egui::TextFormat { font_id: egui::TextStyle::Button.resolve(ui.style()), color, valign: egui::Align::Center, ..Default::default() });
-    ui.add_enabled(enabled, egui::Button::new(job).min_size(egui::vec2(0.0, 32.0)))
+    let r = ui.add_enabled(enabled, egui::Button::new(job).min_size(egui::vec2(0.0, 32.0)));
+    // A screen reader would otherwise read the icon's character out before the words.
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
+    r
 }
 
 /// A button with no frame until the pointer is on it, for quiet actions beside a title.
@@ -686,6 +689,31 @@ mod tests {
             egui::Event::PointerButton { pos: egui::pos2(5.0, 5.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
         frame(&ctx, vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0)), click]);
         assert!(!frame(&ctx, vec![]), "a click hides the ring");
+    }
+
+    /// What a screen reader is told each button is called.
+    fn spoken_buttons(add: impl Fn(&mut Ui)) -> Vec<String> {
+        let ctx = egui::Context::default();
+        theme::fonts(&ctx);
+        ctx.enable_accesskit();
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 300.0))), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| add(ui));
+        let tree = out.platform_output.accesskit_update.take().expect("an accessibility tree");
+        out.drop_without_applying_deltas();
+        let mut names: Vec<String> =
+            tree.nodes.iter().filter(|(_, n)| n.role() == egui::accesskit::Role::Button).filter_map(|(_, n)| n.label().map(String::from)).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn screen_readers_hear_a_buttons_words_not_its_icon() {
+        let names = spoken_buttons(|ui| {
+            icon_button(ui, icon::OPEN, "Open System Restore", true);
+            subtle_button(ui, icon::OPEN, "Open Device Manager");
+            subtle_icon(ui, icon::CHEVRON_DOWN, 12.0, "Show more");
+        });
+        assert_eq!(names, ["Open Device Manager", "Open System Restore", "Show more"]);
     }
 
     /// How wide `add` ends up drawing when a card gives it `width`.
