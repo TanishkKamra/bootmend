@@ -84,7 +84,10 @@ pub fn upgrades(s: &Snapshot) -> Vec<Upgrade> {
         if let Some(k) = &kind {
             get.push(format!("{k}{speed}"));
         }
-        get.push(if free > 0 {
+        // Without Windows' slot count, the sticks found only show the least there could be.
+        get.push(if mem.i("Slots").is_none_or(|n| n < 1) {
+            "Bootmend couldn't read how many memory slots this PC has, so check its manual before buying.".into()
+        } else if free > 0 {
             format!("Free memory slots: {free} of {slots}. Adding a stick the same size as the one you have keeps both channels working.")
         } else {
             format!("All {slots} slots are full, so replace the sticks with a matching pair, such as 2 × 8 GB.")
@@ -225,5 +228,16 @@ mod tests {
         assert!(ids.contains(&"ram-more") && ids.contains(&"bigger-drive") && ids.contains(&"battery"), "{ids:?}");
         let ram = upgrades(&s).into_iter().find(|u| u.id == "ram-more").unwrap();
         assert!(ram.get.join(" ").contains("laptop"), "SODIMM means a laptop: {:?}", ram.get);
+    }
+
+    #[test]
+    fn an_unknown_slot_count_is_never_called_full() {
+        for sticks in [json!([]), json!([{"SizeGB": 2, "Type": "DDR3"}, {"SizeGB": 2, "Type": "DDR3"}])] {
+            let mut s = pc();
+            s.system["memory"] = json!({"TotalGB": 4, "Sticks": sticks});
+            let ram = upgrades(&s).into_iter().find(|u| u.id == "ram-more").unwrap();
+            let text = ram.get.join(" ");
+            assert!(text.contains("couldn't read how many memory slots") && !text.contains("slots are full"), "{text}");
+        }
     }
 }
