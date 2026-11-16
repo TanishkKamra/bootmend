@@ -169,18 +169,19 @@ fn redact(s: &str, swaps: &[(String, &str)]) -> String {
 
 /// Windows paths and names ignore case, so "c:\users\sam" must be hidden as well as "C:\Users\Sam".
 /// Only whole words match, so a user called Sam doesn't turn "Samsung" into "%USERNAME%sung".
+/// Letters in any language join a word ("Zoë"); punctuation such as ’ or — ends one.
 fn replace_ignoring_case(s: &str, from: &str, to: &str) -> String {
     let (hay, pat) = (s.as_bytes(), from.as_bytes());
     if pat.is_empty() {
         return s.to_string();
     }
-    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     let mut out = String::with_capacity(s.len());
     let (mut i, mut last) = (0, 0);
     while i + pat.len() <= hay.len() {
         let end = i + pat.len();
-        let edges = (i == 0 || !word(hay[i - 1])) && (end == hay.len() || !word(hay[end]));
-        if edges && hay[i..end].eq_ignore_ascii_case(pat) && s.is_char_boundary(i) && s.is_char_boundary(end) {
+        let whole = s.is_char_boundary(i) && s.is_char_boundary(end) && hay[i..end].eq_ignore_ascii_case(pat);
+        if whole && !word(s[..i].chars().next_back()) && !word(s[end..].chars().next()) {
             out.push_str(&s[last..i]);
             out.push_str(to);
             i += pat.len();
@@ -257,6 +258,9 @@ mod tests {
         ];
         let line = "saved c:\\users\\sam\\Desktop\\r.html and C:/Users/Sam/x on desktop-7q2 for sam, née Zoë";
         assert_eq!(redact(line, &swaps), "saved %USERPROFILE%\\Desktop\\r.html and %USERPROFILE%/x on %COMPUTERNAME% for %USERNAME%, née Zoë");
+        assert_eq!(redact("Sam’s PC—“sam”…", &swaps), "%USERNAME%’s PC—“%USERNAME%”…");
+        let zo = vec![("Zo".to_string(), "%USERNAME%")];
+        assert_eq!(redact("Zoë and Zo’s", &zo), "Zoë and %USERNAME%’s", "a letter with an accent still counts as part of a word");
         let untouched = "Samsung SSD in C:\\Users\\Samantha, by Sam_2";
         assert_eq!(redact(untouched, &swaps), untouched);
     }
