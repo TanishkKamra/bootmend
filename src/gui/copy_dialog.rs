@@ -37,11 +37,14 @@ pub enum Flow {
         stop: Arc<AtomicBool>,
         drive: String,
         cloud: usize,
+        unreadable: usize,
     },
     Over {
         r: Result<Copied, String>,
         drive: String,
         cloud: usize,
+        /// Folders that couldn't be opened, so their files were never listed.
+        unreadable: usize,
     },
     /// Looking didn't work.
     Failed(String),
@@ -66,7 +69,7 @@ impl Flow {
             .drives
             .into_iter()
             .map(|t| {
-                let fits = usb_copy::needed(&l.found, t.cluster) <= t.free;
+                let fits = usb_copy::needed(&l.found, &t) <= t.free;
                 (t, fits)
             })
             .collect();
@@ -77,7 +80,7 @@ impl Flow {
 
     /// Made-up drives and progress for the off-screen screenshots.
     pub fn sample(stage: u8) -> Flow {
-        let usb = |letter, name: &str, gb: u64| Target { letter, name: name.into(), free: gb << 30, cluster: 131_072 };
+        let usb = |letter, name: &str, gb: u64| Target { letter, name: name.into(), free: gb << 30, cluster: 131_072, fat32: false };
         let cloud = 3;
         match stage {
             0 => Flow::Pick {
@@ -92,17 +95,21 @@ impl Flow {
                 stop: Arc::new(AtomicBool::new(false)),
                 drive: "SANDISK (E:)".into(),
                 cloud,
+                unreadable: 0,
             },
             _ => Flow::Over {
                 r: Ok(Copied {
                     dir: PathBuf::from(r"E:\Bootmend copy 2026-11-16 13.42"),
                     files: 14_230,
                     bytes: 12 << 30,
-                    failed: vec![r"Pictures\2019\IMG_0412.jpg".into(), r"Documents\old.pst".into()],
+                    failed: vec![r"Pictures\2019\IMG_0412.jpg".into(), r"Pictures\2019\IMG_0413.jpg".into()],
+                    in_use: vec![r"Documents\Outlook Files\mail.pst".into()],
+                    too_big: vec![],
                     stopped: false,
                 }),
                 drive: "SANDISK (E:)".into(),
                 cloud,
+                unreadable: 0,
             },
         }
     }
@@ -149,21 +156,21 @@ impl App {
     }
 
     pub(super) fn on_copied(&mut self, r: Result<Copied, String>) {
-        if let Some(Flow::Copying { drive, cloud, .. }) = &self.copy {
-            self.copy = Some(Flow::Over { r, drive: drive.clone(), cloud: *cloud });
+        if let Some(Flow::Copying { drive, cloud, unreadable, .. }) = &self.copy {
+            self.copy = Some(Flow::Over { r, drive: drive.clone(), cloud: *cloud, unreadable: *unreadable });
         }
     }
 
     fn start_copy(&mut self, ctx: &egui::Context, i: usize) {
         let Some(Flow::Pick { found, drives, .. }) = &self.copy else { return };
         let Some((t, _)) = drives.get(i) else { return };
-        let (found, root, drive) = (found.clone(), PathBuf::from(format!("{}:\\", t.letter)), drive_name(t));
+        let (found, root, drive, max) = (found.clone(), PathBuf::from(format!("{}:\\", t.letter)), drive_name(t), t.max_file());
         let (done, stop) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)));
         let (d, s) = (done.clone(), stop.clone());
-        let cloud = found.cloud;
-        self.copy = Some(Flow::Copying { total: found.bytes, done, stop, drive, cloud });
+        let (cloud, unreadable) = (found.cloud, found.unreadable);
+        self.copy = Some(Flow::Copying { total: found.bytes, done, stop, drive, cloud, unreadable });
         self.spawn(ctx, move || {
-            let r = usb_copy::fresh_dir(&root, chrono::Local::now().naive_local()).and_then(|dir| usb_copy::copy_to(&found, &dir, &d, &s));
+            let r = usb_copy::fresh_dir(&root, chrono::Local::now().naive_local()).and_then(|dir| usb_copy::copy_to(&found, &dir, max, &d, &s));
             Job::Copied(r.map_err(|e| format!("{e:#}")))
         });
     }
@@ -259,12 +266,16 @@ impl App {
                         }
                     });
                 }
-                Flow::Over { r: Ok(c), drive, cloud } => {
+                Flow::Over { r: Ok(c), drive, cloud, unreadable } => {
                     let folder = c.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let title = match (c.stopped, c.failed.is_empty()) {
-                        (true, _) => "Copying stopped",
-                        (false, true) => "Your files are copied",
-                        (false, false) => "Most of your files are copied",
+                    let title = if c.stopped {
+                        "Copying stopped"
+                    } else if c.left() == 0 && *unreadable == 0 {
+                        "Your files are copied"
+                    } else if c.left() * 10 <= c.files {
+                        "Most of your files are copied"
+                    } else {
+                        "Some of your files are copied"
                     };
                     heading(ui, title);
                     if c.stopped {
@@ -275,10 +286,9 @@ impl App {
                     if !c.failed.is_empty() {
                         ui.add_space(S2);
                         ui.label(format!(
-                            "{} couldn't be read, so {} copied. The failing drive may have damaged {}.",
+                            "{} couldn't be copied, so {} still only on this PC.",
                             plural(c.failed.len(), "file", "files"),
-                            if c.failed.len() == 1 { "it wasn't" } else { "they weren't" },
-                            if c.failed.len() == 1 { "it" } else { "them" }
+                            if c.failed.len() == 1 { "it's" } else { "they're" }
                         ));
                         for f in c.failed.iter().take(3) {
                             muted(ui, f);
@@ -286,6 +296,29 @@ impl App {
                         if c.failed.len() > 3 {
                             muted(ui, format!("and {} more", c.failed.len() - 3));
                         }
+                    }
+                    let they = |n: usize| if n == 1 { "it wasn't" } else { "they weren't" };
+                    if !c.in_use.is_empty() {
+                        ui.add_space(S2);
+                        let n = c.in_use.len();
+                        ui.label(format!(
+                            "{} open in another app, so {} copied. Close your apps and copy again.",
+                            plural(n, "file was", "files were"),
+                            they(n)
+                        ));
+                    }
+                    if !c.too_big.is_empty() {
+                        ui.add_space(S2);
+                        let n = c.too_big.len();
+                        ui.label(format!("{} over 4 GB, which this drive can't hold, so {} copied.", plural(n, "file is", "files are"), they(n)));
+                    }
+                    if *unreadable > 0 {
+                        ui.add_space(S2);
+                        ui.label(format!(
+                            "{} couldn't be opened, so what's in {} wasn't copied.",
+                            plural(*unreadable, "folder", "folders"),
+                            if *unreadable == 1 { "it" } else { "them" }
+                        ));
                     }
                     if *cloud > 0 {
                         ui.add_space(S2);
