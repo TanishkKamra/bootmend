@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>round 8</title>
+<style>
+  body { margin: 0; padding: 18px 20px; background: #E7E8EB; font: 13px "Segoe UI Variable Text", "Segoe UI", sans-serif; color: #16181C; }
+  h1 { font: 600 18px "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 0 0 2px; }
+  .sub { color: #5B616C; margin-bottom: 12px; }
+  .head, .row { display: grid; grid-template-columns: 190px 128px 128px 92px 92px 70px 210px 210px 170px; gap: 10px; align-items: center; }
+  .head { color: #5B616C; font-size: 12.5px; padding: 0 12px 4px; }
+  .row { background: #fff; border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+  .n { font: 600 15px "Segoe UI Variable Display", "Segoe UI", sans-serif; }
+  .i { color: #5B616C; margin-top: 3px; line-height: 1.35; }
+  .tile { border-radius: 10px; display: grid; place-items: center; height: 116px; }
+  .L { background: #F3F3F3; } .Dk { background: #202020; }
+  .blur img { filter: blur(4.2px); }
+  .sizes { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 10px; height: 52px; }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 0 12px; height: 44px; border-radius: 8px; }
+  .bar + .bar { margin-top: 6px; }
+  canvas { image-rendering: pixelated; border-radius: 6px; }
+</style>
+<h1>Round 8: Keystone (recommended) and two alternatives</h1>
+<div class="sub">Shown in greys only, so the shape has to work without colour. Colour comes after you pick a shape.</div>
+<div class="head"><span></span><span>App icon</span><span>Mark, light and dark</span><span>One colour</span><span>Blurred</span><span>16 px, zoomed</span><span>48 · 32 · 24 · 16 on light</span><span>48 · 32 · 24 · 16 on dark</span><span>Taskbar, among other icons</span></div>
+<div id="g"></div>
+<script src="mark8.js"></script>
+<script>
+const url = (s) => 'data:image/svg+xml;utf8,' + encodeURIComponent(s);
+const im = (s, w) => `<img src="${url(s)}" width="${w}" height="${w}">`;
+// Generic look-alikes that sit in a real taskbar: shield, gear, folder, magnifier.
+const other = [
+  '<path d="M24 5 40 11v12c0 10-7 17-16 20C15 40 8 33 8 23V11z" fill="#3B7BE0"/>',
+  '<circle cx="24" cy="24" r="13" fill="none" stroke="#7A7F88" stroke-width="7" stroke-dasharray="5 3.2"/><circle cx="24" cy="24" r="7" fill="#7A7F88"/>',
+  '<path d="M5 13a3 3 0 0 1 3-3h11l4 4h17a3 3 0 0 1 3 3v19a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3z" fill="#E8B23A"/>',
+  '<circle cx="20" cy="20" r="11" fill="none" stroke="#2E9A6B" stroke-width="5"/><path d="M28 28l11 11" stroke="#2E9A6B" stroke-width="6" stroke-linecap="round"/>',
+].map((p) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="24" height="24">${p}</svg>`);
+const g = document.getElementById('g');
+for (const key of ["arch","bare","knee"]) {
+  const m = MARKS[key];
+  const bar = (bg, mono) => `<div class="bar ${bg}" style="${mono ? 'filter:grayscale(1) blur(1.2px)' : ''}">${other[0] ? im(other[0], 24) : ''}${im(other[1], 24)}${im(icon(key, 24, 'icon'), 24)}${im(other[2], 24)}${im(other[3], 24)}</div>`;
+  g.insertAdjacentHTML('beforeend', `<div class="row">
+    <div><div class="n">${m.name}</div><div class="i">${m.idea}</div></div>
+    <div class="tile L">${im(icon(key, 256, 'icon'), 104)}</div>
+    <div class="tile L" style="display:flex;flex-direction:column;gap:0;justify-content:center;background:linear-gradient(#F3F3F3 50%,#202020 50%)">${im(icon(key, 256, 'light'), 54)}${im(icon(key, 256, 'dark'), 54)}</div>
+    <div class="tile L">${im(icon(key, 256, 'sil'), 72)}</div>
+    <div class="tile L blur">${im(icon(key, 256, 'icon'), 72)}</div>
+    <div><canvas data-k="${key}" width="64" height="64"></canvas></div>
+    <div class="sizes L">${[48, 32, 24, 16].map((z) => im(icon(key, z, 'icon'), z)).join('')}<span style="width:4px"></span>${[24, 16].map((z) => im(icon(key, z, 'light'), z)).join('')}</div>
+    <div class="sizes Dk">${[48, 32, 24, 16].map((z) => im(icon(key, z, 'icon'), z)).join('')}<span style="width:4px"></span>${[24, 16].map((z) => im(icon(key, z, 'dark'), z)).join('')}</div>
+    <div>${bar('L')}${bar('Dk', true)}</div></div>`);
+}
+other.unshift(); // keep list intact
+document.querySelectorAll('canvas').forEach((c) => {
+  const t = document.createElement('canvas'); t.width = t.height = 16;
+  const img = new Image();
+  img.onload = () => { const x = t.getContext('2d'); x.fillStyle = '#F3F3F3'; x.fillRect(0, 0, 16, 16); x.drawImage(img, 0, 0, 16, 16);
+    const y = c.getContext('2d'); y.imageSmoothingEnabled = false; y.drawImage(t, 0, 0, 64, 64); };
+  img.src = url(icon(c.dataset.k, 16, 'icon'));
+});
+</script>
+
+<h1 style="margin-top:14px">Colour for the keystone (the mend), on the keystone arch</h1>
+<div class="sub">No teal, no orange. The rest stays graphite, like Linear: colour only on the one piece that does the mending.</div>
+<div id="pal" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px"></div>
+<script>
+const pals = [['Cobalt', ['#6A92FF', '#2F5BEA'], '#2F5BEA'], ['Violet', ['#A08BFF', '#6A4FE0'], '#6A4FE0'], ['Brass', ['#E3C27A', '#B08A3E'], '#B08A3E'], ['Plain white', ['#FFFFFF', '#D5D9DF'], '#FFFFFF']];
+const P = document.getElementById('pal');
+for (const [n, acc, hex] of pals) {
+  P.insertAdjacentHTML('beforeend', `<div class="row" style="grid-template-columns:auto 1fr;display:grid;gap:14px">
+    ${im(icon('arch', 256, 'icon', acc), 96)}
+    <div><div class="n">${n} <span style="font:12px Consolas,monospace;color:#5B616C">${hex}</span></div>
+    <div class="bar L" style="margin-top:8px">${im(icon('arch', 32, 'icon', acc), 32)}${im(icon('arch', 24, 'icon', acc), 24)}${im(icon('arch', 16, 'icon', acc), 16)}${im(icon('arch', 24, 'light', n === 'Plain white' ? null : acc), 24)}</div>
+    <div class="bar Dk">${im(icon('arch', 32, 'icon', acc), 32)}${im(icon('arch', 24, 'icon', acc), 24)}${im(icon('arch', 16, 'icon', acc), 16)}${im(icon('arch', 24, 'dark', acc), 24)}</div></div></div>`);
+}
+</script>
+
+<style>
+  .why { display: grid; grid-template-columns: 300px 1fr; gap: 22px; background: #fff; border-radius: 12px; padding: 18px 20px; margin-top: 12px; }
+  .why h2 { font: 600 17px "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 0 0 6px; }
+  .why .lead { font: 600 15px/1.45 "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 0 0 10px; }
+  .why ul { margin: 0; padding-left: 18px; line-height: 1.5; color: #2A2E35; }
+  .why li { margin-bottom: 5px; }
+  .lock { display: flex; align-items: center; gap: 12px; margin-top: 14px; font: 600 30px "Segoe UI Variable Display", "Segoe UI", sans-serif; letter-spacing: -0.4px; }
+</style>
+<div class="why">
+  <div><div id="hero"></div><div class="lock" id="lock"></div></div>
+  <div>
+    <h2>"Why this logo?"</h2>
+    <p class="lead">It's a keystone, the last stone set in an arch. Until it goes in, the arch needs a wooden frame to hold it up. Once it's in, the stones lock against each other, the frame comes away, and the arch stands on its own. That's Bootmend's job: put the last piece right, then get out of the way.</p>
+    <ul>
+      <li><b>The stone is caught just before it settles.</b> The mark shows the moment of mending, not a finished monument. That's the one part of the shape that's a little off, on purpose.</li>
+      <li><b>No shield, broom, rocket or speedometer.</b> Those are what "PC optimizers" use, and they promise protection or speed. An arch promises something quieter: built properly, it holds.</li>
+      <li><b>Colour on one piece only.</b> Everything is graphite except the stone doing the work, the same way the app uses one colour for the one thing to press.</li>
+      <li><b>Built to be read small.</b> It reads as an arch in one colour, blurred, and at 16 px in the taskbar, because the shape carries it, not the shading.</li>
+      <li><b>An arch is also a way in.</b> Booting is where every PC starts. That's a bonus reading, not one the mark depends on.</li>
+    </ul>
+  </div>
+</div>
+<script>
+document.getElementById('hero').innerHTML = im(icon('arch', 256, 'icon', ['#6A92FF', '#2F5BEA']), 150) + ' ' + im(icon('arch', 256, 'light', ['#6A92FF', '#2F5BEA']), 110);
+document.getElementById('lock').innerHTML = im(icon('arch', 96, 'light', ['#6A92FF', '#2F5BEA']), 40) + '<span>Bootmend</span>';
+</script>

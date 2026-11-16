@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>keystone character</title>
+<style>
+  body { margin: 0; padding: 18px 20px; background: #E7E8EB; font: 13px "Segoe UI Variable Text", "Segoe UI", sans-serif; color: #16181C; }
+  h1 { font: 600 18px "Segoe UI Variable Display", "Segoe UI", sans-serif; margin: 0 0 2px; }
+  .sub { color: #5B616C; margin-bottom: 12px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .card { background: #fff; border-radius: 12px; padding: 14px 16px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; border-radius: 10px; overflow: hidden; }
+  .pair > div { padding: 18px 16px; display: flex; align-items: center; gap: 12px; }
+  .L { background: #F3F3F3; color: #16181C; } .Dk { background: #1B1C20; color: #F2F3F5; }
+  .wm { font: 600 24px/1 "Segoe UI Variable Display", "Segoe UI", sans-serif; letter-spacing: -0.3px; }
+  .tag { font: 400 13px/1 "Segoe UI Variable Text", "Segoe UI", sans-serif; opacity: .72; margin-top: 6px; letter-spacing: .1px; }
+  .n { font: 600 15px "Segoe UI Variable Display", "Segoe UI", sans-serif; margin-top: 10px; }
+  .i { color: #5B616C; margin-top: 3px; line-height: 1.4; }
+  .film { display: flex; gap: 10px; align-items: flex-end; }
+  .film figure { margin: 0; text-align: center; color: #5B616C; font-size: 12.5px; }
+  .film .t { background: #1B1C20; border-radius: 10px; padding: 10px; }
+</style>
+<h1>The mark acts out the line, the way the swoosh acts out "Just Do It"</h1>
+<div class="sub">The wedge points down, so the shape already says "dropping in". The tagline names that one action.</div>
+<div class="grid3" id="tags"></div>
+<h1 style="margin-top:16px">The drop is the app's motion: things land and settle, once</h1>
+<div class="sub">About 360 ms, a firm landing with a tiny settle, no bounce. With Windows' Animation effects off, it fades in instead.</div>
+<div class="grid3" style="grid-template-columns:2fr 1fr">
+  <div class="card"><div class="film" id="film"></div></div>
+  <div class="card"><div class="film" id="state"></div><div class="i" style="margin-top:8px">Inside the app, the same arch can show state: the stone still dropping while something needs a look, and set flush once it's all fixed. The app icon itself never changes.</div></div>
+</div>
+<script src="mark8.js"></script>
+<script>
+const url = (s) => 'data:image/svg+xml;utf8,' + encodeURIComponent(s);
+const im = (s, w) => `<img src="${url(s)}" width="${w}" height="${w}">`;
+const acc = ['#6A92FF', '#2F5BEA'];
+const at = (dy, fn) => { const old = KDY.v; KDY.v = dy; const r = fn(); KDY.v = old; return r; };
+const tags = [
+  ['Mend it. Move on.', 'Two beats, like "Just Do It": fix the thing, get back to your day. The stone drops in, the frame comes away.'],
+  ['Set right.', 'Names the outcome, the way a keystone is "set". Calm and short, but quieter than the swoosh.'],
+  ['Put it right, and it holds.', 'The full keystone story in five words. Clear, but longer than a tagline should be.'],
+];
+document.getElementById('tags').innerHTML = tags.map(([t, why], k) => `<div class="card">
+  <div class="pair"><div class="L">${im(icon('arch', 96, 'light', acc), 46)}<div><div class="wm">Bootmend</div><div class="tag">${t}</div></div></div>
+  <div class="Dk">${im(icon('arch', 96, 'dark', acc), 46)}<div><div class="wm">Bootmend</div><div class="tag">${t}</div></div></div></div>
+  <div class="n">${k === 0 ? 'Recommended: ' : ''}"${t}"</div><div class="i">${why}</div></div>`).join('');
+const frames = [[-18, '0 ms'], [-11, '120'], [-4, '200'], [0.9, '260, lands'], [0, '360, set']];
+document.getElementById('film').innerHTML = frames.map(([dy, l]) => `<figure><div class="t">${at(dy, () => im(icon('arch', 256, 'dark', acc), 92))}</div><figcaption>${l}</figcaption></figure>`).join('');
+document.getElementById('state').innerHTML = `<figure><div class="t">${im(icon('arch', 256, 'dark', acc), 80)}</div><figcaption>Needs a look</figcaption></figure>`
+  + `<figure><div class="t">${at(0, () => im(icon('arch', 256, 'dark', acc), 80))}</div><figcaption>All fixed</figcaption></figure>`;
+</script>
