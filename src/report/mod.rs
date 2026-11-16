@@ -50,6 +50,8 @@ pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
             "--headless=new",
             "--disable-gpu",
             "--no-first-run",
+            // Otherwise Edge may start downloading its own updates and leave them in the temp folder.
+            "--disable-component-update",
             "--no-pdf-header-footer",
             &format!("--user-data-dir={}", profile.display()),
             &format!("--print-to-pdf={}", out.display()),
