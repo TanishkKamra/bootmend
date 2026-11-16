@@ -60,6 +60,10 @@ pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
     if let Err(e) = std::fs::remove_file(&html) {
         log!("report", "could not remove temporary report: {e}");
     }
+    // Edge fills its profile with caches; the next PDF makes a fresh one.
+    if let Err(e) = std::fs::remove_dir_all(&profile) {
+        log!("report", "could not remove Edge's temporary profile: {e}");
+    }
     r.inspect_err(|e| log!("report", "PDF report failed: {e:#}"))?;
     if out.is_file() {
         log!("report", "PDF report written to {} (personal details hidden: {})", out.display(), hide_personal);

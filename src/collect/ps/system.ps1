@@ -98,7 +98,9 @@ Try-Section 'directx' {
   $p = Start-Process dxdiag -ArgumentList '/whql:off', '/t', $dx -WindowStyle Hidden -PassThru
   if (-not $p.WaitForExit(90000)) { Stop-Process -Id $p.Id -Force }
   if (Test-Path $dx) { $k = KV (Get-Content $dx)
-    $R.directx = [ordered]@{ DirectX = $k['DirectX Version']; WDDM = $k['Driver Model']; FeatureLevels = $k['Feature Levels']; HDR = $k['HDR Support']; NativeMode = $k['Native Mode']; HWScheduling = $k['Hardware Scheduling'] } }
+    $R.directx = [ordered]@{ DirectX = $k['DirectX Version']; WDDM = $k['Driver Model']; FeatureLevels = $k['Feature Levels']; HDR = $k['HDR Support']; NativeMode = $k['Native Mode']; HWScheduling = $k['Hardware Scheduling'] }
+    # Like the battery report below, it names the PC, so it isn't kept once read.
+    Remove-Item $dx -Force }
 }
 
 Try-Section 'battery' {
@@ -106,7 +108,8 @@ Try-Section 'battery' {
     $bx = Join-Path $env:BOOTMEND_TMP 'battery.xml'; powercfg /batteryreport /xml /output $bx | Out-Null
     if (Test-Path $bx) { [xml]$x = Get-Content $bx; $b = $x.BatteryReport.Batteries.Battery | Select-Object -First 1
       $R.battery = [ordered]@{ Name = $b.Id; Maker = $b.Manufacturer; Chemistry = $b.Chemistry; DesignmWh = [int]$b.DesignCapacity; FullChargemWh = [int]$b.FullChargeCapacity; Cycles = [int]$b.CycleCount
-        ChargePct = (Get-CimInstance Win32_Battery).EstimatedChargeRemaining; OnAC = ((Get-CimInstance -Namespace root\wmi BatteryStatus).PowerOnline | Select-Object -First 1) } }
+        ChargePct = (Get-CimInstance Win32_Battery).EstimatedChargeRemaining; OnAC = ((Get-CimInstance -Namespace root\wmi BatteryStatus).PowerOnline | Select-Object -First 1) }
+      Remove-Item $bx -Force }
   }
 }
 
