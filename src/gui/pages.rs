@@ -164,7 +164,7 @@ impl App {
     // ---------- Findings ----------
 
     /// What to do, the details and the buttons for one finding, shown when its row on Home is
-    /// open. `skip_fix` leaves out the single fix the row's own button already offers.
+    /// open. `skip_fix` leaves out the single fix or copy the row's own button already offers.
     pub(super) fn finding_body(&mut self, ui: &mut Ui, f: &Finding, skip_fix: bool) {
         let p = pal(ui.ctx());
         if !f.steps.is_empty() {
@@ -190,7 +190,7 @@ impl App {
         }
         let mut rest = f.clone();
         if skip_fix {
-            rest.actions.retain(|a| !matches!(a, Action::Fix(_)));
+            rest.actions.retain(|a| !matches!(a, Action::Fix(_) | Action::CopyFiles));
         }
         if !rest.actions.is_empty() {
             ui.add_space(S3);
@@ -239,6 +239,11 @@ impl App {
                         }
                     }
                     Action::RestorePoint => self.restore_point_button(ui),
+                    Action::CopyFiles => {
+                        if widgets::primary(ui, "Copy my files to a USB drive").clicked() {
+                            self.open_copy(&ui.ctx().clone());
+                        }
+                    }
                 }
             }
         });
@@ -496,14 +501,18 @@ impl App {
                 } else {
                     self.fix_button_as(ui, &Fix::EnableSystemProtection, "System Restore is off", Area::Security, true);
                 }
-                if widgets::icon_button(ui, icon::OPEN, "Open System Restore", true).clicked() {
-                    log!("action", "opening rstrui.exe");
-                    if let Err(e) = shell_open("rstrui.exe") {
-                        self.toast(format!("{e:#}"), false);
-                    }
-                }
+                self.open_system_restore(ui);
             });
         });
+    }
+
+    fn open_system_restore(&mut self, ui: &mut Ui) {
+        if widgets::icon_button(ui, icon::OPEN, "Open System Restore", true).clicked() {
+            log!("action", "opening rstrui.exe");
+            if let Err(e) = shell_open("rstrui.exe") {
+                self.toast(format!("{e:#}"), false);
+            }
+        }
     }
 
     fn device_history(&mut self, ui: &mut Ui, snap: &Snapshot) {
@@ -1056,6 +1065,8 @@ impl App {
                 setting(ui, &title, &detail, |ui| {
                     if let Some(u) = &h.undone {
                         ui.label(RichText::new(format!("Undone {u}")).color(p.muted));
+                    } else if !h.fix.undoable() {
+                        // Nothing to undo: it only put back Windows' own files.
                     } else if self.busy.contains(&format!("undo:{i}")) {
                         ui.add(egui::Spinner::new());
                     } else {
@@ -1073,6 +1084,62 @@ impl App {
             });
             ui.add_space(S2);
         }
+        self.restore_points(ui);
+    }
+
+    fn restore_points(&mut self, ui: &mut Ui) {
+        const SHOWN: usize = 10;
+        section(ui, "Restore points");
+        let on = self.snap.as_ref().and_then(|s| s.security.g("restore").b("COn"));
+        if self.elevated && self.points.is_none() && self.busy.insert("points".into()) {
+            self.spawn(ui.ctx(), || super::Job::Points(crate::fixes::restore_points().map_err(|e| format!("{e:#}"))));
+        }
+        card(ui, |ui| {
+            match (&self.points, self.elevated) {
+                (_, false) => {
+                    muted(ui, "Windows only shows restore points to administrators. Restart Bootmend as administrator to see them.");
+                }
+                (None, true) => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new());
+                        muted(ui, "Reading restore points");
+                    });
+                }
+                (Some(Err(e)), true) => {
+                    muted(ui, format!("Bootmend couldn't read them: {e}"));
+                }
+                (Some(Ok(v)), true) if v.is_empty() => {
+                    muted(ui, if on == Some(false) { "System Restore is off, so Windows isn't saving any." } else { "Windows hasn't saved any yet." });
+                }
+                (Some(Ok(v)), true) => {
+                    muted(
+                        ui,
+                        "System Restore can take Windows back to one of these. Your files stay as they are; apps, drivers and updates added since are removed.",
+                    );
+                    ui.add_space(S2);
+                    let today = chrono::Local::now().date_naive();
+                    let rows: Vec<(String, Option<String>)> = v
+                        .iter()
+                        .take(SHOWN)
+                        .map(|p| {
+                            let w = crate::util::when_words(&p.when, today);
+                            (format!("{}{}", w[..1].to_uppercase(), &w[1..]), Some(p.what.clone()))
+                        })
+                        .collect();
+                    kv(ui, "restore-points", &rows.iter().map(|(w, n)| (w.as_str(), n.clone())).collect::<Vec<_>>());
+                    if let Some(n) = v.len().checked_sub(SHOWN).filter(|n| *n > 0) {
+                        muted(ui, format!("And {n} older {}.", if n == 1 { "one" } else { "ones" }));
+                    }
+                }
+            }
+            ui.add_space(S3);
+            ui.horizontal_wrapped(|ui| {
+                if on == Some(false) {
+                    self.fix_button_as(ui, &Fix::EnableSystemProtection, "System Restore is off", Area::Security, true);
+                }
+                self.open_system_restore(ui);
+            });
+        });
     }
 
     fn saved_checks(&mut self, ui: &mut Ui) {

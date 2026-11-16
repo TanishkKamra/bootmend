@@ -15,6 +15,10 @@ Try-Section 'volumes' {
       [ordered]@{ Letter = $(if ($_.DriveLetter) { "$($_.DriveLetter):" } else { $null }); Label = $_.FileSystemLabel; FS = $_.FileSystem; SizeGB = (GB $_.Size); FreeGB = (GB $_.SizeRemaining)
         Health = "$($_.HealthStatus)"; BitLocker = $(if ($_.DriveLetter) { $bl["$($_.DriveLetter):"] } else { $null }); Disk = $(if ($part) { [int]$part.DiskNumber } else { $null }); PartitionType = $(if ($part) { "$($part.Type)" } else { $null }) } })
 }
+Try-Section 'folderDrives' {
+  # Only the drive letters, so a failing drive's to-do can offer to copy the folders off it.
+  $R.folderDrives = @('MyDocuments', 'Desktop', 'MyPictures' | ForEach-Object { [Environment]::GetFolderPath($_) } | Where-Object { $_ -match '^[A-Za-z]:' } | ForEach-Object { $_.Substring(0, 2).ToUpper() } | Sort-Object -Unique)
+}
 Try-Section 'ataSmart' {
   # Raw ATA SMART tables (admin only). Parsed in Rust; matched to disks by model name in InstanceName.
   $R.ataSmart = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_ATAPISmartData | ForEach-Object { [ordered]@{ Instance = $_.InstanceName; Data = @($_.VendorSpecific | ForEach-Object { [int]$_ }) } })

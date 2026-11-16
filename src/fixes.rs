@@ -75,6 +75,15 @@ pub enum Fix {
         key: String,
         settings: Vec<String>,
     },
+    /// DISM, then System File Checker. It only puts back Windows' own copies, so there's nothing to undo.
+    RepairWindowsFiles,
+    /// Puts back the driver Windows kept from before the device's last update. Windows then removes
+    /// the newer one, so there's nothing to undo.
+    RollBackDriver {
+        /// The device instance ID: "PCI\VEN_1002&DEV_73DF\6&15bb039d&0&00000019".
+        device: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -130,6 +139,8 @@ impl Fix {
             Fix::RemoveBrowserPolicies { .. } => "Remove the locked settings",
             Fix::EnableRecovery => "Switch on Windows Recovery",
             Fix::RemoveUpdateBlock { .. } => "Unblock Windows Update",
+            Fix::RepairWindowsFiles => "Repair Windows files",
+            Fix::RollBackDriver { .. } => "Go back to the previous driver",
         }
     }
 
@@ -161,6 +172,8 @@ impl Fix {
             Fix::RemoveBrowserPolicies { browser, .. } => format!("The locked settings will be removed from {browser}, after saving a copy so you can put them back from History. Restart {browser} afterwards."),
             Fix::EnableRecovery => "Windows' recovery tools will be switched back on, so it can repair itself or reset if it ever fails to start. You can switch them off again from History.".into(),
             Fix::RemoveUpdateBlock { .. } => "The settings blocking Windows Update will be removed, after saving a copy so you can put them back from History. Windows then gets updates from Microsoft again.".into(),
+            Fix::RepairWindowsFiles => "Windows will replace its damaged files with fresh copies from Microsoft, so it needs the internet. It can take up to 30 minutes, and you can keep using your PC. Your own files and apps aren't touched, so there's nothing to undo.".into(),
+            Fix::RollBackDriver { name, .. } => format!("Windows will put back the driver the {name} used before its last update. The screen may flicker, and the PC may need a restart. This can't be undone from History, and Windows Update may offer the newer driver again."),
         }
     }
 
@@ -192,7 +205,34 @@ impl Fix {
             Fix::RemoveBrowserPolicies { browser, .. } => format!("Unlocking {browser}'s settings, with a copy kept"),
             Fix::EnableRecovery => "Switching Windows' repair tools back on".into(),
             Fix::RemoveUpdateBlock { .. } => "Unblocking Windows Update".into(),
+            Fix::RepairWindowsFiles => "Repairing Windows' own files, which can take up to 30 minutes".into(),
+            Fix::RollBackDriver { name, .. } => format!("Going back to the previous driver for the {name}"),
         }
+    }
+
+    /// Whether History can take it back.
+    pub fn undoable(&self) -> bool {
+        !matches!(self, Fix::RepairWindowsFiles | Fix::RollBackDriver { .. })
+    }
+
+    /// Whether "Fix the safe ones for me" may include it. Going back to an older driver is a
+    /// judgement call that can't be undone, so it's only offered on its own to-do.
+    pub fn safe(&self) -> bool {
+        !matches!(self, Fix::RollBackDriver { .. })
+    }
+
+    /// The longest it usually takes, for the fixes that take minutes rather than seconds.
+    pub fn up_to_minutes(&self) -> Option<u32> {
+        match self {
+            Fix::RepairWindowsFiles => Some(30),
+            Fix::RollBackDriver { .. } => Some(5),
+            _ => None,
+        }
+    }
+
+    /// Generous, so a slow PC isn't cut off part-way.
+    fn timeout(&self) -> Duration {
+        self.up_to_minutes().map_or(Duration::from_secs(300), |m| Duration::from_secs(u64::from(m) * 60 * 3))
     }
 
     /// Per-user startup entries can be changed without administrator rights; everything else needs them.
@@ -343,9 +383,58 @@ impl Fix {
                 format!("{NATIVE}if (Native {{ reagentc.exe /disable }}) {{ throw 'Windows could not switch its recovery tools off' }}"),
             ),
             Fix::RemoveUpdateBlock { key, settings } => remove_policies("policies-windowsupdate", key, settings),
+            // Microsoft's order: DISM mends the store sfc copies from. sfc's exit code means
+            // nothing, so Windows' own health record has the last word. 3010 asks for a restart.
+            Fix::RepairWindowsFiles => (
+                format!(
+                    r#"{NATIVE}$c = Native {{ DISM.exe /Online /Cleanup-Image /RestoreHealth }}
+if ($c -in -2146498529, -2146498298, -2146498283) {{ throw "Windows couldn't download fresh copies of its files. Check the internet connection, then try again." }}
+if ($c -ne 0 -and $c -ne 3010) {{ throw ("Windows couldn't repair its files (error 0x{{0:X8}})" -f $c) }}
+$null = Native {{ sfc.exe /scannow }}
+if ("$((Repair-WindowsImage -Online -CheckHealth).ImageHealthState)" -ne 'Healthy') {{ throw "Windows repaired what it could, but some of its files are still damaged." }}"#
+                ),
+                String::new(),
+            ),
+            // Device Manager's "Roll Back Driver", without its questions. Windows keeps one earlier
+            // driver per device; 259 (ERROR_NO_MORE_ITEMS) means it has none.
+            Fix::RollBackDriver { device, .. } => (ROLL_BACK.replace("{DEVICE}", &ps_quote(device)), String::new()),
         }
     }
 }
+
+const ROLL_BACK: &str = r#"Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class BootmendRollBack {
+    [StructLayout(LayoutKind.Sequential)]
+    struct DevInfo { public int Size; public Guid Class; public int Inst; public IntPtr Reserved; }
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern IntPtr SetupDiCreateDeviceInfoList(IntPtr cls, IntPtr hwnd);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiOpenDeviceInfoW(IntPtr set, string id, IntPtr hwnd, int flags, ref DevInfo info);
+    [DllImport("setupapi.dll")]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+    [DllImport("newdev.dll", SetLastError = true)]
+    static extern bool DiRollbackDriver(IntPtr set, ref DevInfo info, IntPtr hwnd, int flags, out bool restart);
+    // 0 when the earlier driver is back, else the Windows error code.
+    public static int Run(string id) {
+        IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+        if (set == new IntPtr(-1)) return Marshal.GetLastWin32Error();
+        try {
+            DevInfo info = new DevInfo();
+            info.Size = Marshal.SizeOf(info);
+            if (!SetupDiOpenDeviceInfoW(set, id, IntPtr.Zero, 0, ref info)) return Marshal.GetLastWin32Error();
+            bool restart;
+            // 1 is ROLLBACK_FLAG_NO_UI.
+            return DiRollbackDriver(set, ref info, IntPtr.Zero, 1, out restart) ? 0 : Marshal.GetLastWin32Error();
+        } finally { SetupDiDestroyDeviceInfoList(set); }
+    }
+}
+'@
+$e = [BootmendRollBack]::Run({DEVICE})
+if ($e -eq 259) { throw "Windows no longer has the earlier driver, so it can't go back to it" }
+if ($e -eq -536870389) { throw "That device isn't plugged in any more" }
+if ($e -ne 0) { throw ("Windows couldn't go back to the earlier driver (error {0})" -f $e) }"#;
 
 /// Saves a copy of a policy key, then removes the named settings from it: values, or subkeys (lists,
 /// Firefox's groups). A name with a backslash is in a subkey ("AU\UseWUServer"). Undo imports the copy.
@@ -437,11 +526,16 @@ fn write_history(p: &Path, h: &[HistoryEntry]) -> Result<()> {
 }
 
 fn run_ps(body: &str) -> Result<()> {
+    ps_output(body, Duration::from_secs(300)).map(|_| ())
+}
+
+/// Runs `body` and returns what it printed, or the reason it stopped.
+fn ps_output(body: &str, timeout: Duration) -> Result<String> {
     let script =
         format!("$ErrorActionPreference = 'Stop'\ntry {{\n{body}\n'BOOTMEND-OK'\n}} catch {{ Write-Output ('BOOTMEND-ERR ' + $_.Exception.Message); exit 1 }}");
-    let out = powershell(&script, Duration::from_secs(300))?;
+    let out = powershell(&script, timeout)?;
     if out.stdout.contains("BOOTMEND-OK") {
-        return Ok(());
+        return Ok(out.stdout);
     }
     let msg = out
         .stdout
@@ -455,7 +549,7 @@ fn run_ps(body: &str) -> Result<()> {
 
 /// Apply a fix and record how to undo it.
 pub fn apply(fix: &Fix, title: &str) -> Result<()> {
-    apply_with(fix, title, history_for_change("a fix")?, &mut |h| save_history(h), &run_ps)
+    apply_with(fix, title, history_for_change("a fix")?, &mut |h| save_history(h), &|s| ps_output(s, fix.timeout()).map(|_| ()))
 }
 
 type Save<'a> = &'a mut dyn FnMut(&[HistoryEntry]) -> Result<()>;
@@ -498,6 +592,34 @@ pub fn restore_point(description: &str) -> Result<()> {
     r
 }
 
+/// A point Windows can take the PC back to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestorePoint {
+    /// "yyyy-MM-dd HH:mm"
+    pub when: String,
+    pub what: String,
+}
+
+/// Windows' restore points, newest first. Only administrators can read them.
+pub fn restore_points() -> Result<Vec<RestorePoint>> {
+    let out = ps_output(
+        "Get-ComputerRestorePoint | ForEach-Object { ([Management.ManagementDateTimeConverter]::ToDateTime($_.CreationTime)).ToString('yyyy-MM-dd HH:mm') + \"`t\" + $_.Description }",
+        Duration::from_secs(60),
+    )?;
+    Ok(parse_points(&out))
+}
+
+fn parse_points(text: &str) -> Vec<RestorePoint> {
+    let mut v: Vec<RestorePoint> = text
+        .lines()
+        .filter_map(|l| l.trim_end().split_once('\t'))
+        .filter(|(w, _)| chrono::NaiveDateTime::parse_from_str(w, "%Y-%m-%d %H:%M").is_ok())
+        .map(|(w, d)| RestorePoint { when: w.to_string(), what: d.trim().to_string() })
+        .collect();
+    v.sort_by(|a, b| b.when.cmp(&a.when));
+    v
+}
+
 /// Undo the history entry at `index`.
 pub fn undo(index: usize) -> Result<()> {
     undo_with(index, history_for_change("an undo")?, &mut |h| save_history(h), &run_ps)
@@ -508,6 +630,9 @@ fn undo_with(index: usize, mut h: Vec<HistoryEntry>, save: Save, run: Run) -> Re
     let e = h.get_mut(index).ok_or_else(|| anyhow!("that change is no longer in the history"))?;
     if e.undone.is_some() {
         return Err(anyhow!("that change was already undone"));
+    }
+    if !e.fix.undoable() {
+        return Err(anyhow!("there's nothing to undo for that change"));
     }
     let (title, script) = (e.title.clone(), e.undo_script.clone());
     log!("undo", "undoing \"{}\"", title);
@@ -558,6 +683,66 @@ mod tests {
         assert_eq!(kept.unwrap().unwrap(), "[{\"when\": \"2026-11-1", "the unreadable file is kept, untouched");
         assert_eq!(back.len(), 1);
         assert_eq!(files, 2, "the new history and the kept copy, with no temporary file left behind");
+    }
+
+    /// Windows removes the newer driver, so History lists the change with nothing to undo, and it
+    /// never joins the safe ones.
+    #[test]
+    fn going_back_to_an_earlier_driver_names_the_device_and_has_nothing_to_undo() {
+        let fx = Fix::RollBackDriver { device: r"PCI\VEN_1002&DEV_73DF\6&15bb'039d".into(), name: "AMD Radeon RX 6750 XT".into() };
+        let (a, u) = fx.scripts();
+        assert!(a.contains(r"[BootmendRollBack]::Run('PCI\VEN_1002&DEV_73DF\6&15bb''039d')"), "{a}");
+        assert!(
+            a.contains("DiRollbackDriver(set, ref info, IntPtr.Zero, 1,") && a.contains("259"),
+            "no questions, and plain words when there's nothing to go back to: {a}"
+        );
+        assert!(u.is_empty() && !fx.undoable() && fx.needs_admin() && !fx.safe() && Fix::RepairWindowsFiles.safe());
+        assert_eq!(fx.up_to_minutes(), Some(5));
+        assert!(fx.describe().contains("AMD Radeon RX 6750 XT") && fx.doing().contains("AMD Radeon RX 6750 XT"));
+    }
+
+    /// It only puts back Windows' own copies, so History lists it with nothing to undo.
+    #[test]
+    fn repairing_windows_files_is_listed_but_has_nothing_to_undo() {
+        let fx = Fix::RepairWindowsFiles;
+        let (a, u) = fx.scripts();
+        let (dism, sfc, check) = (a.find("/RestoreHealth").unwrap(), a.find("sfc.exe /scannow").unwrap(), a.find("-CheckHealth").unwrap());
+        assert!(dism < sfc && sfc < check, "DISM first, then sfc, then Windows' own verdict: {a}");
+        assert!(a.contains("3010") && a.contains("-2146498529"), "a restart-needed result is fine; missing source files get plain words: {a}");
+        assert!(u.is_empty() && !fx.undoable() && fx.needs_admin());
+        assert!(every_fix().iter().filter(|f| **f != fx && !matches!(f, Fix::RollBackDriver { .. })).all(Fix::undoable));
+        assert!(fx.timeout() >= Duration::from_secs(45 * 60) && Fix::EnablePua.timeout() == Duration::from_secs(300));
+        assert_eq!((fx.up_to_minutes(), Fix::EnablePua.up_to_minutes()), (Some(30), None));
+
+        let mut saved = vec![];
+        apply_with(
+            &fx,
+            "Some of Windows' own files are damaged",
+            vec![],
+            &mut |h| {
+                saved = h.to_vec();
+                Ok(())
+            },
+            &|_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(saved.len(), 1, "listed in History");
+        let ran = Cell::new(false);
+        let r = undo_with(0, saved.clone(), &mut |_| Ok(()), &|_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert!(r.is_err() && !ran.get(), "nothing to undo, so nothing runs");
+    }
+
+    #[test]
+    fn restore_points_are_listed_newest_first() {
+        let out =
+            "2026-10-02 09:15\tWindows Update\r\n2026-11-16 13:42\tSaved with Bootmend\r\n\r\nnot a point\r\n2026-11-01 18:00\tInstalled Steam\t(app)\r\n";
+        let points = parse_points(out);
+        let got: Vec<_> = points.iter().map(|p| (p.when.as_str(), p.what.as_str())).collect();
+        assert_eq!(got, [("2026-11-16 13:42", "Saved with Bootmend"), ("2026-11-01 18:00", "Installed Steam\t(app)"), ("2026-10-02 09:15", "Windows Update")]);
+        assert!(parse_points("").is_empty());
     }
 
     #[test]
@@ -814,6 +999,8 @@ mod tests {
                 key: r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate".into(),
                 settings: vec!["WUServer".into(), r"AU\UseWUServer".into()],
             },
+            Fix::RepairWindowsFiles,
+            Fix::RollBackDriver { device: r"PCI\VEN_1002&DEV_73DF\6&15bb039d&0&00000019".into(), name: "AMD Radeon RX 6750 XT".into() },
         ]
     }
 

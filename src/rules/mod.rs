@@ -79,11 +79,16 @@ impl Confidence {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Fix(Fix),
-    Open { label: &'static str, target: String },
+    Open {
+        label: &'static str,
+        target: String,
+    },
     Goto(Page),
     AnalyzeDumps,
     Elevate,
     RestorePoint,
+    /// Copy Documents, Desktop and Pictures to a USB drive.
+    CopyFiles,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +152,24 @@ impl Finding {
 }
 
 pub fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
+    let digits = n.to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    format!("{grouped} {}", if n == 1 { one } else { many })
+}
+
+/// "Desktop, Documents and Pictures".
+pub fn join_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 pub fn evaluate(s: &Snapshot) -> Vec<Finding> {
@@ -970,6 +992,13 @@ mod tests {
         };
         assert_eq!(state(json!("Repairable")), Some(Level::WorthDoing));
         assert_eq!(state(json!("NonRepairable")), Some(Level::WorthDoing));
+        let repair = |v: &str| {
+            let mut s = base();
+            s.health = json!({ "imageHealth": v });
+            evaluate(&s).into_iter().find(|f| f.id == "windows-damaged").unwrap().actions.contains(&Action::Fix(Fix::RepairWindowsFiles))
+        };
+        assert!(repair("Repairable"), "Bootmend can run the repair itself");
+        assert!(!repair("NonRepairable"), "Windows can't repair this, so a reset is the way");
         assert_eq!(state(json!("Healthy")), None);
         assert_eq!(state(json!(null)), None, "only read with administrator rights");
     }
@@ -1089,6 +1118,120 @@ mod tests {
         assert!(fw("WD Blue SN580 2TB", "281040WD", 1863.0, "26200.1").is_some());
         assert!(fw("WD Blue SN5000 2TB", "291010WD", 1863.0, "26200.1").is_some());
         assert!(fw("WD Blue SN5000 2TB", "291020WD", 1863.0, "26200.1").is_none());
+    }
+
+    /// Bootmend copies the person's folders off a failing drive only when they're on it.
+    /// Blue screens on these dates, and a graphics driver and its sound part updated together.
+    fn crashed_after_update(crashes: &[&str]) -> Snapshot {
+        let mut s = base();
+        let gpu = r"PCI\VEN_1002&DEV_73DF\6&15bb039d&0&00000019";
+        s.health = json!({
+            "bugchecks": crashes.iter().map(|d| json!({"Date": d, "Text": "The bugcheck was: 0x0000003b (0x0, 0x0)."})).collect::<Vec<_>>(),
+            "driverUpdates": [
+                {"Device": gpu, "Name": "AMD Radeon RX 6750 XT", "Class": "Display", "Image": "amdkmdag.sys", "Version": "32.0.21045.20006", "Before": "32.0.21045.16010", "Date": "2026-11-05 10:34"},
+                {"Device": r"HDAUDIO\FUNC_01&VEN_1002\7&1b7372a&0&0001", "Name": "AMD High Definition Audio Device", "Class": "MEDIA", "Image": "AtihdWT6.sys", "Version": "10.0.1.43", "Before": "10.0.1.42", "Date": "2026-11-05 10:34"}
+            ]
+        });
+        s
+    }
+
+    fn rollback(s: &Snapshot) -> Option<(Fix, Confidence)> {
+        let f = evaluate(s).into_iter().find(|f| f.id == "bsod")?;
+        f.actions.iter().find_map(|a| match a {
+            Action::Fix(x @ Fix::RollBackDriver { .. }) => Some((x.clone(), f.confidence)),
+            _ => None,
+        })
+    }
+
+    fn gpu_rollback() -> Fix {
+        Fix::RollBackDriver { device: r"PCI\VEN_1002&DEV_73DF\6&15bb039d&0&00000019".into(), name: "AMD Radeon RX 6750 XT".into() }
+    }
+
+    fn dump(image: &str, date: &str) -> crate::snapshot::DumpAnalysis {
+        crate::snapshot::DumpAnalysis { image: Some(image.into()), date: date.into(), code: "0x3B".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn crash_files_naming_a_freshly_updated_driver_offer_the_version_before() {
+        let mut s = crashed_after_update(&["2026-11-20 21:00", "2026-11-21 22:00"]);
+        s.dumps = vec![dump("amdkmdag.sys", "2026-11-20 21:01")];
+        assert_eq!(rollback(&s), Some((gpu_rollback(), Confidence::Measured)), "measured even though the crashes began two weeks later");
+    }
+
+    #[test]
+    fn blue_screens_soon_after_an_update_offer_the_graphics_driver_as_a_best_guess() {
+        let s = crashed_after_update(&["2026-11-07 09:00", "2026-11-08 18:30", "2026-11-12 20:00"]);
+        assert_eq!(rollback(&s), Some((gpu_rollback(), Confidence::BestGuess)), "the graphics driver wins over its sound part");
+    }
+
+    #[test]
+    fn no_rollback_without_a_clear_link_to_the_update() {
+        // Crashing before the update too: the old version crashed as well.
+        assert_eq!(rollback(&crashed_after_update(&["2026-10-20 10:00", "2026-11-07 09:00"])), None);
+        // First crash more than a week after it.
+        assert_eq!(rollback(&crashed_after_update(&["2026-11-20 10:00"])), None);
+        // The crash files name a driver that crashed before its update as well.
+        let mut s = crashed_after_update(&["2026-11-20 21:00"]);
+        s.dumps = vec![dump("amdkmdag.sys", "2026-11-01 08:00"), dump("amdkmdag.sys", "2026-11-20 21:01")];
+        assert_eq!(rollback(&s), None);
+        // The last change went down a version: that was a rollback already.
+        let mut s = crashed_after_update(&["2026-11-07 09:00"]);
+        s.health["driverUpdates"].as_array_mut().unwrap().truncate(1);
+        s.health["driverUpdates"][0]["Before"] = json!("32.0.21045.30000");
+        assert_eq!(rollback(&s), None);
+        // Two updates nothing tells apart.
+        let mut s = crashed_after_update(&["2026-11-07 09:00"]);
+        s.health["driverUpdates"][0]["Class"] = json!("Net");
+        assert_eq!(rollback(&s), None);
+        // No earlier version on record, or only one of Windows' own basic drivers to go back to.
+        for (key, value) in [("Before", json!(null)), ("BeforeInbox", json!(true))] {
+            let mut s = crashed_after_update(&["2026-11-07 09:00"]);
+            s.health["driverUpdates"].as_array_mut().unwrap().truncate(1);
+            s.health["driverUpdates"][0][key] = value;
+            assert_eq!(rollback(&s), None, "{key}");
+        }
+        // Crash files name it, but blue screens came before the update too (older files cleared away).
+        let mut s = crashed_after_update(&["2026-10-28 10:00", "2026-11-20 21:00"]);
+        s.dumps = vec![dump("amdkmdag.sys", "2026-11-20 21:01")];
+        assert_eq!(rollback(&s), None);
+        // Crash files name a driver file two updated devices share.
+        let mut s = crashed_after_update(&["2026-11-20 21:00"]);
+        s.health["driverUpdates"][1]["Image"] = json!("AMDKMDAG.SYS");
+        s.dumps = vec![dump("amdkmdag.sys", "2026-11-20 21:01")];
+        assert_eq!(rollback(&s), None);
+        // The same, when the other device's update came after the crash.
+        s.health["driverUpdates"][1]["Date"] = json!("2026-11-20 22:00");
+        assert_eq!(rollback(&s), None, "the crash files still can't tell the two devices apart");
+    }
+
+    #[test]
+    fn big_counts_are_grouped_in_thousands() {
+        assert_eq!(plural(1, "file", "files"), "1 file");
+        assert_eq!(plural(999, "file", "files"), "999 files");
+        assert_eq!(plural(1_000, "file", "files"), "1,000 files");
+        assert_eq!(plural(14_230, "file", "files"), "14,230 files");
+        assert_eq!(plural(1_234_567, "file", "files"), "1,234,567 files");
+    }
+
+    #[test]
+    fn a_failing_drive_with_your_folders_offers_to_copy_them() {
+        let copy = |failing: i64, folders: serde_json::Value| {
+            let mut s = base();
+            s.storage = json!({
+                "disks": [{"Number": 0, "Model": "Inside", "Health": "Healthy"}, {"Number": 1, "Model": "Second", "Health": "Healthy"}],
+                "volumes": [{"Letter": "C:", "Disk": 0}, {"Letter": "D:", "Disk": 1}],
+                "folderDrives": folders
+            });
+            s.storage["disks"][failing as usize]["Health"] = json!("Warning");
+            s.drives = crate::collect::smart::drive_health(&s.storage);
+            let f = evaluate(&s);
+            let x = f.iter().find(|x| x.id == format!("drive-failing-{failing}")).expect("a failing drive");
+            x.actions.contains(&Action::CopyFiles)
+        };
+        assert!(copy(0, json!(["C:"])));
+        assert!(!copy(1, json!(["C:"])), "a second drive keeps the plain advice");
+        assert!(copy(1, json!(["C:", "D:"])), "folders moved to the second drive");
+        assert!(!copy(0, json!(null)), "an older check didn't note where the folders are");
     }
 
     #[test]

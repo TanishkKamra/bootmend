@@ -208,7 +208,11 @@ impl Item {
 
     /// A fix for the to-do called `title`.
     pub fn fix(fix: Fix, title: impl Into<String>, area: Area) -> Item {
-        let (sub, doing) = (fix.label().to_string(), fix.doing());
+        let sub = match fix.up_to_minutes() {
+            Some(m) => format!("{} · up to {m} minutes", fix.label()),
+            None => fix.label().to_string(),
+        };
+        let doing = fix.doing();
         Item::new(Work::Fix(fix), title.into(), sub, area_icon(area), doing)
     }
 
@@ -370,6 +374,12 @@ impl Run {
         self.queued().count()
     }
 
+    /// Whether History can take back every change ticked. A repair has nothing to undo.
+    fn undoable(&self) -> bool {
+        let mut fixes = self.queued().filter_map(|i| if let Work::Fix(f) = &i.work { Some(f) } else { None }).peekable();
+        fixes.peek().is_some() && fixes.all(Fix::undoable)
+    }
+
     /// A restore point comes first unless nothing ticked changes Windows: clearing files isn't
     /// covered by System Restore, and turning System Restore on can't wait for one.
     pub fn needs_gate(&self) -> bool {
@@ -429,8 +439,7 @@ impl Run {
                 it.left_at = Some(now);
             }
         }
-        let fixes = self.queued().any(|i| matches!(i.work, Work::Fix(_)));
-        let line = match (fixes, self.ticked()) {
+        let line = match (self.undoable(), self.ticked()) {
             (false, _) => "Getting started.",
             (true, 1) => "Getting started. You can undo this from History.",
             (true, _) => "Getting started. Any of these can be undone from History.",
@@ -553,6 +562,8 @@ impl Run {
             .filter(|i| i.state == State::Now)
             .map(|i| {
                 let dur = match (self.mode, &i.work) {
+                    // A long fix creeps along, reaching about half its share at half its longest time.
+                    (Mode::Fix, Work::Fix(f)) => f.up_to_minutes().map_or(675.0, |m| m as f32 * 30_000.0),
                     (Mode::Fix, _) => 675.0,
                     (Mode::Check, Work::Step("extensions" | "drives")) => 3000.0,
                     (Mode::Check, _) => 15000.0,
@@ -635,7 +646,7 @@ impl Run {
     pub fn heads(&self) -> (String, String) {
         let n = self.ticked();
         let things = |n: usize| if n == 1 { "1 thing".to_string() } else { format!("{n} things") };
-        let fixes = self.queued().any(|i| matches!(i.work, Work::Fix(_)));
+        let fixes = self.undoable();
         let (t, s): (String, String) = match (self.mode, self.stage) {
             (Mode::Check, Stage::Over) => ("Check-up done".into(), if self.first { "Your plan is ready." } else { "Home is up to date." }.into()),
             (Mode::Check, _) => ("Checking your PC".into(), "About a minute. You can keep using your PC.".into()),
@@ -645,9 +656,15 @@ impl Run {
                 if fixes { "Bootmend does it for you, and you can undo it from History." } else { "Bootmend does it for you. Your own files aren't touched." }
                     .into(),
             ),
-            (Mode::Fix, Stage::Choose) => {
-                (format!("Ready to fix {}", things(n)), "Untick anything you'd rather leave as it is. You can undo any of them from History.".into())
-            }
+            (Mode::Fix, Stage::Choose) => (
+                format!("Ready to fix {}", things(n)),
+                if fixes {
+                    "Untick anything you'd rather leave as it is. You can undo any of them from History."
+                } else {
+                    "Untick anything you'd rather leave as it is. Your own files aren't touched."
+                }
+                .into(),
+            ),
             (Mode::Fix, Stage::Running) => {
                 let done = self.queued().filter(|i| i.state == State::Done).count();
                 (format!("Fixing {}", things(n)), format!("{done} of {n} done"))
@@ -657,7 +674,9 @@ impl Run {
                 let ok = n - bad;
                 match (ok, bad, n) {
                     (_, 0, 1) => ("Fixed".into(), if fixes { "You can undo it from History." } else { "Your own files weren't touched." }.into()),
-                    (_, 0, _) => (format!("All {n} fixed"), "You can undo any of them from History.".into()),
+                    (_, 0, _) => {
+                        (format!("All {n} fixed"), if fixes { "You can undo any of them from History." } else { "Your own files weren't touched." }.into())
+                    }
                     (0, _, 1) => ("That didn't work".into(), "It'll wait on Home for another go.".into()),
                     (0, _, _) => ("These didn't work this time".into(), "They're waiting on Home for another go.".into()),
                     (_, 1, _) => (format!("{ok} of {n} fixed"), "One needs you. It's waiting on Home.".into()),
@@ -1090,7 +1109,8 @@ impl Run {
                         State::Now => now - it.began,
                         _ => it.took.unwrap_or(0.0),
                     };
-                    let time = painter.layout_no_wrap(format!("{:.1} s", ms / 1000.0), FontId::new(12.0, theme::semibold()), p.muted);
+                    let took = if ms < 60_000.0 { format!("{:.1} s", ms / 1000.0) } else { format!("{} min", (ms / 60_000.0) as u32) };
+                    let time = painter.layout_no_wrap(took, FontId::new(12.0, theme::semibold()), p.muted);
                     let tx = row.right() - time.size().x - S1;
                     painter.galley(pos2(tx, row.center().y - time.size().y / 2.0), time, p.muted);
                     let detail = match (&it.state, self.mode) {
@@ -1287,6 +1307,30 @@ mod tests {
             ps.push(run.p);
         }
         (outs, ps)
+    }
+
+    /// A repair can't be undone and takes many minutes, so the queue neither promises an undo nor
+    /// races its bar to the end.
+    #[test]
+    fn a_repair_promises_no_undo_and_its_bar_creeps() {
+        let repair = || Item::fix(Fix::RepairWindowsFiles, "Some of Windows' own files are damaged", Area::Stability);
+        let mut one = Run::fixes(vec![repair()], Page::Home, Gate::Saved);
+        assert!(one.items[0].sub.contains("up to 30 minutes"), "{}", one.items[0].sub);
+        let two = Run::fixes(vec![Item::fix(Fix::EnablePua, "Unwanted apps", Area::Security), repair()], Page::Home, Gate::Saved);
+        for r in [&one, &two] {
+            assert!(!r.heads().1.contains("undo"), "{:?}", r.heads());
+        }
+        one.start();
+        assert!(!one.line.text.contains("undo"), "{}", one.line.text);
+        for _ in 0..4000 {
+            one.step(16.0);
+        }
+        assert_eq!(one.items[0].state, State::Now);
+        assert!(one.p > 0.0 && one.p < 0.2, "a minute into a half-hour job: {}", one.p);
+        play(&mut one, |_| Ok(()));
+        one.ticked_now();
+        assert_eq!(one.heads().0, "Fixed");
+        assert!(!one.heads().1.contains("undo"), "{:?}", one.heads());
     }
 
     #[test]

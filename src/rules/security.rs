@@ -1,5 +1,5 @@
 use super::data::{BAD_EXTENSIONS, REMOTE_TOOLS, VULNERABLE_APPS};
-use super::{plural, Action, Area, Confidence, Finding, Level};
+use super::{join_and, plural, Action, Area, Confidence, Finding, Level};
 use crate::fixes::{ExclusionKind, Fix};
 use crate::gui::Page;
 use crate::snapshot::Snapshot;
@@ -433,15 +433,6 @@ fn hardening(s: &Snapshot, f: &mut Vec<Finding>) {
                 .step(format!("Search Start for Command Prompt, choose Run as administrator, and type: net user \"{name}\" /active:no"))
                 .act(Action::Fix(Fix::DisableAccount { name: name.clone() })),
         );
-    }
-}
-
-/// "Desktop, Documents and Pictures".
-fn join_and(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 

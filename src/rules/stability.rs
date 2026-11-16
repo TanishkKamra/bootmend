@@ -4,7 +4,8 @@ use crate::collect::dumps::bugcheck_info;
 use crate::fixes::Fix;
 use crate::gui::Page;
 use crate::snapshot::Snapshot;
-use crate::util::J;
+use crate::util::{version_lt, J};
+use chrono::NaiveDateTime;
 use regex::Regex;
 use std::collections::BTreeMap;
 
@@ -116,12 +117,72 @@ fn pagefile(s: &Snapshot, f: &mut Vec<Finding>) {
     f.push(x);
 }
 
+fn at(d: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(d, "%Y-%m-%d %H:%M").ok()
+}
+
+/// A driver update the blue screens began after.
+struct Suspect {
+    fix: Fix,
+    name: String,
+    date: NaiveDateTime,
+    conf: Confidence,
+}
+
+/// The driver update to go back on, if the blue screens point at one. It needs an earlier version
+/// from the device's maker on record: the log of updates only reaches back about a month, a change
+/// down a version was a rollback already, and going back to one of Windows' own basic drivers would
+/// swap one problem for another. Measured when crash files name the driver, none of them from
+/// before its update; a best guess when the first blue screen came within a week of the update.
+/// Either way there must be no blue screen in the month before it. Two best guesses go to the
+/// graphics driver, the usual cause; any other tie offers nothing.
+fn driver_suspect(s: &Snapshot, crashes: &[NaiveDateTime]) -> Option<Suspect> {
+    let file = |d: &crate::snapshot::DumpAnalysis| d.image.clone().or_else(|| d.module.as_ref().map(|m| format!("{m}.sys")));
+    // Crash files naming a driver file two updated devices share can't say which device crashed.
+    let images: Vec<String> = s.health.a("driverUpdates").iter().filter_map(|u| u.s("Image")).collect();
+    if s.dumps.iter().filter_map(file).any(|f| images.iter().filter(|i| i.eq_ignore_ascii_case(&f)).count() > 1) {
+        return None;
+    }
+    let mut updates: Vec<(Suspect, Vec<NaiveDateTime>, String)> = s
+        .health
+        .a("driverUpdates")
+        .iter()
+        .filter_map(|u| {
+            let (device, name, date, version, before) = (u.s("Device")?, u.s("Name")?, at(&u.s("Date")?)?, u.s("Version")?, u.s("Before")?);
+            if u.b("BeforeInbox") == Some(true) || !version_lt(&before, &version) {
+                return None;
+            }
+            // Crash files naming its driver file. Windows' own files, shared by many devices, aren't collected.
+            let image = u.s("Image").unwrap_or_default();
+            let named: Vec<NaiveDateTime> =
+                s.dumps.iter().filter(|d| !image.is_empty() && file(d).is_some_and(|f| f.eq_ignore_ascii_case(&image))).filter_map(|d| at(&d.date)).collect();
+            let fix = Fix::RollBackDriver { device, name: name.clone() };
+            Some((Suspect { fix, name, date, conf: Confidence::BestGuess }, named, u.s("Class").unwrap_or_default()))
+        })
+        .filter(|(u, named, _)| named.iter().all(|d| *d > u.date) && !crashes.iter().any(|c| *c < u.date && (u.date - *c).num_days() < 30))
+        .collect();
+    let named: Vec<usize> = updates.iter().enumerate().filter(|(_, (_, named, _))| !named.is_empty()).map(|(i, _)| i).collect();
+    match named[..] {
+        [i] => return Some(Suspect { conf: Confidence::Measured, ..updates.swap_remove(i).0 }),
+        [] => {}
+        // Crash files naming two updated drivers: no telling which.
+        _ => return None,
+    }
+    updates.retain(|(u, ..)| crashes.iter().filter(|c| **c > u.date).min().is_some_and(|c| (*c - u.date).num_days() < 7));
+    if updates.iter().filter(|(.., class)| class == "Display").count() == 1 {
+        updates.retain(|(.., class)| class == "Display");
+    }
+    match <[_; 1]>::try_from(updates) {
+        Ok([(u, ..)]) => Some(u),
+        Err(_) => None,
+    }
+}
+
 /// Crash files Windows failed to write (their dates), and whether it warned at start-up that it
 /// couldn't write one at all. volmgr 161 is a failed write, 162 a saved file, 46 the warning. A
 /// failure within minutes of a saved file is the same crash, partly saved, so it doesn't count.
 fn crash_file_events(h: &serde_json::Value) -> (Vec<String>, bool) {
     let ev = h.a("dumpEvents");
-    let at = |d: &str| chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%d %H:%M").ok();
     let saved: Vec<_> = ev.iter().filter(|e| e.i("Id") == Some(162)).filter_map(|e| at(&e.s("Date")?)).collect();
     let lost = ev
         .iter()
@@ -190,9 +251,9 @@ fn image_health(s: &Snapshot, f: &mut Vec<Finding>) {
     let x = match state.as_deref() {
         Some("Repairable") => Finding::new("windows-damaged", STAB, Level::WorthDoing, "Some of Windows' own files are damaged")
             .why("Windows has noted damage to its own files. It can make updates fail and cause odd errors, and Windows can usually repair it itself.")
-            .step("Search Start for Terminal, right-click it and choose Run as administrator.")
-            .step("Type DISM /Online /Cleanup-Image /RestoreHealth and press Enter. It needs the internet and can take 10 to 30 minutes.")
-            .step("Then type sfc /scannow, press Enter, and restart when it finishes."),
+            .step("Repair them. It needs the internet, can take up to 30 minutes, and doesn't touch your own files.")
+            .step("Restart the PC when it's done.")
+            .act(Action::Fix(Fix::RepairWindowsFiles)),
         Some("NonRepairable") => Finding::new("windows-damaged", STAB, Level::WorthDoing, "Some of Windows' own files are damaged")
             .why("Windows has noted damage to its own files that it can't repair by itself. It can make updates fail and cause odd errors.")
             .step("Back up your important files first.")
@@ -297,7 +358,15 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
         .details(codes.iter().map(|(c, n)| format!("0x{c:X} {}: {}", bugcheck_info(*c).0, plural(*n, "time", "times"))))
         .conf(Confidence::BestGuess);
         let blamed: Vec<String> = s.dumps.iter().filter_map(|d| d.note.clone()).collect();
-        if let Some(n) = blamed.first() {
+        let dates: Vec<NaiveDateTime> = h.a("bugchecks").iter().filter_map(|b| at(&b.s("Date")?)).collect();
+        if let Some(d) = driver_suspect(s, &dates) {
+            let day = d.date.format("%-d %B");
+            x = x.conf(d.conf).act(Action::Fix(d.fix)).step(if d.conf == Confidence::Measured {
+                format!("The crash files point to the {} driver, which was updated on {day}. Go back to the version it had before.", d.name)
+            } else {
+                format!("The crashes began soon after the {} driver was updated on {day}. Going back to the version it had before may stop them.", d.name)
+            });
+        } else if let Some(n) = blamed.first() {
             x = x.step(format!("The crash files point to the {n}. Install the newest version from its maker's website, not through Windows Update."));
         } else if stress {
             x = x.step("These stop codes usually mean the hardware was pushed too hard. If the processor or memory is overclocked, or a memory profile (XMP, EXPO, DOCP) is on, set them back to default in the BIOS and see if the crashes stop.");

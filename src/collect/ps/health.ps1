@@ -52,6 +52,33 @@ Try-Section 'stability' {
   $R.lowMemory = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Resource-Exhaustion-Detector'; Id = 2004; StartTime = (Get-Date).AddDays(-30) } -MaxEvents 100 | ForEach-Object {
       [ordered]@{ Date = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm'); Apps = @([regex]::Matches("$($_.Message)", '([^\s,:;()]+\.exe) \(\d+\)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique) } })
 }
+Try-Section 'driverUpdates' {
+  # Drivers that changed on this PC, newest change per device, so blue screens that began after an
+  # update can offer the version before it. Kernel-PnP 400 with DeviceUpdated is logged each time a
+  # driver is installed on a device, Windows' own included; the log keeps about a month. Software-only
+  # devices are left out, and so are devices whose newest driver is one of Windows' own.
+  $q = "*[System[EventID=400] and EventData[Data[@Name='DeviceUpdated']='true']]"
+  $ev = @(Get-WinEvent -LogName 'Microsoft-Windows-Kernel-PnP/Configuration' -FilterXPath $q -MaxEvents 3000 | ForEach-Object {
+      $d = @{}; ([xml]$_.ToXml()).Event.EventData.Data | ForEach-Object { $d[$_.Name] = $_.'#text' }
+      if ($d.DeviceInstanceId -notlike 'SWD\*') {
+        [pscustomobject]@{ Id = $d.DeviceInstanceId; Date = $_.TimeCreated; Version = $d.DriverVersion; Inbox = ($d.DriverInbox -eq 'true') } } })
+  $groups = @($ev | Group-Object Id | Where-Object { -not ($_.Group | Sort-Object Date -Descending | Select-Object -First 1).Inbox })
+  # One lookup for all the devices, because each takes about half a second.
+  $devs = @{}; if ($groups) { Get-PnpDevice -InstanceId $groups.Name | ForEach-Object { $devs[$_.InstanceId] = $_ } }
+  $R.driverUpdates = @($groups | ForEach-Object {
+      $g = @($_.Group | Sort-Object Date -Descending); $id = $_.Name; $dev = $devs[$id]
+      if ($dev -and $dev.Present) {
+        # The same version installed again (a device plugged back in) isn't an update.
+        $same = @($g | Where-Object { $_.Version -eq $g[0].Version }); $older = $g | Where-Object { $_.Version -ne $g[0].Version } | Select-Object -First 1
+        # The driver file names the device in crash files, unless it's one of Windows' own that
+        # many devices share (usbxhci.sys).
+        $ip = "$((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$($dev.Service)").ImagePath)"
+        $file = $ip -replace '^\\SystemRoot\\', "$env:WINDIR\" -replace '^\\\?\?\\', '' -replace '^system32\\', "$env:WINDIR\System32\"
+        $ms = $ip -and ("$((Get-Item -LiteralPath $file).VersionInfo.CompanyName)" -like 'Microsoft*')
+        [ordered]@{ Device = $id; Name = $dev.FriendlyName; Class = $dev.Class; Image = $(if ($ip -and -not $ms) { Split-Path $ip -Leaf } else { $null })
+          Version = $g[0].Version; Before = $(if ($older) { $older.Version } else { $null }); BeforeInbox = [bool]$older.Inbox
+          Date = $same[-1].Date.ToString('yyyy-MM-dd HH:mm') } } })
+}
 Try-Section 'imageHealth' {
   # Whether Windows has flagged damage to its own files (DISM CheckHealth). It reads a flag rather
   # than scanning, and needs administrator rights.
