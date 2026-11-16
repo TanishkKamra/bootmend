@@ -55,12 +55,14 @@ pub fn parse_output(text: &str) -> (Vec<String>, Vec<String>) {
     for l in text.lines() {
         let t = l.trim();
         if let Some(v) = t.strip_prefix("Threat").and_then(|r| r.trim_start().strip_prefix(':')) {
-            threats.push(v.trim().to_string());
+            // The same threat in two places is reported twice, not always one after the other.
+            if !threats.iter().any(|x| x == v.trim()) {
+                threats.push(v.trim().to_string());
+            }
         } else if let Some(v) = t.strip_prefix("file").and_then(|r| r.trim_start().strip_prefix(':')) {
             files.push(v.trim().to_string());
         }
     }
-    threats.dedup();
     (threats, files)
 }
 
@@ -174,5 +176,13 @@ mod tests {
         let (t, f) = parse_output(out);
         assert_eq!(t, vec!["Virus:DOS/EICAR_Test_File"]);
         assert_eq!(f, vec!["C:\\x\\eicar.com"]);
+    }
+
+    #[test]
+    fn a_threat_found_in_two_places_is_listed_once() {
+        let out = "Threat : Virus:DOS/EICAR_Test_File\n    file : C:\\a.com\nThreat : Trojan:Win32/Wacatac\n    file : C:\\b.exe\nThreat : Virus:DOS/EICAR_Test_File\n    file : C:\\c.com\n";
+        let (t, f) = parse_output(out);
+        assert_eq!(t, ["Virus:DOS/EICAR_Test_File", "Trojan:Win32/Wacatac"], "in the order Defender found them");
+        assert_eq!(f.len(), 3);
     }
 }
