@@ -129,43 +129,42 @@ struct Suspect {
     conf: Confidence,
 }
 
-/// The driver update to go back on, if the blue screens point at one. Measured when crash files
-/// name the driver and none of them came from before its update; a best guess when the first blue
-/// screen came within a week of the update and none in the month before it. Two best guesses go
-/// to the graphics driver, the usual cause; any other tie offers nothing. The log of updates only
-/// reaches back about a month, and a change down a version was a rollback already.
+/// The driver update to go back on, if the blue screens point at one. It needs an earlier version
+/// from the device's maker on record: the log of updates only reaches back about a month, a change
+/// down a version was a rollback already, and going back to one of Windows' own basic drivers would
+/// swap one problem for another. Measured when crash files name the driver, none of them from
+/// before its update; a best guess when the first blue screen came within a week of the update.
+/// Either way there must be no blue screen in the month before it. Two best guesses go to the
+/// graphics driver, the usual cause; any other tie offers nothing.
 fn driver_suspect(s: &Snapshot, crashes: &[NaiveDateTime]) -> Option<Suspect> {
-    let updates: Vec<(Suspect, String, String)> = s
+    let file = |d: &crate::snapshot::DumpAnalysis| d.image.clone().or_else(|| d.module.as_ref().map(|m| format!("{m}.sys")));
+    let mut updates: Vec<(Suspect, Vec<NaiveDateTime>, String)> = s
         .health
         .a("driverUpdates")
         .iter()
         .filter_map(|u| {
-            let (device, name, date, version) = (u.s("Device")?, u.s("Name")?, at(&u.s("Date")?)?, u.s("Version")?);
-            if u.s("Before").is_some_and(|b| !version_lt(&b, &version)) {
+            let (device, name, date, version, before) = (u.s("Device")?, u.s("Name")?, at(&u.s("Date")?)?, u.s("Version")?, u.s("Before")?);
+            if u.b("BeforeInbox") == Some(true) || !version_lt(&before, &version) {
                 return None;
             }
+            // Crash files naming its driver file. Windows' own files, shared by many devices, aren't collected.
+            let image = u.s("Image").unwrap_or_default();
+            let named: Vec<NaiveDateTime> =
+                s.dumps.iter().filter(|d| !image.is_empty() && file(d).is_some_and(|f| f.eq_ignore_ascii_case(&image))).filter_map(|d| at(&d.date)).collect();
             let fix = Fix::RollBackDriver { device, name: name.clone() };
-            Some((Suspect { fix, name, date, conf: Confidence::BestGuess }, u.s("Image").unwrap_or_default(), u.s("Class").unwrap_or_default()))
+            Some((Suspect { fix, name, date, conf: Confidence::BestGuess }, named, u.s("Class").unwrap_or_default()))
         })
+        .filter(|(u, named, _)| named.iter().all(|d| *d > u.date) && !crashes.iter().any(|c| *c < u.date && (u.date - *c).num_days() < 30))
         .collect();
-    let file = |d: &crate::snapshot::DumpAnalysis| d.image.clone().or_else(|| d.module.as_ref().map(|m| format!("{m}.sys")));
-    let named = updates.iter().position(|(u, image, _)| {
-        let dates: Vec<_> =
-            s.dumps.iter().filter(|d| !image.is_empty() && file(d).is_some_and(|f| f.eq_ignore_ascii_case(image))).filter_map(|d| at(&d.date)).collect();
-        !dates.is_empty() && dates.iter().all(|d| *d > u.date)
-    });
-    let mut updates = updates;
-    if let Some(i) = named {
-        let (u, ..) = updates.swap_remove(i);
-        return Some(Suspect { conf: Confidence::Measured, ..u });
+    let named: Vec<usize> = updates.iter().enumerate().filter(|(_, (_, named, _))| !named.is_empty()).map(|(i, _)| i).collect();
+    match named[..] {
+        [i] => return Some(Suspect { conf: Confidence::Measured, ..updates.swap_remove(i).0 }),
+        [] => {}
+        // The same driver file on two devices: no telling which.
+        _ => return None,
     }
-    let soon = |u: &Suspect| {
-        let first = crashes.iter().filter(|c| **c > u.date).min();
-        first.is_some_and(|c| (*c - u.date).num_days() < 7) && !crashes.iter().any(|c| *c < u.date && (u.date - *c).num_days() < 30)
-    };
-    updates.retain(|(u, ..)| soon(u));
-    let graphics = updates.iter().filter(|(.., class)| class == "Display").count();
-    if graphics == 1 {
+    updates.retain(|(u, ..)| crashes.iter().filter(|c| **c > u.date).min().is_some_and(|c| (*c - u.date).num_days() < 7));
+    if updates.iter().filter(|(.., class)| class == "Display").count() == 1 {
         updates.retain(|(.., class)| class == "Display");
     }
     match <[_; 1]>::try_from(updates) {

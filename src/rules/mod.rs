@@ -1183,6 +1183,22 @@ mod tests {
         let mut s = crashed_after_update(&["2026-11-07 09:00"]);
         s.health["driverUpdates"][0]["Class"] = json!("Net");
         assert_eq!(rollback(&s), None);
+        // No earlier version on record, or only one of Windows' own basic drivers to go back to.
+        for (key, value) in [("Before", json!(null)), ("BeforeInbox", json!(true))] {
+            let mut s = crashed_after_update(&["2026-11-07 09:00"]);
+            s.health["driverUpdates"].as_array_mut().unwrap().truncate(1);
+            s.health["driverUpdates"][0][key] = value;
+            assert_eq!(rollback(&s), None, "{key}");
+        }
+        // Crash files name it, but blue screens came before the update too (older files cleared away).
+        let mut s = crashed_after_update(&["2026-10-28 10:00", "2026-11-20 21:00"]);
+        s.dumps = vec![dump("amdkmdag.sys", "2026-11-20 21:01")];
+        assert_eq!(rollback(&s), None);
+        // Crash files name a driver file two updated devices share.
+        let mut s = crashed_after_update(&["2026-11-20 21:00"]);
+        s.health["driverUpdates"][1]["Image"] = json!("AMDKMDAG.SYS");
+        s.dumps = vec![dump("amdkmdag.sys", "2026-11-20 21:01")];
+        assert_eq!(rollback(&s), None);
     }
 
     #[test]
