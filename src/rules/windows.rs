@@ -166,7 +166,9 @@ pub fn cpu_supported(name: &str) -> Option<bool> {
     }
     if let Some(c) = Regex::new(r"Core i[3579]-(\d{4,5})").ok()?.captures(&n) {
         let m = &c[1];
-        let generation: u32 = if m.len() == 5 { m[..2].parse().ok()? } else { m[..1].parse().ok()? };
+        // i7-13700K and laptop chips like i7-1165G7 (10th gen on) lead with two digits; no older one starts with 1.
+        let two = m.len() == 5 || m.starts_with('1');
+        let generation: u32 = if two { m[..2].parse().ok()? } else { m[..1].parse().ok()? };
         return Some(generation >= 8);
     }
     if Regex::new(r"Core i[3579] (CPU )?\d{3}\b").ok()?.is_match(&n) {
@@ -444,6 +446,13 @@ mod tests {
             ("Intel(R) Core(TM) i5-8400 CPU @ 2.80GHz", Some(true)),
             ("Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz", Some(true)),
             ("13th Gen Intel(R) Core(TM) i7-13700K", Some(true)),
+            // Laptop chips from 10th gen on have four digits that start with the two-digit generation.
+            ("Intel(R) Core(TM) i7-1065G7 CPU @ 1.30GHz", Some(true)),
+            ("11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz", Some(true)),
+            ("12th Gen Intel(R) Core(TM) i5-1235U", Some(true)),
+            ("13th Gen Intel(R) Core(TM) i7-1355U", Some(true)),
+            ("Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz", Some(true)),
+            ("Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz", Some(false)),
             ("Intel(R) Core(TM) Ultra 7 155H", Some(true)),
             ("Intel(R) Core(TM) i5 CPU 750 @ 2.67GHz", Some(false)),
             ("AMD Ryzen 5 1600 Six-Core Processor", Some(false)),
