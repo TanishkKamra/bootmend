@@ -44,6 +44,20 @@ struct Args {
     resume: bool,
 }
 
+const MIN_WINDOW: [f32; 2] = [360.0, 320.0];
+
+/// The window can't be drawn smaller than its minimum size, and a zero or negative size crashes the renderer.
+fn window_size(v: &str) -> Result<(f32, f32)> {
+    let [min_w, min_h] = MIN_WINDOW;
+    let bad = || anyhow!("--size looks like 1180x780, and can't be smaller than {min_w}x{min_h}");
+    let (w, h) = v.split_once('x').ok_or_else(bad)?;
+    let (w, h): (f32, f32) = (w.parse().map_err(|_| bad())?, h.parse().map_err(|_| bad())?);
+    if !(w.is_finite() && h.is_finite() && w >= min_w && h >= min_h) {
+        return Err(bad());
+    }
+    Ok((w, h))
+}
+
 fn parse_args() -> Result<Args> {
     let mut a = Args { report: None, pdf: false, show_personal: false, scheduled: false, screenshots: None, theme: None, size: None, resume: false };
     let mut it = std::env::args().skip(1);
@@ -63,11 +77,7 @@ fn parse_args() -> Result<Args> {
                 }
                 a.theme = Some(t);
             }
-            "--size" => {
-                let v = val("--size")?;
-                let (w, h) = v.split_once('x').ok_or_else(|| anyhow!("--size looks like 1180x780"))?;
-                a.size = Some((w.parse()?, h.parse()?));
-            }
+            "--size" => a.size = Some(window_size(&val("--size")?)?),
             "-h" | "--help" | "/?" => {
                 console();
                 print!("{HELP}");
@@ -189,7 +199,7 @@ fn main() {
     }
     let (w, h) = args.size.unwrap_or((1180.0, 780.0));
     let mut viewport =
-        eframe::egui::ViewportBuilder::default().with_title(util::APP).with_app_id("bootmend").with_inner_size([w, h]).with_min_inner_size([360.0, 320.0]);
+        eframe::egui::ViewportBuilder::default().with_title(util::APP).with_app_id("bootmend").with_inner_size([w, h]).with_min_inner_size(MIN_WINDOW);
     // Without this, eframe puts its own default icon in the title bar.
     match eframe::icon_data::from_png_bytes(include_bytes!("../assets/bootmend-256.png")) {
         Ok(icon) => viewport = viewport.with_icon(icon),
@@ -235,4 +245,16 @@ fn main() {
         std::process::exit(1);
     }
     log!("app", "closed");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_window_too_small_or_not_a_number_is_refused() {
+        assert_eq!(super::window_size("1180x780").unwrap(), (1180.0, 780.0));
+        assert_eq!(super::window_size("360x320").unwrap(), (360.0, 320.0));
+        for bad in ["0x0", "-100x-100", "NaNxNaN", "infxinf", "359x780", "1180", "axb"] {
+            assert!(super::window_size(bad).is_err(), "{bad}");
+        }
+    }
 }
