@@ -79,11 +79,16 @@ impl Confidence {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Fix(Fix),
-    Open { label: &'static str, target: String },
+    Open {
+        label: &'static str,
+        target: String,
+    },
     Goto(Page),
     AnalyzeDumps,
     Elevate,
     RestorePoint,
+    /// Copy Documents, Desktop and Pictures to a USB drive.
+    CopyFiles,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +152,24 @@ impl Finding {
 }
 
 pub fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
+    let digits = n.to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    format!("{grouped} {}", if n == 1 { one } else { many })
+}
+
+/// "Desktop, Documents and Pictures".
+pub fn join_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 pub fn evaluate(s: &Snapshot) -> Vec<Finding> {
@@ -1096,6 +1118,37 @@ mod tests {
         assert!(fw("WD Blue SN580 2TB", "281040WD", 1863.0, "26200.1").is_some());
         assert!(fw("WD Blue SN5000 2TB", "291010WD", 1863.0, "26200.1").is_some());
         assert!(fw("WD Blue SN5000 2TB", "291020WD", 1863.0, "26200.1").is_none());
+    }
+
+    /// Bootmend copies the person's folders off a failing drive only when they're on it.
+    #[test]
+    fn big_counts_are_grouped_in_thousands() {
+        assert_eq!(plural(1, "file", "files"), "1 file");
+        assert_eq!(plural(999, "file", "files"), "999 files");
+        assert_eq!(plural(1_000, "file", "files"), "1,000 files");
+        assert_eq!(plural(14_230, "file", "files"), "14,230 files");
+        assert_eq!(plural(1_234_567, "file", "files"), "1,234,567 files");
+    }
+
+    #[test]
+    fn a_failing_drive_with_your_folders_offers_to_copy_them() {
+        let copy = |failing: i64, folders: serde_json::Value| {
+            let mut s = base();
+            s.storage = json!({
+                "disks": [{"Number": 0, "Model": "Inside", "Health": "Healthy"}, {"Number": 1, "Model": "Second", "Health": "Healthy"}],
+                "volumes": [{"Letter": "C:", "Disk": 0}, {"Letter": "D:", "Disk": 1}],
+                "folderDrives": folders
+            });
+            s.storage["disks"][failing as usize]["Health"] = json!("Warning");
+            s.drives = crate::collect::smart::drive_health(&s.storage);
+            let f = evaluate(&s);
+            let x = f.iter().find(|x| x.id == format!("drive-failing-{failing}")).expect("a failing drive");
+            x.actions.contains(&Action::CopyFiles)
+        };
+        assert!(copy(0, json!(["C:"])));
+        assert!(!copy(1, json!(["C:"])), "a second drive keeps the plain advice");
+        assert!(copy(1, json!(["C:", "D:"])), "folders moved to the second drive");
+        assert!(!copy(0, json!(null)), "an older check didn't note where the folders are");
     }
 
     #[test]

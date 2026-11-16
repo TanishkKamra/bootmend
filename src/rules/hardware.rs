@@ -69,6 +69,17 @@ fn disk_errors(s: &Snapshot, f: &mut Vec<Finding>) {
     }
 }
 
+/// Whether Documents, Desktop or Pictures is on this disk.
+fn holds_folders(s: &Snapshot, disk: i64) -> bool {
+    let on = s.storage.strs("folderDrives");
+    s.storage
+        .a("volumes")
+        .into_iter()
+        .filter(|v| v.i("Disk") == Some(disk))
+        .filter_map(|v| v.s("Letter"))
+        .any(|l| on.iter().any(|x| x.eq_ignore_ascii_case(&l)))
+}
+
 fn drives(s: &Snapshot, f: &mut Vec<Finding>) {
     for d in &s.drives {
         let name = format!("{} ({})", d.model, d.kind);
@@ -87,6 +98,9 @@ fn drives(s: &Snapshot, f: &mut Vec<Finding>) {
                 if let Some(v) = v.filter(|v| *v > 0.0) {
                     x = x.detail(format!("{l}: {v}"));
                 }
+            }
+            if holds_folders(s, d.disk) {
+                x = x.act(Action::CopyFiles);
             }
             f.push(x.act(Action::Goto(Page::Storage)));
             continue;

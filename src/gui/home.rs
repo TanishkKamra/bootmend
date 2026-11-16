@@ -335,8 +335,9 @@ impl App {
         let p = pal(ui.ctx());
         let fixes = fixes_of(f);
         let leftovers = f.id == LEFTOVERS;
-        let one_fix = leftovers || fixes.len() == 1;
-        let more = !f.steps.is_empty() || !f.details.is_empty() || f.actions.len() > usize::from(fixes.len() == 1);
+        let copy = fixes.is_empty() && f.actions.contains(&Action::CopyFiles);
+        let one_fix = leftovers || fixes.len() == 1 || copy;
+        let more = !f.steps.is_empty() || !f.details.is_empty() || f.actions.len() > usize::from(fixes.len() == 1 || copy);
         let open = self.ui.expanded.contains(&f.id);
         let avail = ui.available_width();
         // Short of room, the button moves under the text. Otherwise its column is measured
@@ -464,6 +465,10 @@ impl App {
         } else if let [fx] = fixes {
             if widgets::secondary(ui, "Fix it for me").on_hover_text(fx.label()).clicked() {
                 self.open_fixes(vec![run::Item::fix((*fx).clone(), f.title.clone(), f.area)], Page::Home);
+            }
+        } else if fixes.is_empty() && f.actions.contains(&Action::CopyFiles) {
+            if widgets::secondary(ui, "Copy my files").on_hover_text("Copy your Documents, Desktop and Pictures to a USB drive").clicked() {
+                self.open_copy(&ui.ctx().clone());
             }
         } else {
             toggle = widgets::secondary(ui, if open { "Hide the steps" } else { "Walk me through it" }).clicked();

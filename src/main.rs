@@ -17,6 +17,7 @@ mod scan;
 mod schedule;
 mod snapshot;
 mod trends;
+mod usb_copy;
 mod util;
 
 use anyhow::{anyhow, bail, Result};

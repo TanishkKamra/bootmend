@@ -164,7 +164,7 @@ impl App {
     // ---------- Findings ----------
 
     /// What to do, the details and the buttons for one finding, shown when its row on Home is
-    /// open. `skip_fix` leaves out the single fix the row's own button already offers.
+    /// open. `skip_fix` leaves out the single fix or copy the row's own button already offers.
     pub(super) fn finding_body(&mut self, ui: &mut Ui, f: &Finding, skip_fix: bool) {
         let p = pal(ui.ctx());
         if !f.steps.is_empty() {
@@ -190,7 +190,7 @@ impl App {
         }
         let mut rest = f.clone();
         if skip_fix {
-            rest.actions.retain(|a| !matches!(a, Action::Fix(_)));
+            rest.actions.retain(|a| !matches!(a, Action::Fix(_) | Action::CopyFiles));
         }
         if !rest.actions.is_empty() {
             ui.add_space(S3);
@@ -239,6 +239,11 @@ impl App {
                         }
                     }
                     Action::RestorePoint => self.restore_point_button(ui),
+                    Action::CopyFiles => {
+                        if widgets::primary(ui, "Copy my files to a USB drive").clicked() {
+                            self.open_copy(&ui.ctx().clone());
+                        }
+                    }
                 }
             }
         });

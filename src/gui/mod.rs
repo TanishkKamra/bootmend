@@ -1,6 +1,7 @@
 //! The desktop window: navigation, background jobs and confirmations.
 
 mod cleanup_page;
+mod copy_dialog;
 mod home;
 mod live_page;
 mod mark;
@@ -232,6 +233,8 @@ pub enum Job {
     /// System Restore was turned on so a restore point could be saved.
     TurnedOn(Result<(), String>),
     Points(Result<Vec<fixes::RestorePoint>, String>),
+    CopyLooked(Result<copy_dialog::Looked, String>),
+    Copied(Result<crate::usb_copy::Copied, String>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -319,6 +322,8 @@ enum Shot {
     Queue,
     Fixing,
     Details,
+    /// The copy dialog choosing a drive (0), copying (1) and done (2).
+    Copy(u8),
 }
 
 /// Where the logo was last drawn, and its flight from there when it changes hands between Home
@@ -414,6 +419,8 @@ pub struct App {
     restore_saved: bool,
     /// Windows' restore points as History last read them, or nothing until it reads them again.
     points: Option<Result<Vec<fixes::RestorePoint>, String>>,
+    /// The "Copy my files to a USB drive" dialog, while it's open.
+    copy: Option<copy_dialog::Flow>,
     force_welcome: bool,
     snap_mode: Option<SnapMode>,
     cleanup: Option<cleanup_page::CleanupView>,
@@ -474,6 +481,7 @@ impl App {
             elevated: crate::elevate::is_elevated(),
             restore_saved: false,
             points: None,
+            copy: None,
             force_welcome: false,
             snap_mode: None,
             cleanup: None,
@@ -493,7 +501,7 @@ impl App {
         if let Some(dir) = snap_dir {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
-            queue.extend([Shot::Dialog, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details]);
+            queue.extend([Shot::Dialog, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         } else if resume {
             app.resume(&cc.egui_ctx);
@@ -1354,6 +1362,13 @@ impl App {
                     self.busy.remove("trends");
                     self.trends = t;
                 }
+                Job::CopyLooked(r) => self.on_looked(r),
+                Job::Copied(r) => {
+                    if let Err(e) = &r {
+                        log!("action", "copy stopped: {e}");
+                    }
+                    self.on_copied(r);
+                }
                 Job::Points(r) => {
                     match &r {
                         Ok(v) => log!("action", "read {}", rules::plural(v.len(), "restore point", "restore points")),
@@ -1693,6 +1708,7 @@ impl App {
                 Some(Shot::Queue) => "queue".to_string(),
                 Some(Shot::Fixing) => "fixing".to_string(),
                 Some(Shot::Details) => "fixing-details".to_string(),
+                Some(Shot::Copy(n)) => format!("copy-{}", ["pick", "copying", "done"][usize::from(*n).min(2)]),
                 _ => "welcome".to_string(),
             };
             let file = m.dir.join(if m.part == 0 { format!("{name}.png") } else { format!("{name}-{}.png", m.part + 1) });
@@ -1704,6 +1720,9 @@ impl App {
             } else {
                 if matches!(m.queue.first(), Some(Shot::Dialog)) {
                     self.confirm = None;
+                }
+                if matches!(m.queue.first(), Some(Shot::Copy(_))) {
+                    self.copy = None;
                 }
                 if matches!(m.queue.first(), Some(Shot::Queue | Shot::Fixing | Shot::Details)) {
                     self.run = None;
@@ -1726,7 +1745,7 @@ impl App {
                 self.ui.nav_open = matches!(target, Shot::Menu);
                 let page = match target {
                     Shot::View(p) => Some(p),
-                    Shot::Menu | Shot::Queue | Shot::Fixing | Shot::Details => Some(Page::Home),
+                    Shot::Menu | Shot::Queue | Shot::Fixing | Shot::Details | Shot::Copy(_) => Some(Page::Home),
                     Shot::Dialog => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
@@ -1746,6 +1765,9 @@ impl App {
                     }
                 }
                 open_dialog = matches!(target, Shot::Dialog) && self.confirm.is_none();
+                if let (Shot::Copy(n), None) = (target, &self.copy) {
+                    self.copy = Some(copy_dialog::Flow::sample(n));
+                }
                 if let Some(p) = page {
                     if self.page != p {
                         self.page = p;
@@ -1882,6 +1904,7 @@ impl eframe::App for App {
             self.nav_overlay(&ctx);
         }
         self.confirm_dialog(&ctx);
+        self.copy_dialog(&ctx);
         self.toasts_ui(&ctx);
         widgets::focus_ring(&ctx);
     }
