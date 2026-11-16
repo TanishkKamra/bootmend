@@ -50,6 +50,21 @@ pub enum Flow {
     Failed(String),
 }
 
+/// How much of the copy made it, in a few words.
+fn title(c: &Copied, unreadable: usize) -> &'static str {
+    if c.stopped {
+        "Copying stopped"
+    } else if c.left() == 0 && unreadable == 0 {
+        "Your files are copied"
+    } else if c.files == 0 {
+        "Your files weren't copied"
+    } else if c.left() * 10 <= c.files {
+        "Most of your files are copied"
+    } else {
+        "Some of your files are copied"
+    }
+}
+
 fn drive_name(t: &Target) -> String {
     format!("{} ({}:)", t.name, t.letter)
 }
@@ -268,16 +283,7 @@ impl App {
                 }
                 Flow::Over { r: Ok(c), drive, cloud, unreadable } => {
                     let folder = c.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let title = if c.stopped {
-                        "Copying stopped"
-                    } else if c.left() == 0 && *unreadable == 0 {
-                        "Your files are copied"
-                    } else if c.left() * 10 <= c.files {
-                        "Most of your files are copied"
-                    } else {
-                        "Some of your files are copied"
-                    };
-                    heading(ui, title);
+                    heading(ui, title(c, *unreadable));
                     if c.stopped {
                         ui.label(format!("{} copied to \"{folder}\" on {drive} before you stopped.", plural(c.files, "file was", "files were")));
                     } else {
@@ -391,4 +397,29 @@ impl App {
 fn buttons(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     ui.add_space(S4);
     widgets::right_row(ui, add);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_title_says_how_much_was_copied() {
+        let copied = |files: usize, failed: usize| Copied {
+            dir: PathBuf::new(),
+            files,
+            bytes: 0,
+            failed: vec![String::new(); failed],
+            in_use: vec![],
+            too_big: vec![],
+            stopped: false,
+        };
+        assert_eq!(title(&copied(100, 0), 0), "Your files are copied");
+        assert_eq!(title(&copied(100, 10), 0), "Most of your files are copied");
+        assert_eq!(title(&copied(100, 11), 0), "Some of your files are copied");
+        assert_eq!(title(&copied(100, 0), 1), "Most of your files are copied", "a folder that couldn't be opened");
+        assert_eq!(title(&copied(0, 3), 0), "Your files weren't copied");
+        assert_eq!(title(&copied(0, 0), 2), "Your files weren't copied", "only folders that couldn't be opened");
+        assert_eq!(title(&Copied { stopped: true, ..copied(5, 0) }, 0), "Copying stopped");
+    }
 }

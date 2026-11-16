@@ -301,7 +301,7 @@ pub fn copy_to(found: &Found, dir: &Path, max_file: Option<u64>, done: &AtomicU6
             Err(e) => {
                 if !dir.exists() {
                     log!("copy", "the drive went away after {} files: {e}", c.files);
-                    return Err(anyhow!("The drive was unplugged or stopped answering, so copying stopped after {}", plural(c.files, "file", "files")));
+                    return Err(anyhow!("The drive was unplugged or stopped answering. {}", so_far(&c)));
                 }
                 log!("copy", "couldn't copy a file: {e}");
                 // 32 and 33: another app has it open.
@@ -309,7 +309,10 @@ pub fn copy_to(found: &Found, dir: &Path, max_file: Option<u64>, done: &AtomicU6
                     c.in_use.push(it.rel.display().to_string());
                 } else {
                     c.failed.push(it.rel.display().to_string());
-                    in_a_row += 1;
+                    // A folder Windows won't let Bootmend read isn't a drive giving up.
+                    if e.kind() != ErrorKind::PermissionDenied {
+                        in_a_row += 1;
+                    }
                     if in_a_row >= GIVE_UP {
                         log!("copy", "{GIVE_UP} files in a row couldn't be copied after {} files", c.files);
                         return Err(anyhow!(
