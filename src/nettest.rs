@@ -180,15 +180,15 @@ fn check(router: Option<Ipv4Addr>) -> NetCheck {
         c.problems.push("The DNS server, which turns website names into addresses, didn't answer.".into());
     }
 
-    let mut connects = vec![];
-    for _ in 0..5 {
-        match transfer(&format!("{SPEED}/__down?bytes=0"), None, Duration::from_secs(10)) {
-            Ok(t) => connects.push(t.connect_s * 1000.0),
-            Err(e) => {
-                c.problems.push(format!("Response time: {e:#}."));
-                return c;
-            }
+    const TRIES: usize = 5;
+    let (connects, failed, err) = attempts(TRIES, || transfer(&format!("{SPEED}/__down?bytes=0"), None, Duration::from_secs(10)).map(|t| t.connect_s * 1000.0));
+    match err {
+        Some(e) if connects.is_empty() => {
+            c.problems.push(format!("Response time: {e:#}."));
+            return c;
         }
+        Some(_) => c.problems.push(format!("{failed} of {TRIES} tries got no answer, so the connection may be dropping out.")),
+        None => {}
     }
     c.internet_ms = median(connects);
 
@@ -206,6 +206,26 @@ fn check(router: Option<Ipv4Addr>) -> NetCheck {
         Err(e) => c.problems.push(format!("Upload speed: {e:#}.")),
     }
     c
+}
+
+/// Runs `once` the given number of times. A try that gets no answer doesn't stop the rest, since a
+/// patchy connection is often why someone runs the test, but two misses before any answer do, so a
+/// dead connection isn't waited on five times. Returns the answers, how many failed, and the last error.
+fn attempts(tries: usize, mut once: impl FnMut() -> Result<f64>) -> (Vec<f64>, usize, Option<anyhow::Error>) {
+    let (mut ok, mut failed, mut last) = (vec![], 0, None);
+    for _ in 0..tries {
+        match once() {
+            Ok(v) => ok.push(v),
+            Err(e) => {
+                failed += 1;
+                last = Some(e);
+                if ok.is_empty() && failed == 2 {
+                    break;
+                }
+            }
+        }
+    }
+    (ok, failed, last)
 }
 
 /// What a download speed is good for, in plain words.
@@ -247,6 +267,28 @@ pub fn diagnosis(c: &NetCheck) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dropped_try_doesnt_stop_the_connection_test() {
+        let mut n = 0;
+        let (ok, failed, err) = attempts(5, || {
+            n += 1;
+            if n == 2 {
+                Err(anyhow!("timed out"))
+            } else {
+                Ok(f64::from(n))
+            }
+        });
+        assert_eq!((ok, failed), (vec![1.0, 3.0, 4.0, 5.0], 1));
+        assert!(err.is_some());
+        let mut tries = 0;
+        let (ok, failed, err) = attempts(5, || {
+            tries += 1;
+            Err(anyhow!("no route"))
+        });
+        assert_eq!((ok.len(), failed, err.map(|e| e.to_string())), (0, 2, Some("no route".into())));
+        assert_eq!(tries, 2, "a dead connection isn't tried five times");
+    }
 
     #[test]
     fn diagnosis_points_at_the_slow_part() {
