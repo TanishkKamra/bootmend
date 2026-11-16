@@ -35,6 +35,14 @@ pub struct Proc {
     pub disk: f64,
 }
 
+/// A process name without ".exe", which some programs report in capitals.
+fn without_exe(name: &str) -> &str {
+    match name.len().checked_sub(4) {
+        Some(i) if i > 0 && name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => &name[..i],
+        _ => name,
+    }
+}
+
 /// Adds up processes that belong to the same app (a browser runs dozens). `cores` turns per-core
 /// percentages into a share of the whole processor.
 pub fn group(procs: Vec<Proc>, cores: usize) -> Vec<AppUse> {
@@ -145,7 +153,7 @@ fn sample_loop(data: Arc<Mutex<Option<Live>>>, stop: Arc<AtomicBool>, on_sample:
             .iter()
             .filter(|(pid, _)| pid.as_u32() != 0)
             .map(|(_, p)| {
-                let raw = p.name().to_string_lossy().trim_end_matches(".exe").to_string();
+                let raw = without_exe(&p.name().to_string_lossy()).to_string();
                 let name = match p.exe() {
                     Some(exe) if !exe.as_os_str().is_empty() => {
                         names.entry(exe.to_path_buf()).or_insert_with(|| file_description(exe).unwrap_or_else(|| raw.clone())).clone()
@@ -170,6 +178,15 @@ mod tests {
 
     fn p(group: &str, cpu: f32, mem: u64) -> Proc {
         Proc { group: group.into(), name: group.to_uppercase(), cpu_cores: cpu, mem, disk: 0.0 }
+    }
+
+    #[test]
+    fn exe_is_dropped_from_names_in_any_case() {
+        for (raw, want) in
+            [("notepad.exe", "notepad"), ("NOTEPAD.EXE", "NOTEPAD"), ("Code.Exe", "Code"), ("exe", "exe"), ("my.exe.tool", "my.exe.tool"), ("Ünï.EXE", "Ünï")]
+        {
+            assert_eq!(without_exe(raw), want);
+        }
     }
 
     #[test]
