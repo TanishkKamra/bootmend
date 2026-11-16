@@ -289,7 +289,8 @@ impl Fix {
                 let set = |v: &str| format!("Get-CimInstance Win32_ComputerSystem | Set-CimInstance -Property @{{ AutomaticManagedPagefile = ${v} }}");
                 (
                     format!("{f}\n[IO.File]::WriteAllLines($f, [string[]]@((Get-ItemProperty {k}).PagingFiles | Where-Object {{ $_ }}))\n{}", set("true")),
-                    format!("{f}\n{}\nSet-ItemProperty {k} -Name PagingFiles -Value ([IO.File]::ReadAllLines($f)) -Type MultiString", set("false")),
+                    // Read the copy first: if it's gone, the undo stops before anything has changed.
+                    format!("{f}\n$lines = [IO.File]::ReadAllLines($f)\n{}\nSet-ItemProperty {k} -Name PagingFiles -Value $lines -Type MultiString", set("false")),
                 )
             }
             Fix::EnableDriverBlocklist => {
@@ -742,6 +743,8 @@ mod tests {
         let backup = a.lines().find(|l| l.starts_with("$f = ")).expect("backup path");
         assert!(a.contains("WriteAllLines") && a.contains("AutomaticManagedPagefile = $true"), "{a}");
         assert!(u.contains(backup) && u.contains("ReadAllLines") && u.contains("PagingFiles"), "puts back the exact page files: {u}");
+        let (read, change) = (u.find("ReadAllLines").unwrap(), u.find("AutomaticManagedPagefile").unwrap());
+        assert!(read < change, "a missing copy stops the undo before anything changes: {u}");
         let (a, u) = Fix::EnableCrashFiles.scripts();
         assert!(a.contains("CrashDumpEnabled -Value 7") && u.contains("CrashDumpEnabled -Value 0"), "{a} / {u}");
         let (a, u) = Fix::EnableRecovery.scripts();
