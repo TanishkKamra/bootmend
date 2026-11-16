@@ -3,6 +3,7 @@
 use crate::util::{data_dir, powershell, ps_quote};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -387,19 +388,51 @@ fn history_path() -> Result<std::path::PathBuf> {
 }
 
 pub fn history() -> Vec<HistoryEntry> {
-    let Ok(p) = history_path() else { return vec![] };
-    match std::fs::read(&p) {
-        Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
-            log!("history", "history file unreadable ({e}); starting a new one");
-            vec![]
-        }),
-        Err(_) => vec![],
-    }
+    history_path().and_then(|p| read_history(&p)).unwrap_or_else(|e| {
+        log!("error", "couldn't read History: {e:#}");
+        vec![]
+    })
+}
+
+/// History as a change starts. If it can't be read, nothing changes, since saving would wipe the undo steps in it.
+fn history_for_change(what: &str) -> Result<Vec<HistoryEntry>> {
+    history_path().and_then(|p| read_history(&p)).map_err(|e| {
+        log!("history", "{what} stopped because History couldn't be read: {e:#}");
+        anyhow!("Bootmend couldn't read History, so nothing was changed")
+    })
+}
+
+/// No file means nothing has been changed yet. A file that isn't valid is moved aside, so its undo
+/// steps can still be recovered. Anything else, such as another program holding the file, is an error.
+fn read_history(p: &Path) -> Result<Vec<HistoryEntry>> {
+    let b = match std::fs::read(p) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
+    };
+    serde_json::from_slice(&b).or_else(|e| {
+        let aside = p.with_file_name(format!("history-unreadable-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+        std::fs::rename(p, &aside).with_context(|| format!("{} isn't valid ({e}) and couldn't be moved aside", p.display()))?;
+        log!("history", "history file unreadable ({e}); kept it as {} and started a new one", aside.display());
+        Ok(vec![])
+    })
 }
 
 fn save_history(h: &[HistoryEntry]) -> Result<()> {
-    let p = history_path()?;
-    std::fs::write(&p, serde_json::to_vec_pretty(h)?).with_context(|| format!("saving {}", p.display()))
+    write_history(&history_path()?, h)
+}
+
+/// Written to a temporary file first, so a crash or power cut mid-save never leaves a half-written history.
+fn write_history(p: &Path, h: &[HistoryEntry]) -> Result<()> {
+    let tmp = p.with_extension("json.tmp");
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut f, &serde_json::to_vec_pretty(h)?)?;
+        // On disk before the swap, or a power cut could leave the new name pointing at nothing.
+        f.sync_all()
+    };
+    write().with_context(|| format!("saving {}", tmp.display()))?;
+    std::fs::rename(&tmp, p).with_context(|| format!("saving {}", p.display()))
 }
 
 fn run_ps(body: &str) -> Result<()> {
@@ -421,7 +454,7 @@ fn run_ps(body: &str) -> Result<()> {
 
 /// Apply a fix and record how to undo it.
 pub fn apply(fix: &Fix, title: &str) -> Result<()> {
-    apply_with(fix, title, history(), &mut |h| save_history(h), &run_ps)
+    apply_with(fix, title, history_for_change("a fix")?, &mut |h| save_history(h), &run_ps)
 }
 
 type Save<'a> = &'a mut dyn FnMut(&[HistoryEntry]) -> Result<()>;
@@ -466,7 +499,7 @@ pub fn restore_point(description: &str) -> Result<()> {
 
 /// Undo the history entry at `index`.
 pub fn undo(index: usize) -> Result<()> {
-    undo_with(index, history(), &mut |h| save_history(h), &run_ps)
+    undo_with(index, history_for_change("an undo")?, &mut |h| save_history(h), &run_ps)
 }
 
 /// Recorded as undone before the undo runs, so History never offers to undo a change twice.
@@ -505,6 +538,37 @@ mod tests {
 
     fn applied() -> Vec<HistoryEntry> {
         vec![HistoryEntry { when: "2026-11-15 18:00".into(), title: "Steam".into(), fix: steam(), undo_script: "undo".into(), undone: None }]
+    }
+
+    #[test]
+    fn an_unreadable_history_is_kept_aside_not_overwritten() {
+        let d = std::env::temp_dir().join(format!("bootmend-history-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("history.json");
+        std::fs::write(&p, "[{\"when\": \"2026-11-1").unwrap();
+        let read = read_history(&p).unwrap();
+        let aside: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().path()).collect();
+        let kept = aside.iter().find(|f| f.file_name().unwrap().to_string_lossy().starts_with("history-unreadable-")).map(std::fs::read_to_string);
+        write_history(&p, &applied()).unwrap();
+        let back = read_history(&p).unwrap();
+        let files = std::fs::read_dir(&d).unwrap().count();
+        std::fs::remove_dir_all(&d).unwrap();
+        assert!(read.is_empty());
+        assert_eq!(kept.unwrap().unwrap(), "[{\"when\": \"2026-11-1", "the unreadable file is kept, untouched");
+        assert_eq!(back.len(), 1);
+        assert_eq!(files, 2, "the new history and the kept copy, with no temporary file left behind");
+    }
+
+    #[test]
+    fn a_history_that_cant_be_opened_is_an_error_not_an_empty_one() {
+        let d = std::env::temp_dir().join(format!("bootmend-history-locked-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("history.json")).unwrap();
+        // A folder in the file's place can't be read, like a file another program has locked.
+        let held = read_history(&d.join("history.json"));
+        let missing = read_history(&d.join("nothing-yet.json"));
+        std::fs::remove_dir_all(&d).unwrap();
+        assert!(held.is_err(), "{held:?}");
+        assert!(missing.unwrap().is_empty(), "no file yet just means nothing has been changed");
     }
 
     #[test]
