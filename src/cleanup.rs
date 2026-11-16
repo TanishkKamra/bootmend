@@ -169,13 +169,19 @@ pub fn clean_files(roots: &[(PathBuf, u64)], only: Option<&str>, now: SystemTime
 
 /// Setup files at the top of the Downloads folder that are more than 30 days old.
 pub fn old_installers(downloads: &Path, now: SystemTime) -> Vec<PathBuf> {
-    const KINDS: [&str; 6] = ["exe", "msi", "msix", "msixbundle", "appx", "appxbundle"];
+    const PACKAGES: [&str; 5] = ["msi", "msix", "msixbundle", "appx", "appxbundle"];
+    // Plenty of apps run straight from an .exe in Downloads, so only an .exe named as a setup file counts.
+    let setup_file = |p: &Path| {
+        let lower = |s: Option<&std::ffi::OsStr>| s.map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let (stem, ext) = (lower(p.file_stem()), lower(p.extension()));
+        PACKAGES.contains(&ext.as_str()) || (ext == "exe" && (stem.contains("setup") || stem.contains("install")))
+    };
     let Ok(rd) = std::fs::read_dir(downloads) else { return vec![] };
     let mut out: Vec<PathBuf> = rd
         .flatten()
         .filter(|e| e.metadata().is_ok_and(|m| m.is_file() && !is_link(&m) && old_enough(&m, 30, now)))
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| KINDS.contains(&x.to_string_lossy().to_lowercase().as_str())))
+        .filter(|p| setup_file(p))
         .collect();
     out.sort();
     out
@@ -725,6 +731,18 @@ mod tests {
         let found = old_installers(&d, SystemTime::now());
         assert_eq!(found, vec![d.join("setup.exe")], "only old setup files at the top level");
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn apps_that_run_straight_from_downloads_are_left_alone() {
+        let d = scratch("downloads-portable");
+        for name in ["putty.exe", "rufus-4.5.exe", "ChromeSetup.exe", "VSCodeUserInstaller-x64.EXE", "app.MSIX", "tool.msi"] {
+            file(&d.join(name), 10, 40);
+        }
+        let found = old_installers(&d, SystemTime::now());
+        fs::remove_dir_all(&d).unwrap();
+        let names: Vec<_> = found.iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(names, ["ChromeSetup.exe", "VSCodeUserInstaller-x64.EXE", "app.MSIX", "tool.msi"]);
     }
 
     /// Lists what cleanup would offer on this PC, with sizes. Reads only; deletes nothing.
