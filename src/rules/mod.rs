@@ -970,6 +970,13 @@ mod tests {
         };
         assert_eq!(state(json!("Repairable")), Some(Level::WorthDoing));
         assert_eq!(state(json!("NonRepairable")), Some(Level::WorthDoing));
+        let repair = |v: &str| {
+            let mut s = base();
+            s.health = json!({ "imageHealth": v });
+            evaluate(&s).into_iter().find(|f| f.id == "windows-damaged").unwrap().actions.contains(&Action::Fix(Fix::RepairWindowsFiles))
+        };
+        assert!(repair("Repairable"), "Bootmend can run the repair itself");
+        assert!(!repair("NonRepairable"), "Windows can't repair this, so a reset is the way");
         assert_eq!(state(json!("Healthy")), None);
         assert_eq!(state(json!(null)), None, "only read with administrator rights");
     }

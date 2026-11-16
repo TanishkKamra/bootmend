@@ -75,6 +75,8 @@ pub enum Fix {
         key: String,
         settings: Vec<String>,
     },
+    /// DISM, then System File Checker. It only puts back Windows' own copies, so there's nothing to undo.
+    RepairWindowsFiles,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -130,6 +132,7 @@ impl Fix {
             Fix::RemoveBrowserPolicies { .. } => "Remove the locked settings",
             Fix::EnableRecovery => "Switch on Windows Recovery",
             Fix::RemoveUpdateBlock { .. } => "Unblock Windows Update",
+            Fix::RepairWindowsFiles => "Repair Windows files",
         }
     }
 
@@ -161,6 +164,7 @@ impl Fix {
             Fix::RemoveBrowserPolicies { browser, .. } => format!("The locked settings will be removed from {browser}, after saving a copy so you can put them back from History. Restart {browser} afterwards."),
             Fix::EnableRecovery => "Windows' recovery tools will be switched back on, so it can repair itself or reset if it ever fails to start. You can switch them off again from History.".into(),
             Fix::RemoveUpdateBlock { .. } => "The settings blocking Windows Update will be removed, after saving a copy so you can put them back from History. Windows then gets updates from Microsoft again.".into(),
+            Fix::RepairWindowsFiles => "Windows will replace its damaged files with fresh copies from Microsoft, so it needs the internet. It can take up to 30 minutes, and you can keep using your PC. Your own files and apps aren't touched, so there's nothing to undo.".into(),
         }
     }
 
@@ -192,7 +196,23 @@ impl Fix {
             Fix::RemoveBrowserPolicies { browser, .. } => format!("Unlocking {browser}'s settings, with a copy kept"),
             Fix::EnableRecovery => "Switching Windows' repair tools back on".into(),
             Fix::RemoveUpdateBlock { .. } => "Unblocking Windows Update".into(),
+            Fix::RepairWindowsFiles => "Repairing Windows' own files, which can take up to 30 minutes".into(),
         }
+    }
+
+    /// Whether History can take it back.
+    pub fn undoable(&self) -> bool {
+        !matches!(self, Fix::RepairWindowsFiles)
+    }
+
+    /// The longest it usually takes, for the fixes that take minutes rather than seconds.
+    pub fn up_to_minutes(&self) -> Option<u32> {
+        matches!(self, Fix::RepairWindowsFiles).then_some(30)
+    }
+
+    /// Generous, so a slow PC isn't cut off part-way.
+    fn timeout(&self) -> Duration {
+        self.up_to_minutes().map_or(Duration::from_secs(300), |m| Duration::from_secs(u64::from(m) * 60 * 3))
     }
 
     /// Per-user startup entries can be changed without administrator rights; everything else needs them.
@@ -343,6 +363,18 @@ impl Fix {
                 format!("{NATIVE}if (Native {{ reagentc.exe /disable }}) {{ throw 'Windows could not switch its recovery tools off' }}"),
             ),
             Fix::RemoveUpdateBlock { key, settings } => remove_policies("policies-windowsupdate", key, settings),
+            // Microsoft's order: DISM mends the store sfc copies from. sfc's exit code means
+            // nothing, so Windows' own health record has the last word. 3010 asks for a restart.
+            Fix::RepairWindowsFiles => (
+                format!(
+                    r#"{NATIVE}$c = Native {{ DISM.exe /Online /Cleanup-Image /RestoreHealth }}
+if ($c -in -2146498529, -2146498298, -2146498283) {{ throw "Windows couldn't download fresh copies of its files. Check the internet connection, then try again." }}
+if ($c -ne 0 -and $c -ne 3010) {{ throw ("Windows couldn't repair its files (error 0x{{0:X8}})" -f $c) }}
+$null = Native {{ sfc.exe /scannow }}
+if ("$((Repair-WindowsImage -Online -CheckHealth).ImageHealthState)" -ne 'Healthy') {{ throw "Windows repaired what it could, but some of its files are still damaged." }}"#
+                ),
+                String::new(),
+            ),
         }
     }
 }
@@ -460,7 +492,7 @@ fn ps_output(body: &str, timeout: Duration) -> Result<String> {
 
 /// Apply a fix and record how to undo it.
 pub fn apply(fix: &Fix, title: &str) -> Result<()> {
-    apply_with(fix, title, history_for_change("a fix")?, &mut |h| save_history(h), &run_ps)
+    apply_with(fix, title, history_for_change("a fix")?, &mut |h| save_history(h), &|s| ps_output(s, fix.timeout()).map(|_| ()))
 }
 
 type Save<'a> = &'a mut dyn FnMut(&[HistoryEntry]) -> Result<()>;
@@ -542,6 +574,9 @@ fn undo_with(index: usize, mut h: Vec<HistoryEntry>, save: Save, run: Run) -> Re
     if e.undone.is_some() {
         return Err(anyhow!("that change was already undone"));
     }
+    if !e.fix.undoable() {
+        return Err(anyhow!("there's nothing to undo for that change"));
+    }
     let (title, script) = (e.title.clone(), e.undo_script.clone());
     log!("undo", "undoing \"{}\"", title);
     e.undone = Some(crate::util::now_stamp());
@@ -591,6 +626,40 @@ mod tests {
         assert_eq!(kept.unwrap().unwrap(), "[{\"when\": \"2026-11-1", "the unreadable file is kept, untouched");
         assert_eq!(back.len(), 1);
         assert_eq!(files, 2, "the new history and the kept copy, with no temporary file left behind");
+    }
+
+    /// It only puts back Windows' own copies, so History lists it with nothing to undo.
+    #[test]
+    fn repairing_windows_files_is_listed_but_has_nothing_to_undo() {
+        let fx = Fix::RepairWindowsFiles;
+        let (a, u) = fx.scripts();
+        let (dism, sfc, check) = (a.find("/RestoreHealth").unwrap(), a.find("sfc.exe /scannow").unwrap(), a.find("-CheckHealth").unwrap());
+        assert!(dism < sfc && sfc < check, "DISM first, then sfc, then Windows' own verdict: {a}");
+        assert!(a.contains("3010") && a.contains("-2146498529"), "a restart-needed result is fine; missing source files get plain words: {a}");
+        assert!(u.is_empty() && !fx.undoable() && fx.needs_admin());
+        assert!(every_fix().iter().filter(|f| **f != fx).all(Fix::undoable));
+        assert!(fx.timeout() >= Duration::from_secs(45 * 60) && Fix::EnablePua.timeout() == Duration::from_secs(300));
+        assert_eq!((fx.up_to_minutes(), Fix::EnablePua.up_to_minutes()), (Some(30), None));
+
+        let mut saved = vec![];
+        apply_with(
+            &fx,
+            "Some of Windows' own files are damaged",
+            vec![],
+            &mut |h| {
+                saved = h.to_vec();
+                Ok(())
+            },
+            &|_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(saved.len(), 1, "listed in History");
+        let ran = Cell::new(false);
+        let r = undo_with(0, saved.clone(), &mut |_| Ok(()), &|_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert!(r.is_err() && !ran.get(), "nothing to undo, so nothing runs");
     }
 
     #[test]
@@ -857,6 +926,7 @@ mod tests {
                 key: r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate".into(),
                 settings: vec!["WUServer".into(), r"AU\UseWUServer".into()],
             },
+            Fix::RepairWindowsFiles,
         ]
     }
 

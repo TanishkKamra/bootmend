@@ -1060,6 +1060,8 @@ impl App {
                 setting(ui, &title, &detail, |ui| {
                     if let Some(u) = &h.undone {
                         ui.label(RichText::new(format!("Undone {u}")).color(p.muted));
+                    } else if !h.fix.undoable() {
+                        // Nothing to undo: it only put back Windows' own files.
                     } else if self.busy.contains(&format!("undo:{i}")) {
                         ui.add(egui::Spinner::new());
                     } else {

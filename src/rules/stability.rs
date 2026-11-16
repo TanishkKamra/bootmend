@@ -190,9 +190,9 @@ fn image_health(s: &Snapshot, f: &mut Vec<Finding>) {
     let x = match state.as_deref() {
         Some("Repairable") => Finding::new("windows-damaged", STAB, Level::WorthDoing, "Some of Windows' own files are damaged")
             .why("Windows has noted damage to its own files. It can make updates fail and cause odd errors, and Windows can usually repair it itself.")
-            .step("Search Start for Terminal, right-click it and choose Run as administrator.")
-            .step("Type DISM /Online /Cleanup-Image /RestoreHealth and press Enter. It needs the internet and can take 10 to 30 minutes.")
-            .step("Then type sfc /scannow, press Enter, and restart when it finishes."),
+            .step("Repair them. It needs the internet, can take up to 30 minutes, and doesn't touch your own files.")
+            .step("Restart the PC when it's done.")
+            .act(Action::Fix(Fix::RepairWindowsFiles)),
         Some("NonRepairable") => Finding::new("windows-damaged", STAB, Level::WorthDoing, "Some of Windows' own files are damaged")
             .why("Windows has noted damage to its own files that it can't repair by itself. It can make updates fail and cause odd errors.")
             .step("Back up your important files first.")
