@@ -5,7 +5,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Duration;
 
 const KEEP_DAYS: i64 = 14;
@@ -43,11 +43,23 @@ pub fn init() {
 fn start_in(dir: PathBuf) -> bool {
     let day = today();
     let Some(file) = open(&dir, &day) else { return false };
-    if let Ok(mut g) = LOG.lock() {
-        *g = Some(Log { dir: dir.clone(), day, file: Some(file), full: false, swaps: private_swaps() });
-    }
+    *lock(&LOG) = Some(Log { dir: dir.clone(), day, file: Some(file), full: false, swaps: private_swaps() });
     prune(&dir, chrono::Local::now().date_naive());
     true
+}
+
+/// A crash while the log was held marks it "poisoned", but the log itself is still fine, so keep using it.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Like `lock`, but gives up at once if another thread holds it.
+fn try_lock<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match m.try_lock() {
+        Ok(g) => Some(g),
+        Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
 }
 
 /// A crash in the windowed app otherwise vanishes without a trace, so record where it happened.
@@ -60,7 +72,7 @@ fn catch_crashes() {
         let line = format!("thread '{}' crashed{at}: {msg}", thread.name().unwrap_or("unnamed"));
         // The crash may have happened while this thread held the log, so never wait on it for long.
         for _ in 0..50 {
-            if let Ok(mut g) = LOG.try_lock() {
+            if let Some(mut g) = try_lock(&LOG) {
                 if let Some(l) = g.as_mut() {
                     l.line("crash", &line);
                 }
@@ -74,14 +86,12 @@ fn catch_crashes() {
 
 /// The folder the log is written to, once logging has started.
 pub fn dir() -> Option<PathBuf> {
-    LOG.lock().ok()?.as_ref().map(|l| l.dir.clone())
+    lock(&LOG).as_ref().map(|l| l.dir.clone())
 }
 
 pub fn write(area: &str, msg: &str) {
-    if let Ok(mut g) = LOG.lock() {
-        if let Some(l) = g.as_mut() {
-            l.line(area, msg);
-        }
+    if let Some(l) = lock(&LOG).as_mut() {
+        l.line(area, msg);
     }
 }
 
@@ -216,10 +226,25 @@ mod tests {
         assert!(crashed.is_err());
         let text = std::fs::read_to_string(super::dir().unwrap().join(format!("bootmend-{}.log", super::today()))).unwrap();
         // Let go of the file so the folder can be removed, and stop other tests writing here.
-        *super::LOG.lock().unwrap() = None;
+        *super::lock(&super::LOG) = None;
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(text.contains("crash: thread 'worker' crashed at src"), "{text}");
         assert!(text.contains("log.rs:") && text.contains(": index out of range"), "{text}");
+    }
+
+    #[test]
+    fn the_log_keeps_working_after_a_crash_while_it_was_held() {
+        let m = std::sync::Mutex::new(1);
+        let _ = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = m.lock();
+                panic!("crashed mid-write");
+            })
+            .join()
+        });
+        assert!(m.is_poisoned());
+        assert_eq!(*super::lock(&m), 1);
+        assert_eq!(super::try_lock(&m).map(|g| *g), Some(1));
     }
 
     #[test]
