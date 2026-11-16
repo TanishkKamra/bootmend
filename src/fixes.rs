@@ -437,11 +437,16 @@ fn write_history(p: &Path, h: &[HistoryEntry]) -> Result<()> {
 }
 
 fn run_ps(body: &str) -> Result<()> {
+    ps_output(body, Duration::from_secs(300)).map(|_| ())
+}
+
+/// Runs `body` and returns what it printed, or the reason it stopped.
+fn ps_output(body: &str, timeout: Duration) -> Result<String> {
     let script =
         format!("$ErrorActionPreference = 'Stop'\ntry {{\n{body}\n'BOOTMEND-OK'\n}} catch {{ Write-Output ('BOOTMEND-ERR ' + $_.Exception.Message); exit 1 }}");
-    let out = powershell(&script, Duration::from_secs(300))?;
+    let out = powershell(&script, timeout)?;
     if out.stdout.contains("BOOTMEND-OK") {
-        return Ok(());
+        return Ok(out.stdout);
     }
     let msg = out
         .stdout
@@ -496,6 +501,34 @@ pub fn restore_point(description: &str) -> Result<()> {
         Err(e) => log!("restore", "restore point failed: {e:#}"),
     }
     r
+}
+
+/// A point Windows can take the PC back to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestorePoint {
+    /// "yyyy-MM-dd HH:mm"
+    pub when: String,
+    pub what: String,
+}
+
+/// Windows' restore points, newest first. Only administrators can read them.
+pub fn restore_points() -> Result<Vec<RestorePoint>> {
+    let out = ps_output(
+        "Get-ComputerRestorePoint | ForEach-Object { ([Management.ManagementDateTimeConverter]::ToDateTime($_.CreationTime)).ToString('yyyy-MM-dd HH:mm') + \"`t\" + $_.Description }",
+        Duration::from_secs(60),
+    )?;
+    Ok(parse_points(&out))
+}
+
+fn parse_points(text: &str) -> Vec<RestorePoint> {
+    let mut v: Vec<RestorePoint> = text
+        .lines()
+        .filter_map(|l| l.trim_end().split_once('\t'))
+        .filter(|(w, _)| chrono::NaiveDateTime::parse_from_str(w, "%Y-%m-%d %H:%M").is_ok())
+        .map(|(w, d)| RestorePoint { when: w.to_string(), what: d.trim().to_string() })
+        .collect();
+    v.sort_by(|a, b| b.when.cmp(&a.when));
+    v
 }
 
 /// Undo the history entry at `index`.
@@ -558,6 +591,16 @@ mod tests {
         assert_eq!(kept.unwrap().unwrap(), "[{\"when\": \"2026-11-1", "the unreadable file is kept, untouched");
         assert_eq!(back.len(), 1);
         assert_eq!(files, 2, "the new history and the kept copy, with no temporary file left behind");
+    }
+
+    #[test]
+    fn restore_points_are_listed_newest_first() {
+        let out =
+            "2026-10-02 09:15\tWindows Update\r\n2026-11-16 13:42\tSaved with Bootmend\r\n\r\nnot a point\r\n2026-11-01 18:00\tInstalled Steam\t(app)\r\n";
+        let points = parse_points(out);
+        let got: Vec<_> = points.iter().map(|p| (p.when.as_str(), p.what.as_str())).collect();
+        assert_eq!(got, [("2026-11-16 13:42", "Saved with Bootmend"), ("2026-11-01 18:00", "Installed Steam\t(app)"), ("2026-10-02 09:15", "Windows Update")]);
+        assert!(parse_points("").is_empty());
     }
 
     #[test]

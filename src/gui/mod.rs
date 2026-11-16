@@ -231,6 +231,7 @@ pub enum Job {
     Worked(usize, Result<(), String>, f32, Option<Vec<(&'static str, Result<crate::cleanup::Cleaned, String>)>>),
     /// System Restore was turned on so a restore point could be saved.
     TurnedOn(Result<(), String>),
+    Points(Result<Vec<fixes::RestorePoint>, String>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -411,6 +412,8 @@ pub struct App {
     elevated: bool,
     /// A restore point is saved before the first fix of each session, when Windows allows it.
     restore_saved: bool,
+    /// Windows' restore points as History last read them, or nothing until it reads them again.
+    points: Option<Result<Vec<fixes::RestorePoint>, String>>,
     force_welcome: bool,
     snap_mode: Option<SnapMode>,
     cleanup: Option<cleanup_page::CleanupView>,
@@ -470,6 +473,7 @@ impl App {
             ui: UiState { hide_personal: true, ..Default::default() },
             elevated: crate::elevate::is_elevated(),
             restore_saved: false,
+            points: None,
             force_welcome: false,
             snap_mode: None,
             cleanup: None,
@@ -892,6 +896,10 @@ impl App {
     fn go(&mut self, p: Page) {
         if self.page != p {
             log!("page", "{:?} -> {p:?}", self.page);
+            // So a point Windows saved meanwhile, or one that failed to read, is read again.
+            if p == Page::History && !self.busy.contains("points") {
+                self.points = None;
+            }
         }
         self.page = p;
         self.ui.last_tab.insert(p.place(), p);
@@ -1191,6 +1199,8 @@ impl App {
                 Job::RestorePoint(r) => {
                     log!("action", "restore point {}", ended(&r));
                     self.busy.remove("restore");
+                    // History reads them again, so a point saved just now is listed.
+                    self.points = None;
                     // Saved for the queue, the queue says so; saved from the Security page, a toast does.
                     let gate = self.run.as_mut().filter(|q| q.gate == run::Gate::Saving).map(|q| {
                         q.gate = run::Gate::after(&r);
@@ -1343,6 +1353,14 @@ impl App {
                     log!("action", "loaded {}", rules::plural(t.len(), "trend chart", "trend charts"));
                     self.busy.remove("trends");
                     self.trends = t;
+                }
+                Job::Points(r) => {
+                    match &r {
+                        Ok(v) => log!("action", "read {}", rules::plural(v.len(), "restore point", "restore points")),
+                        Err(e) => log!("action", "couldn't read restore points: {e}"),
+                    }
+                    self.busy.remove("points");
+                    self.points = Some(r);
                 }
                 Job::NetChecked(c) => {
                     log!("action", "the connection check {}", if c.down_mbps.is_some() { "finished" } else { "couldn't finish" });
