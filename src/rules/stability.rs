@@ -138,6 +138,11 @@ struct Suspect {
 /// graphics driver, the usual cause; any other tie offers nothing.
 fn driver_suspect(s: &Snapshot, crashes: &[NaiveDateTime]) -> Option<Suspect> {
     let file = |d: &crate::snapshot::DumpAnalysis| d.image.clone().or_else(|| d.module.as_ref().map(|m| format!("{m}.sys")));
+    // Crash files naming a driver file two updated devices share can't say which device crashed.
+    let images: Vec<String> = s.health.a("driverUpdates").iter().filter_map(|u| u.s("Image")).collect();
+    if s.dumps.iter().filter_map(file).any(|f| images.iter().filter(|i| i.eq_ignore_ascii_case(&f)).count() > 1) {
+        return None;
+    }
     let mut updates: Vec<(Suspect, Vec<NaiveDateTime>, String)> = s
         .health
         .a("driverUpdates")
@@ -160,7 +165,7 @@ fn driver_suspect(s: &Snapshot, crashes: &[NaiveDateTime]) -> Option<Suspect> {
     match named[..] {
         [i] => return Some(Suspect { conf: Confidence::Measured, ..updates.swap_remove(i).0 }),
         [] => {}
-        // The same driver file on two devices: no telling which.
+        // Crash files naming two updated drivers: no telling which.
         _ => return None,
     }
     updates.retain(|(u, ..)| crashes.iter().filter(|c| **c > u.date).min().is_some_and(|c| (*c - u.date).num_days() < 7));

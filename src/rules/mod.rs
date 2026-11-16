@@ -1199,6 +1199,9 @@ mod tests {
         s.health["driverUpdates"][1]["Image"] = json!("AMDKMDAG.SYS");
         s.dumps = vec![dump("amdkmdag.sys", "2026-11-20 21:01")];
         assert_eq!(rollback(&s), None);
+        // The same, when the other device's update came after the crash.
+        s.health["driverUpdates"][1]["Date"] = json!("2026-11-20 22:00");
+        assert_eq!(rollback(&s), None, "the crash files still can't tell the two devices apart");
     }
 
     #[test]
