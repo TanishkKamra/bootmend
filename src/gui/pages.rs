@@ -254,7 +254,7 @@ impl App {
     fn fix_button_as(&mut self, ui: &mut Ui, fx: &Fix, title: &str, area: Area, primary: bool) {
         let p = pal(ui.ctx());
         if self.fixed(fx) {
-            ui.label(ico(icon::CHECK, 14.0).color(p.green));
+            ui.add(widgets::Glyph(ico(icon::CHECK, 14.0).color(p.green)));
             ui.label(RichText::new("Done").color(p.green));
             return;
         }
@@ -1022,7 +1022,7 @@ impl App {
             card(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (ic, fg) = if r.ok { (icon::CHECK, p.green) } else { (icon::WARN, p.amber) };
-                    ui.label(ico(ic, 16.0).color(fg));
+                    ui.add(widgets::Glyph(ico(ic, 16.0).color(fg)));
                     ui.label(RichText::new(format!("{}: {}", r.kind, r.message)).family(theme::semibold()));
                 });
                 small(ui, format!("{} · {} · {:.1} minutes", r.started, r.target, r.minutes));

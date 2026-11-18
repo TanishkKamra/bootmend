@@ -42,6 +42,19 @@ pub fn ico(ch: &str, size: f32) -> RichText {
     RichText::new(ch).family(theme::icons()).size(size)
 }
 
+/// An icon beside words that say the same thing. It is drawn like a label but screen readers
+/// skip it, since an icon font's private-use character reads as nonsense or "symbol".
+pub struct Glyph(pub RichText);
+
+impl egui::Widget for Glyph {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let galley = egui::WidgetText::from(self.0).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
+        let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::hover());
+        ui.painter().galley(rect.min, galley, ui.visuals().text_color());
+        resp
+    }
+}
+
 pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     let p = pal(ui.ctx());
     egui::Frame::new()
@@ -522,7 +535,7 @@ pub fn empty(ui: &mut Ui, ic: &str, title: &str, body: &str) {
     card(ui, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(S3);
-            ui.label(ico(ic, 28.0).color(p.muted));
+            ui.add(Glyph(ico(ic, 28.0).color(p.muted)));
             ui.add_space(S2);
             let r = ui.label(RichText::new(title).text_style(theme::h2()));
             heading_role(ui, &r, 2, title);
@@ -691,8 +704,8 @@ mod tests {
         assert!(!frame(&ctx, vec![]), "a click hides the ring");
     }
 
-    /// What a screen reader is told each button is called.
-    fn spoken_buttons(add: impl Fn(&mut Ui)) -> Vec<String> {
+    /// The accessibility tree `add` builds in one frame.
+    fn tree(add: impl Fn(&mut Ui)) -> egui::accesskit::TreeUpdate {
         let ctx = egui::Context::default();
         theme::fonts(&ctx);
         ctx.enable_accesskit();
@@ -700,10 +713,29 @@ mod tests {
         let mut out = ctx.run_ui(input, |ui| add(ui));
         let tree = out.platform_output.accesskit_update.take().expect("an accessibility tree");
         out.drop_without_applying_deltas();
+        tree
+    }
+
+    /// What a screen reader is told each button is called.
+    fn spoken_buttons(add: impl Fn(&mut Ui)) -> Vec<String> {
+        let tree = tree(add);
         let mut names: Vec<String> =
             tree.nodes.iter().filter(|(_, n)| n.role() == egui::accesskit::Role::Button).filter_map(|(_, n)| n.label().map(String::from)).collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn screen_readers_skip_icons_beside_words() {
+        let tree = tree(|ui| {
+            ui.horizontal(|ui| {
+                ui.add(Glyph(ico(icon::CHECK, 14.0)));
+                ui.label("Done");
+            });
+        });
+        let said: Vec<String> = tree.nodes.iter().flat_map(|(_, n)| [n.label(), n.value()]).flatten().map(String::from).collect();
+        assert!(said.iter().any(|t| t == "Done"), "the words are read: {said:?}");
+        assert!(!said.iter().any(|t| t.contains(icon::CHECK)), "the icon is not: {said:?}");
     }
 
     #[test]

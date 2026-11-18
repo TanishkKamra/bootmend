@@ -936,7 +936,7 @@ impl Run {
                         if spin {
                             ui.add(egui::Spinner::new().size(16.0).color(p.accent));
                         } else if let Some((g, c)) = lead {
-                            ui.label(widgets::ico(g, 16.0).color(c));
+                            ui.add(widgets::Glyph(widgets::ico(g, 16.0).color(c)));
                         }
                         let r = ui.add(egui::Label::new(text).wrap());
                         if let Some(h) = hover {
@@ -946,7 +946,7 @@ impl Run {
                 }
                 if !elevated && self.needs_admin() {
                     ui.horizontal(|ui| {
-                        ui.label(widgets::ico(icon::ADMIN, 14.0).color(p.muted));
+                        ui.add(widgets::Glyph(widgets::ico(icon::ADMIN, 14.0).color(p.muted)));
                         ui.label(RichText::new("Windows will ask for permission once.").small().color(p.muted));
                     });
                 }
@@ -1039,7 +1039,9 @@ impl Run {
             let fmt = |font: FontId| egui::TextFormat { font_id: font, color: p.accent, valign: egui::Align::Center, ..Default::default() };
             job.append(label, 0.0, fmt(FontId::new(14.0, theme::semibold())));
             job.append(chevron, S1, fmt(FontId::new(12.0, theme::icons())));
-            toggled = ui.add(egui::Button::new(job).frame(false)).clicked();
+            let r = ui.add(egui::Button::new(job).frame(false));
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+            toggled = r.clicked();
         });
         let pct_text = format!("{pct}%");
         let mut pp = ui.painter().clone();

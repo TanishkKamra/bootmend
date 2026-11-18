@@ -1540,7 +1540,7 @@ impl App {
                 if r.clicked() {
                     this.go(Page::Home);
                 }
-                ui.label(widgets::ico(icon::CHEVRON_RIGHT, 16.0).color(p.muted));
+                ui.add(widgets::Glyph(widgets::ico(icon::CHEVRON_RIGHT, 16.0).color(p.muted)));
             }
             if !title.is_empty() {
                 widgets::page_title(ui, title);
@@ -1681,7 +1681,7 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_max_width((ctx.content_rect().width() - 2.0 * (S5 + S4)).min(420.0));
                         ui.horizontal(|ui| {
-                            ui.label(ico(ic, 16.0).color(fg));
+                            ui.add(widgets::Glyph(ico(ic, 16.0).color(fg)));
                             ui.add(egui::Label::new(RichText::new(t).color(fg)).wrap());
                         });
                     });
