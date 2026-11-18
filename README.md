@@ -4,6 +4,16 @@ A Windows desktop app that checks a PC (hardware, health, security, software) an
 
 Bootmend only reads until you press a button, and every change explains itself first. Changes to Windows settings can be undone from History. Clearing space and updating apps can't be undone, and Bootmend says so before it runs them. It only goes online when you press one of four buttons (check for app updates, update an app, read crash files, test my connection), and each one asks first.
 
+## Download
+
+Bootmend 0.1.0 is an early version, so expect a few rough edges. Download `bootmend.exe` from the [latest release](https://github.com/TanishkKamra/bootmend/releases/latest). It's a single file with no installer, for Windows 10 and 11 (64-bit).
+
+Bootmend isn't code-signed yet, so the first time you open it Windows may say "Windows protected your PC". Click **More info**, then **Run anyway**. To check your copy is the real one, compare its SHA-256 checksum with the one on the release page. In PowerShell, in the folder you saved it to:
+
+```
+Get-FileHash .\bootmend.exe -Algorithm SHA256
+```
+
 ## What it does
 
 - **Overview and Suggestions:** a check of security, stability, speed and hardware, with suggestions sorted by what matters most and the steps to follow. [docs/levels.md](docs/levels.md) explains how each one is ranked.
@@ -32,7 +42,9 @@ Needs Windows 10 or 11 and Rust (MSVC toolchain).
 cargo build --release
 ```
 
-The app is `target\release\bootmend.exe`. It's a single file with no installer.
+The app is `target\release\bootmend.exe`. It's a single file with no installer, and it doesn't need the Visual C++ Redistributable.
+
+After changing dependencies, run `python tools/third_party_notices.py` to refresh `THIRD-PARTY-NOTICES.txt`, which is built into the app.
 
 ## Run
 
@@ -72,3 +84,13 @@ Tests that change the PC (cleaning, Task Scheduler, notifications, the live conn
 ## Design
 
 See [DESIGN.md](DESIGN.md) for the palette, type, spacing, components and the reasoning behind them.
+
+## Contributing
+
+Found a problem? Use **Report a problem** in Bootmend, or the [bug form](https://github.com/TanishkKamra/bootmend/issues/new?template=bug_report.yml). Fixes are welcome too: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Licence
+
+Bootmend is free software under the GNU General Public License v3.0 or later. It comes with no warranty: see [LICENSE](LICENSE). Third-party licences are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
+
+Windows, OneDrive and other product names are trademarks of their owners. Bootmend isn't made or endorsed by Microsoft or any other company it mentions.
