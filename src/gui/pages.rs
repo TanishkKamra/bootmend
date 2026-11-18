@@ -1230,8 +1230,25 @@ impl App {
         self.schedule_setting(ui);
         self.appearance(ui);
         self.privacy(ui);
-        if about(ui) {
-            self.open_log();
+        match about(ui) {
+            Some(AboutLink::Report) => self.report_problem(),
+            Some(AboutLink::Licences) => self.open_licences(),
+            Some(AboutLink::Log) => self.open_log(),
+            None => {}
+        }
+    }
+
+    /// Writes Bootmend's licence and the third-party notices to a text file, and opens it.
+    fn open_licences(&mut self) {
+        log!("action", "pressed Licences");
+        let opened = crate::util::data_dir("tmp").and_then(|d| {
+            let f = d.join("Bootmend licences.txt");
+            std::fs::write(&f, licences_text())?;
+            shell_open(&f.to_string_lossy())
+        });
+        if let Err(e) = opened {
+            log!("action", "couldn't open the licences: {e:#}");
+            self.toast("Couldn't open the licences.", false);
         }
     }
 
@@ -1755,12 +1772,36 @@ fn network(ui: &mut Ui, snap: &Snapshot) {
     }
 }
 
-/// Whether the quiet "Open the log" link was pressed.
-fn about(ui: &mut Ui) -> bool {
-    let mut open_log = false;
+/// A link at the bottom of the About card.
+#[derive(Clone, Copy)]
+enum AboutLink {
+    Report,
+    Licences,
+    Log,
+}
+
+/// Bootmend's licence notice, the GPL itself, and every crate's licence, as Licences opens them.
+fn licences_text() -> String {
+    let rule = "=".repeat(78);
+    format!(
+        "Bootmend {}\nCopyright © 2026 Tanishk Kamra\nSource code: {}\n\n\
+         Bootmend is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.\n\n\
+         Bootmend is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License below for more details.\n\n\
+         {rule}\n\n{}\n{rule}\n\n{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_REPOSITORY"),
+        include_str!("../../LICENSE"),
+        include_str!("../../THIRD-PARTY-NOTICES.txt"),
+    )
+}
+
+/// The About card. Returns the link pressed, if any.
+fn about(ui: &mut Ui) -> Option<AboutLink> {
+    let mut link = None;
     section(ui, "About");
     card(ui, |ui| {
         ui.label(RichText::new(format!("Bootmend {}", env!("CARGO_PKG_VERSION"))).text_style(theme::title()));
+        small(ui, "Copyright © 2026 Tanishk Kamra");
         ui.add_space(S2);
         ui.add(egui::Label::new("Bootmend checks a Windows PC and explains, in plain words, what's worth fixing. It reads what Windows already knows about itself, runs no background service, and leaves no trace beyond its own saved checks.").wrap());
         ui.add_space(S2);
@@ -1768,11 +1809,15 @@ fn about(ui: &mut Ui) -> bool {
             egui::Label::new("Every check is a small, readable script built into the app, and every fix shows exactly what it changes before it runs.").wrap(),
         );
         ui.add_space(S3);
+        small(ui, "Free software under the GNU GPL v3, with no warranty. Built with Rust and egui.");
         ui.horizontal_wrapped(|ui| {
-            small(ui, "MIT licence. Built with Rust and egui.");
-            open_log = ui.link(RichText::new("Open the log").small()).clicked();
+            for (to, text) in [(AboutLink::Report, "Report a problem"), (AboutLink::Licences, "Licences"), (AboutLink::Log, "Open the log")] {
+                if ui.link(RichText::new(text).small()).clicked() {
+                    link = Some(to);
+                }
+            }
         });
     });
     ui.add_space(S5);
-    open_log
+    link
 }

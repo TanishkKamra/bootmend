@@ -19,7 +19,7 @@ use crate::fixes::{self, Fix, HistoryEntry};
 use crate::rules::{self, Finding};
 use crate::scan;
 use crate::snapshot::{self, AppUpgrade, DumpAnalysis, ScanResult, Snapshot};
-use crate::util::data_dir;
+use crate::util::{data_dir, shell_open};
 use eframe::egui::{self, RichText};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -249,12 +249,26 @@ struct Settings {
     schedule_asked: bool,
     /// Buttons, links and switches take the Windows accent colour instead of cobalt.
     use_windows_accent: bool,
+    /// "Don't show again" was pressed on the early-version notice.
+    early_notice_off: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { privacy_ack: false, schedule: Default::default(), schedule_hour: crate::schedule::NOON, schedule_asked: false, use_windows_accent: false }
+        Settings {
+            privacy_ack: false,
+            schedule: Default::default(),
+            schedule_hour: crate::schedule::NOON,
+            schedule_asked: false,
+            use_windows_accent: false,
+            early_notice_off: false,
+        }
     }
+}
+
+/// GitHub's bug form, with this version filled in.
+fn report_url() -> String {
+    format!("{}/issues/new?template=bug_report.yml&version={}", env!("CARGO_PKG_REPOSITORY"), env!("CARGO_PKG_VERSION"))
 }
 
 /// How a background job ended, for the log.
@@ -318,6 +332,8 @@ enum Shot {
     Menu,
     /// A confirmation open over the Crashes page.
     Dialog,
+    /// The early-version notice over Home.
+    Early,
     /// The Queue screen while choosing, part way through, and part way through with its details open.
     Queue,
     Fixing,
@@ -435,6 +451,8 @@ pub struct App {
     win_accent: Option<theme::AccentShades>,
     accent_read: Option<Instant>,
     motion_read: Option<Instant>,
+    /// The early-version notice is open. It opens at each launch until "Don't show again".
+    early_notice: bool,
 }
 
 impl App {
@@ -493,15 +511,18 @@ impl App {
             win_accent: None,
             accent_read: None,
             motion_read: None,
+            early_notice: false,
         };
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
         }
         app.mark.set_lift(if app.raised() { 1.0 } else { 0.0 }, true);
+        // Not again when Bootmend restarts as administrator to carry on with a fix.
+        app.early_notice = !app.settings.early_notice_off && snap_dir.is_none() && !resume;
         if let Some(dir) = snap_dir {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
-            queue.extend([Shot::Dialog, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
+            queue.extend([Shot::Dialog, Shot::Early, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         } else if resume {
             app.resume(&cc.egui_ctx);
@@ -1665,6 +1686,74 @@ impl App {
         }
     }
 
+    /// Says Bootmend is an early version and where to report problems.
+    fn early_notice(&mut self, ctx: &egui::Context) {
+        if !self.early_notice || self.confirm.is_some() || self.copy.is_some() {
+            return;
+        }
+        let (mut close, mut hide, mut report) = (false, false, false);
+        let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(S5 as i8));
+        let m = egui::Modal::new(egui::Id::new("early")).frame(frame).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 2.0 * (S5 + S4)).min(440.0));
+            let title = "Bootmend is new";
+            let t = ui.label(RichText::new(title).text_style(theme::h2()));
+            widgets::heading_role(ui, &t, 2, title);
+            ui.add_space(S2);
+            ui.add(egui::Label::new("This is an early version, so some things may not work quite right. If you find a problem, please tell us on GitHub. You can report it, or fix it and send a pull request.").wrap());
+            ui.add_space(S4);
+            // The quiet choice sits at the left, or under the buttons when the window is narrow.
+            let narrow = ui.available_width() < 360.0;
+            ui.horizontal(|ui| {
+                if !narrow {
+                    hide = widgets::subtle_text(ui, "Don't show again").clicked();
+                }
+                widgets::right_row(ui, |ui| {
+                    let ok = widgets::primary(ui, "Got it");
+                    if ui.memory(|m| m.focused().is_none()) {
+                        ok.request_focus();
+                    }
+                    close = ok.clicked();
+                    report = widgets::secondary(ui, "Report a problem").clicked();
+                });
+            });
+            if narrow {
+                ui.add_space(S2);
+                hide = widgets::subtle_text(ui, "Don't show again").clicked();
+            }
+        });
+        if !(close || hide || report || m.should_close()) {
+            return;
+        }
+        log!(
+            "dialog",
+            "early-version notice: {}",
+            if hide {
+                "won't show again"
+            } else if report {
+                "report a problem"
+            } else {
+                "got it"
+            }
+        );
+        self.early_notice = false;
+        if hide {
+            self.settings.early_notice_off = true;
+            self.save_settings();
+        }
+        if report {
+            self.report_problem();
+        }
+    }
+
+    /// Opens GitHub's bug form in the browser.
+    fn report_problem(&mut self) {
+        log!("action", "pressed Report a problem");
+        if let Err(e) = shell_open(&report_url()) {
+            log!("action", "couldn't open the bug form: {e:#}");
+            self.toast(format!("Couldn't open your browser. Problems can be reported at {}/issues.", env!("CARGO_PKG_REPOSITORY")), false);
+        }
+    }
+
     fn toasts_ui(&self, ctx: &egui::Context) {
         if self.toasts.is_empty() {
             return;
@@ -1705,6 +1794,7 @@ impl App {
                 Some(Shot::View(p)) => p.slug(),
                 Some(Shot::Menu) => "menu".to_string(),
                 Some(Shot::Dialog) => "dialog".to_string(),
+                Some(Shot::Early) => "early".to_string(),
                 Some(Shot::Queue) => "queue".to_string(),
                 Some(Shot::Fixing) => "fixing".to_string(),
                 Some(Shot::Details) => "fixing-details".to_string(),
@@ -1720,6 +1810,9 @@ impl App {
             } else {
                 if matches!(m.queue.first(), Some(Shot::Dialog)) {
                     self.confirm = None;
+                }
+                if matches!(m.queue.first(), Some(Shot::Early)) {
+                    self.early_notice = false;
                 }
                 if matches!(m.queue.first(), Some(Shot::Copy(_))) {
                     self.copy = None;
@@ -1745,7 +1838,7 @@ impl App {
                 self.ui.nav_open = matches!(target, Shot::Menu);
                 let page = match target {
                     Shot::View(p) => Some(p),
-                    Shot::Menu | Shot::Queue | Shot::Fixing | Shot::Details | Shot::Copy(_) => Some(Page::Home),
+                    Shot::Menu | Shot::Early | Shot::Queue | Shot::Fixing | Shot::Details | Shot::Copy(_) => Some(Page::Home),
                     Shot::Dialog => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
@@ -1765,6 +1858,9 @@ impl App {
                     }
                 }
                 open_dialog = matches!(target, Shot::Dialog) && self.confirm.is_none();
+                if matches!(target, Shot::Early) {
+                    self.early_notice = true;
+                }
                 if let (Shot::Copy(n), None) = (target, &self.copy) {
                     self.copy = Some(copy_dialog::Flow::sample(n));
                 }
@@ -1903,6 +1999,7 @@ impl eframe::App for App {
         if !fit.docked && !full_screen {
             self.nav_overlay(&ctx);
         }
+        self.early_notice(&ctx);
         self.confirm_dialog(&ctx);
         self.copy_dialog(&ctx);
         self.toasts_ui(&ctx);
@@ -1936,6 +2033,16 @@ fn drain_check(rx: &Receiver<Progress>) -> Vec<Progress> {
 #[cfg(test)]
 mod tests {
     use super::{Page, Place};
+
+    #[test]
+    fn report_a_problem_opens_the_bug_form_with_the_version() {
+        let form = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/.github/ISSUE_TEMPLATE/bug_report.yml")).unwrap();
+        assert!(form.contains("id: version"), "the form has the field the link fills in");
+        assert_eq!(
+            super::report_url(),
+            format!("https://github.com/TanishkKamra/bootmend/issues/new?template=bug_report.yml&version={}", env!("CARGO_PKG_VERSION"))
+        );
+    }
 
     #[test]
     fn a_check_that_finishes_and_hangs_up_is_not_reported_as_failed() {

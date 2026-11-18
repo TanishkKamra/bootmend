@@ -175,6 +175,16 @@ pub fn icon_button(ui: &mut Ui, ic: &str, text: &str, enabled: bool) -> Response
 
 /// A button with no frame until the pointer is on it, for quiet actions beside a title.
 pub fn subtle_button(ui: &mut Ui, ic: &str, text: &str) -> Response {
+    quiet(ui, |ui| icon_button(ui, ic, text, true))
+}
+
+/// The same with words alone, for the least pressing choice in a dialog.
+pub fn subtle_text(ui: &mut Ui, text: &str) -> Response {
+    quiet(ui, |ui| secondary(ui, text))
+}
+
+/// Runs `add` with buttons that show no frame until the pointer is on them.
+fn quiet(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Response {
     let p = pal(ui.ctx());
     ui.scope(|ui| {
         let w = &mut ui.visuals_mut().widgets;
@@ -182,7 +192,7 @@ pub fn subtle_button(ui: &mut Ui, ic: &str, text: &str) -> Response {
             v.weak_bg_fill = p.ink.gamma_multiply(wash);
             v.bg_stroke = Stroke::NONE;
         }
-        icon_button(ui, ic, text, true)
+        add(ui)
     })
     .inner
 }

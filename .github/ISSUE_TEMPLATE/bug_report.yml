@@ -1,0 +1,39 @@
+name: Report a problem
+description: Something in Bootmend didn't work the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for telling us. Everything here is public, so please leave out anything private, such as your name, email address or serial numbers.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What were you doing just before?
+      description: The steps that lead to the problem, if you know them. For example, "Opened Free up space, ticked Browser caches, pressed Free up space".
+  - type: input
+    id: version
+    attributes:
+      label: Bootmend version
+      description: Filled in for you when you use "Report a problem" in Bootmend. Otherwise it's at the bottom of Settings.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Press Windows + R, type winver and press Enter. For example, "Windows 11, version 24H2 (OS Build 26100.4061)".
+  - type: textarea
+    id: log
+    attributes:
+      label: Log (optional)
+      description: In Bootmend, open Settings and press "Open the log". Paste the lines from around the time of the problem. Your Windows username and PC name are already hidden, but app and file names stay in, so read it through first.
+      render: text
