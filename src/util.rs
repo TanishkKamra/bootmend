@@ -117,6 +117,7 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
         .spawn()
         .inspect_err(|e| log!("run", "couldn't start {program}: {e}"))
         .with_context(|| format!("starting {program}"))?;
+    let job = Job::hold(&child, program);
     // Drain pipes on threads so a chatty child can't block on a full pipe.
     let mut so = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let mut se = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
@@ -136,8 +137,10 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
         }
         if start.elapsed() > timeout {
             timed_out = true;
-            if let Err(e) = child.kill() {
-                log!("run", "couldn't stop {program} after it took too long: {e}");
+            if !job.as_ref().is_some_and(|j| j.stop(program)) {
+                if let Err(e) = child.kill() {
+                    log!("run", "couldn't stop {program} after it took too long: {e}");
+                }
             }
             break child.wait().ok();
         }
@@ -161,6 +164,52 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
         log!("run", "{cmd} ended with code {:?} after {took:.1} s: {err}", out.code);
     }
     Ok(out)
+}
+
+/// A Windows job holding a program and everything it starts. Stopping only the program would
+/// leave, say, DISM running under a stopped repair script, still holding the output pipe open,
+/// so the timeout would wait for DISM after all.
+struct Job(windows::Win32::Foundation::HANDLE);
+
+impl Job {
+    fn hold(child: &std::process::Child, program: &str) -> Option<Job> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        // SAFETY: a new unnamed job, and the child's handle stays open while `child` is alive.
+        let job = match unsafe { CreateJobObjectW(None, windows::core::PCWSTR::null()) } {
+            Ok(h) => Job(h),
+            Err(e) => {
+                log!("run", "couldn't make a job for {program}, so a timeout stops only {program}: {e}");
+                return None;
+            }
+        };
+        if let Err(e) = unsafe { AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())) } {
+            log!("run", "couldn't put {program} in a job, so a timeout stops only {program}: {e}");
+            return None;
+        }
+        Some(job)
+    }
+
+    fn stop(&self, program: &str) -> bool {
+        // SAFETY: the handle is a job this struct owns.
+        match unsafe { windows::Win32::System::JobObjects::TerminateJobObject(self.0, 1) } {
+            Ok(()) => true,
+            Err(e) => {
+                log!("run", "couldn't stop what {program} started: {e}");
+                false
+            }
+        }
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        // SAFETY: the handle is a job this struct owns, closed once here.
+        if let Err(e) = unsafe { windows::Win32::Foundation::CloseHandle(self.0) } {
+            log!("run", "couldn't close a job handle: {e}");
+        }
+    }
 }
 
 /// PowerShell and Windows tools mix UTF-8, UTF-16LE and the OEM code page. Handle the first two.
@@ -275,6 +324,29 @@ mod tests {
         assert!(!move_old_data(&base).unwrap(), "an existing new folder is never overwritten");
         assert!(base.join("rigscan").exists());
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[ignore = "starts PowerShell; run with --ignored"]
+    fn a_timeout_stops_what_the_program_started_too() {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let file = std::env::temp_dir().join(format!("bootmend-tree-{}.txt", std::process::id()));
+        // The way DISM runs under a repair script: PowerShell waits on a program it started.
+        let script = format!(
+            "$p = Start-Process ping.exe -ArgumentList '-n','30','127.0.0.1' -NoNewWindow -PassThru; Set-Content -LiteralPath {} -Value $p.Id; Start-Sleep 30",
+            ps_quote(&file.to_string_lossy())
+        );
+        let t0 = Instant::now();
+        let out = run_hidden("powershell.exe", &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script], Duration::from_secs(4)).unwrap();
+        let took = t0.elapsed();
+        assert!(out.timed_out);
+        assert!(took < Duration::from_secs(15), "returned after {took:?}, not soon after the timeout");
+        let pid: u32 = std::fs::read_to_string(&file).unwrap().trim().parse().unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let mut sys = System::new();
+        let pid = sysinfo::Pid::from_u32(pid);
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
+        assert!(sys.process(pid).is_none(), "the program PowerShell started is still running");
     }
 
     #[test]
