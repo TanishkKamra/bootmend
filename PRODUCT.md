@@ -48,7 +48,7 @@ Bootmend checks a Windows PC (hardware, health, security, software), then turns 
 - **Safe fixes:** clearing temp files and caches only. "Fix the N safe ones for me" runs these without asking. They can't be undone, but apps rebuild what they need, which is why they count as safe.
 - **Every other fix asks first,** with a "Don't ask again" checkbox. It never covers deleting things or going online, and Settings can turn asking back on.
 - **Undo:** changes to Windows settings (startup apps, services, firewall rules, System Restore and the like) can be undone from History. Deleting files and updating apps can't, and Bootmend says so before it runs them.
-- **Going online:** only when the person presses one of four buttons, and each asks first: check for app updates and update an app (both through winget), read crash files (the debugger downloads Microsoft's debugging files the first time), and test my connection (Cloudflare's public speed test).
+- **Going online:** only when the person presses one of four buttons, and each asks first: check for app updates and update an app (both through winget), read crash files (the debugger downloads Microsoft's debugging files the first time), and test my connection (times how quickly Microsoft's website answers).
 - **Guided help:** for anything Bootmend can't do itself, it opens the exact Windows page, shows a short checklist, re-checks automatically, and ticks the item off.
 - **Reports** save as HTML or PDF, with personal details hidden by default.
 - **Platform limits:**

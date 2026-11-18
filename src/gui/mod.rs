@@ -1035,8 +1035,8 @@ impl App {
             Pending::NetCheck => Confirm {
                 title: "Test your connection?".into(),
                 body: vec![
-                    "Bootmend pings your router, times a few website name lookups, then downloads and uploads test data with Cloudflare's public speed test (speed.cloudflare.com).".into(),
-                    "It uses up to about 135 MB of data and takes under a minute. Like any website, Cloudflare sees this connection's internet address. Nothing about the PC is sent.".into(),
+                    "Bootmend pings your router, times a few website name lookups, then times how quickly Microsoft's website (www.microsoft.com) answers.".into(),
+                    "It uses very little data and takes a few seconds. Like any website, Microsoft sees this connection's internet address. Nothing about the PC is sent.".into(),
                 ],
                 yes: "Test now".into(),
                 action,
@@ -1378,11 +1378,11 @@ impl App {
                     self.points = Some(r);
                 }
                 Job::NetChecked(c) => {
-                    log!("action", "the connection check {}", if c.down_mbps.is_some() { "finished" } else { "couldn't finish" });
+                    log!("action", "the connection check {}", if c.internet_ms.is_some() { "finished" } else { "couldn't finish" });
                     self.busy.remove("net");
                     self.toast(
-                        if c.down_mbps.is_some() { "Connection check finished." } else { "The connection check couldn't finish. The Network page says why." },
-                        c.down_mbps.is_some(),
+                        if c.internet_ms.is_some() { "Connection check finished." } else { "The connection check couldn't finish. The Network page says why." },
+                        c.internet_ms.is_some(),
                     );
                     self.net = Some(c);
                 }

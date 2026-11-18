@@ -108,7 +108,7 @@ impl App {
             Page::Cleanup => "See what's taking up space before anything is removed.".into(),
             Page::Startup => "Apps that open by themselves when you sign in.".into(),
             Page::Live => "Which apps are using the processor, memory and drive at this moment.".into(),
-            Page::NetCheck => "How fast this connection is, and where any delay comes from.".into(),
+            Page::NetCheck => "How quickly this connection answers, and where any delay comes from.".into(),
             Page::ThisPc => "What's inside, as Windows reports it.".into(),
             Page::Storage => "Drive health, wear and free space.".into(),
             Page::Security => "Virus protection, the firewall and who can reach this PC.".into(),
@@ -1317,7 +1317,7 @@ impl App {
             para(ui, "• Check for app updates: winget, Windows' own app installer, compares your apps with Microsoft's public app catalog.");
             para(ui, "• Read crash files: Microsoft's debugger downloads matching debugging files from Microsoft. The crash files stay here.");
             para(ui, "• Update an app: winget downloads it from the app's publisher.");
-            para(ui, "• Test my connection: test data is downloaded from and uploaded to Cloudflare's public speed test. Cloudflare sees this connection's internet address, as with any website.");
+            para(ui, "• Test my connection: Bootmend times how quickly Microsoft's website answers. Microsoft sees this connection's internet address, as with any website.");
             para(ui, "Saving a PDF uses Microsoft Edge to print the report, and virus checks are run by Windows Security. Both follow their own settings, as they always do.");
             widgets::subsection(ui, "What it keeps, and where");
             para(ui, "Each check is saved as a file in your user folder (AppData\\Local\\Bootmend), so it can show what changed next time. The undo history lives there too. Nothing else is stored.");

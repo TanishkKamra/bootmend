@@ -10,7 +10,7 @@ Bootmend only reads until you press a button, and every change explains itself f
 - **This PC:** device details, an upgrade advisor (for example, a matching memory stick), and, on Windows 10, whether the PC can move to Windows 11.
 - **Storage:** drive health, wear and free space. When a failing drive holds Documents, Desktop or Pictures, Bootmend offers to copy them to a USB drive.
 - **Free up space:** measures caches and leftovers first, then clears only what you tick. Files an app has open are skipped.
-- **Network:** adapters, Wi-Fi, what accepts connections from the network, and a connection test (router, DNS, internet delay, download and upload speed) that uses Cloudflare's public speed test.
+- **Network:** adapters, Wi-Fi, what accepts connections from the network, and a connection test that times the router, DNS lookups and Microsoft's website, to show where any delay is.
 - **Security:** Windows Security, firewall, updates, System Restore, and which apps used the camera, microphone and location.
 - **Apps & extensions:** installed apps, outdated ones (updated through winget), and browser extensions with a link to each one's own page.
 - **Startup & background:** on/off switches for apps that open at sign-in, plus services and scheduled tasks from other makers.
