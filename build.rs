@@ -7,6 +7,7 @@ fn main() {
         res.set_icon("assets/bootmend.ico");
         res.set("FileDescription", "Bootmend PC check-up");
         res.set("ProductName", "Bootmend");
+        res.set("LegalCopyright", "Copyright © 2026 Tanishk Kamra");
         if let Err(e) = res.compile() {
             panic!("failed to embed Windows resources: {e}");
         }
