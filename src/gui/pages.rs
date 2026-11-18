@@ -1338,7 +1338,7 @@ impl App {
             para(ui, "Saving a PDF uses Microsoft Edge to print the report, and virus checks are run by Windows Security. Both follow their own settings, as they always do.");
             widgets::subsection(ui, "What it keeps, and where");
             para(ui, "Each check is saved as a file in your user folder (AppData\\Local\\Bootmend), so it can show what changed next time. The undo history lives there too. Nothing else is stored.");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
                     if let Ok(d) = crate::util::data_dir("") {
                         log!("action", "opening {}", &d.to_string_lossy());
