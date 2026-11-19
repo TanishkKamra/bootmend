@@ -121,10 +121,11 @@ pub enum Page {
     Trends,
     Saved,
     Settings,
+    Privacy,
 }
 
 impl Page {
-    pub const ALL: [Page; 17] = [
+    pub const ALL: [Page; 18] = [
         Page::Home,
         Page::Report,
         Page::Cleanup,
@@ -142,6 +143,7 @@ impl Page {
         Page::Trends,
         Page::Saved,
         Page::Settings,
+        Page::Privacy,
     ];
     pub fn place(self) -> Place {
         match self {
@@ -149,8 +151,13 @@ impl Page {
             Page::Cleanup | Page::Startup | Page::Live | Page::NetCheck => Place::TuneUp,
             Page::ThisPc | Page::Storage | Page::Security | Page::Software | Page::Network | Page::Crashes => Place::MyPc,
             Page::History | Page::Changes | Page::Trends | Page::Saved => Place::History,
-            Page::Settings => Place::Settings,
+            Page::Settings | Page::Privacy => Place::Settings,
         }
+    }
+    /// A view opened from inside its place rather than from a tab or the sidebar. Its header shows
+    /// the way back, as Windows Settings does: "Home > Save a report".
+    pub fn inner(self) -> bool {
+        matches!(self, Page::Report | Page::Privacy)
     }
     /// The tab's name, or the view's own name for a view inside Home.
     pub fn title(self) -> &'static str {
@@ -172,6 +179,7 @@ impl Page {
             Page::Trends => "Over time",
             Page::Saved => "Saved checks",
             Page::Settings => "Settings",
+            Page::Privacy => "Privacy",
         }
     }
     fn slug(self) -> String {
@@ -1532,8 +1540,7 @@ impl App {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str) {
         let p = pal(ui.ctx());
         let place = self.page.place();
-        // A view inside Home shows the way back the way Windows Settings does: "Home > Save a report".
-        let crumb = self.page == Page::Report;
+        let crumb = self.page.inner();
         let fold = !self.ui.docked;
         let compact = ui.available_width() < COMPACT;
         let draw_title = |this: &mut Self, ui: &mut egui::Ui| {
@@ -1553,13 +1560,13 @@ impl App {
             }
             if crumb {
                 // Short of room the way back folds to an ellipsis, as WinUI's BreadcrumbBar does.
-                let words = if compact { "…" } else { Place::Home.title() };
-                let home = egui::Button::new(RichText::new(words).text_style(egui::TextStyle::Heading).color(p.muted)).frame(false);
-                let r = ui.add(home).on_hover_cursor(egui::CursorIcon::PointingHand);
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, Place::Home.title()));
-                let r = if compact { r.on_hover_text(Place::Home.title()) } else { r };
+                let words = if compact { "…" } else { place.title() };
+                let back = egui::Button::new(RichText::new(words).text_style(egui::TextStyle::Heading).color(p.muted)).frame(false);
+                let r = ui.add(back).on_hover_cursor(egui::CursorIcon::PointingHand);
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, place.title()));
+                let r = if compact { r.on_hover_text(place.title()) } else { r };
                 if r.clicked() {
-                    this.go(Page::Home);
+                    this.go(place.first());
                 }
                 ui.add(widgets::Glyph(widgets::ico(icon::CHEVRON_RIGHT, 16.0).color(p.muted)));
             }
@@ -1620,7 +1627,7 @@ impl App {
     /// edge, so they're added right to left. `compact` shows them as icons alone, and leaves
     /// "Checked ..." to a line under the title.
     fn header_actions(&mut self, ui: &mut egui::Ui, place: Place, compact: bool) {
-        if !matches!(place, Place::Home | Place::MyPc) || self.page == Page::Report {
+        if !matches!(place, Place::Home | Place::MyPc) || self.page.inner() {
             return;
         }
         let button = |ui: &mut egui::Ui, ic: &str, text: &str| {
@@ -2077,7 +2084,7 @@ mod tests {
         }
         for page in Page::ALL {
             let place = page.place();
-            let reachable = place.first() == page || place.tabs().contains(&page) || page == Page::Report;
+            let reachable = place.first() == page || place.tabs().contains(&page) || page.inner();
             assert!(reachable, "{page:?} can't be reached from the sidebar or a tab");
         }
     }

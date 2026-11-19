@@ -4,7 +4,7 @@ Thanks for helping. Bootmend is an early version, so a clear bug report helps as
 
 ## Report a problem
 
-Use **Report a problem** in Bootmend (on the notice it shows at launch, or at the bottom of Settings), or open the [bug form](https://github.com/TanishkKamra/bootmend/issues/new?template=bug_report.yml) directly. Everything on GitHub is public, so leave out anything private.
+Use **Report a problem** in Bootmend (on the notice it shows at launch, or under Help in Settings), or open the [bug form](https://github.com/TanishkKamra/bootmend/issues/new?template=bug_report.yml) directly. Everything on GitHub is public, so leave out anything private.
 
 ## Suggest an idea
 
