@@ -90,11 +90,20 @@ pub fn note(ui: &mut Ui, fg: Color32, bg: Color32, ic: &str, add: impl FnOnce(&m
 }
 
 pub fn pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) -> Response {
+    let text = RichText::new(text).small().color(fg).family(theme::semibold());
+    // A frame never wraps by itself, so in a wrapping row it moves to the next line here when it
+    // won't fit, instead of pushing the card wider than the window.
+    if ui.layout().main_wrap && ui.cursor().min.x > ui.max_rect().left() + 0.5 {
+        let galley = egui::WidgetText::from(text.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
+        if galley.size().x + 2.0 * S2 + ui.spacing().item_spacing.x > ui.available_size_before_wrap().x {
+            ui.end_row();
+        }
+    }
     egui::Frame::new()
         .fill(bg)
         .corner_radius(CornerRadius::same(u8::MAX))
         .inner_margin(Margin::symmetric(S2 as i8, 2))
-        .show(ui, |ui| ui.add(egui::Label::new(RichText::new(text).small().color(fg).family(theme::semibold())).extend()))
+        .show(ui, |ui| ui.add(egui::Label::new(text).extend()))
         .response
 }
 
@@ -149,6 +158,12 @@ pub fn off_reason_width(ui: &Ui, text: &str) -> f32 {
 pub fn right_row(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     let id = ui.id().with("right-row");
     let w: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+    if w > ui.available_width() + 0.5 {
+        // Too wide for one line in a narrow window, so the buttons wrap from the left instead.
+        // The width stays the one-line width, so a wider window goes back to one line.
+        ui.horizontal_wrapped(add);
+        return;
+    }
     ui.horizontal(|ui| {
         ui.add_space((ui.available_width() - w).max(0.0));
         let x0 = ui.cursor().min.x;
