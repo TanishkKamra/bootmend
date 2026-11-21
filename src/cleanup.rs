@@ -66,15 +66,25 @@ pub struct Cleaned {
 
 impl Places {
     pub fn current() -> Option<Places> {
-        let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+        let windir = crate::sys::windows_dir().to_path_buf();
+        let (temp, local, roaming, profile) = if crate::sys::elevated() {
+            // An administrator window shares the user's variables, which any app the user runs can
+            // point elsewhere, such as TEMP at C:\Users. Windows' list of profiles can't be changed that way.
+            let profile = crate::sys::user_profile()?;
+            let local = profile.join(r"AppData\Local");
+            (local.join("Temp"), local, profile.join(r"AppData\Roaming"), profile)
+        } else {
+            let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+            (std::env::temp_dir(), env("LOCALAPPDATA")?, env("APPDATA")?, env("USERPROFILE")?)
+        };
         Some(Places {
-            temp: std::env::temp_dir(),
-            local: env("LOCALAPPDATA")?,
-            roaming: env("APPDATA")?,
-            profile: env("USERPROFILE")?,
-            windir: env("WINDIR")?,
-            program_data: env("ProgramData")?,
-            system_drive: env("SystemDrive").map(|d| PathBuf::from(format!("{}\\", d.display())))?,
+            temp,
+            local,
+            roaming,
+            profile,
+            program_data: crate::sys::known_folder(&windows::Win32::UI::Shell::FOLDERID_ProgramData)?,
+            system_drive: windir.ancestors().last()?.to_path_buf(),
+            windir,
         })
     }
 }

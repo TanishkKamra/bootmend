@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn reads_task_manager_names() {
-        let notepad = PathBuf::from(std::env::var("SystemRoot").unwrap()).join(r"System32\notepad.exe");
+        let notepad = crate::sys::system_dir().join("notepad.exe");
         let d = file_description(&notepad);
         assert!(d.as_deref().is_some_and(|d| d.to_lowercase().contains("notepad")), "{d:?}");
     }

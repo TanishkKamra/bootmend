@@ -6,7 +6,7 @@ pub mod smart;
 pub mod winget;
 
 use crate::snapshot::{Snapshot, FORMAT_VERSION};
-use crate::util::{data_dir, powershell, ps_quote, J};
+use crate::util::{powershell, ps_quote, J};
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::sync::mpsc::Sender;
@@ -46,7 +46,7 @@ fn send(tx: &Sender<Progress>, p: Progress) {
 
 /// Run one embedded PowerShell section and parse its JSON.
 pub fn run_section(key: &str, body: &str, timeout: Duration) -> Result<Value> {
-    let tmp = data_dir("tmp")?;
+    let tmp = crate::sys::tmp_dir()?;
     let script = format!("$env:BOOTMEND_TMP = {}\n{}\n{}", ps_quote(&tmp.to_string_lossy()), COMMON, body);
     let out = powershell(&script, timeout)?;
     if out.timed_out {

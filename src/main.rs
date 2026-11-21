@@ -16,6 +16,7 @@ mod rules;
 mod scan;
 mod schedule;
 mod snapshot;
+mod sys;
 mod trends;
 mod update;
 mod usb_copy;
@@ -195,7 +196,9 @@ fn main() {
     }
     if let Some(out) = args.report {
         console();
-        if let Err(e) = headless(out, args.pdf, !args.show_personal) {
+        let r = headless(out, args.pdf, !args.show_personal);
+        sys::remove_tmp();
+        if let Err(e) = r {
             log_error(&e);
             eprintln!("{e:#}");
             std::process::exit(1);
@@ -252,6 +255,7 @@ fn main() {
         eprintln!("Bootmend couldn't open its window: {e}");
         std::process::exit(1);
     }
+    sys::remove_tmp();
     log!("app", "closed");
 }
 

@@ -251,8 +251,7 @@ fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
 }
 
 fn read(name: &str) -> Option<Vec<u8>> {
-    let dir = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
-    std::fs::read(dir.join("Fonts").join(name)).ok()
+    std::fs::read(crate::sys::windows_dir().join("Fonts").join(name)).ok()
 }
 
 fn load(names: &[&str]) -> Option<FontData> {

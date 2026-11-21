@@ -12,6 +12,11 @@ fn main() {
             panic!("failed to embed Windows resources: {e}");
         }
     }
+    // Load the DLLs bootmend.exe links to from System32 only, never from the folder it was
+    // started in, where a downloaded DLL of the same name could sit beside it.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+    }
     println!("cargo:rerun-if-changed=assets/bootmend.manifest");
     println!("cargo:rerun-if-changed=assets/bootmend.ico");
 }

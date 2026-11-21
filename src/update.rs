@@ -174,8 +174,7 @@ fn verify(exe: &[u8], sig_text: &str, want: Version) -> Result<()> {
 
 /// Windows' own curl, not whichever curl.exe comes first on the PATH.
 fn curl() -> PathBuf {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-    PathBuf::from(root).join("System32").join("curl.exe")
+    crate::sys::system_dir().join("curl.exe")
 }
 
 /// Downloads `url` through `out` and returns its bytes. The file is removed again either way.
@@ -415,7 +414,8 @@ mod tests {
         assert!(a.iter().any(|x| x == "--fail"));
         assert!(a.iter().any(|x| x == "--tlsv1.2"));
         assert_eq!(a.last().unwrap(), "https://github.com/x");
-        assert!(curl().ends_with(r"System32\curl.exe"));
+        // Windows spells the folder "system32" or "System32"; either is the same folder.
+        assert!(curl().to_string_lossy().to_lowercase().ends_with(r"\system32\curl.exe"));
     }
 
     #[test]

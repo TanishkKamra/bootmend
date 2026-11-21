@@ -4,7 +4,7 @@ mod html;
 pub mod redact;
 
 use crate::snapshot::Snapshot;
-use crate::util::{data_dir, run_hidden};
+use crate::util::run_hidden;
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,11 +26,7 @@ pub fn write_html(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
 }
 
 fn edge() -> Option<PathBuf> {
-    ["ProgramFiles(x86)", "ProgramFiles"]
-        .iter()
-        .filter_map(std::env::var_os)
-        .map(|b| PathBuf::from(b).join(r"Microsoft\Edge\Application\msedge.exe"))
-        .find(|p| p.is_file())
+    crate::sys::program_files().into_iter().map(|b| b.join(r"Microsoft\Edge\Application\msedge.exe")).find(|p| p.is_file())
 }
 
 /// Render the HTML report to PDF with Microsoft Edge in headless mode.
@@ -39,7 +35,8 @@ pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
         log!("report", "PDF report failed: Microsoft Edge was not found");
         anyhow!("Saving as PDF uses Microsoft Edge, which wasn't found. Save as a web page instead and print it from any browser.")
     })?;
-    let tmp = data_dir("tmp")?;
+    // Edge reads its profile from here, so in an administrator window it must be a folder only administrators can change.
+    let tmp = crate::sys::tmp_dir()?;
     let html = tmp.join(format!("report-{}.html", s.id));
     save_html(s, hide_personal, &html).inspect_err(|e| log!("report", "PDF report failed: {e:#}"))?;
     let profile = tmp.join("edge-print-profile");

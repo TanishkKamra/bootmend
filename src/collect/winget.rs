@@ -6,8 +6,14 @@ use crate::util::run_hidden;
 use anyhow::{anyhow, Result};
 use std::time::{Duration, Instant};
 
+/// winget is an app alias in the user's own folder, not part of System32.
+fn winget() -> Option<String> {
+    let p = crate::sys::known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData)?.join(r"Microsoft\WindowsApps\winget.exe");
+    p.exists().then(|| p.to_string_lossy().to_string())
+}
+
 pub fn available() -> bool {
-    std::env::var_os("LOCALAPPDATA").map(|l| std::path::PathBuf::from(l).join(r"Microsoft\WindowsApps\winget.exe").exists()).unwrap_or(false)
+    winget().is_some()
 }
 
 /// Parse `winget upgrade` table output. Column starts come from the header line.
@@ -45,7 +51,7 @@ pub fn check() -> Result<Vec<AppUpgrade>> {
     log!("winget", "checking for app updates");
     let t0 = Instant::now();
     let out = run_hidden(
-        "winget",
+        &winget().ok_or_else(|| anyhow!("winget isn't installed"))?,
         &["upgrade", "--include-unknown", "--source", "winget", "--accept-source-agreements", "--disable-interactivity"],
         Duration::from_secs(180),
     )
@@ -72,7 +78,7 @@ pub fn upgrade(id: &str) -> Result<String> {
     log!("winget", "updating {id}");
     let t0 = Instant::now();
     let out = run_hidden(
-        "winget",
+        &winget().ok_or_else(|| anyhow!("winget isn't installed"))?,
         &[
             "upgrade",
             "--id",

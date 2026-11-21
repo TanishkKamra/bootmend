@@ -108,15 +108,10 @@ pub struct Output {
 
 /// Run a program without flashing a console window, with a hard timeout.
 pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Output> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .inspect_err(|e| log!("run", "couldn't start {program}: {e}"))
-        .with_context(|| format!("starting {program}"))?;
+    let mut cmd = Command::new(crate::sys::program(program));
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(CREATE_NO_WINDOW);
+    crate::sys::prepare(&mut cmd)?;
+    let mut child = cmd.spawn().inspect_err(|e| log!("run", "couldn't start {program}: {e}")).with_context(|| format!("starting {program}"))?;
     let job = Job::hold(&child, program);
     // Drain pipes on threads so a chatty child can't block on a full pipe.
     let mut so = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
@@ -238,7 +233,7 @@ pub fn powershell(script: &str, timeout: Duration) -> Result<Output> {
     out
 }
 
-fn unique() -> u128 {
+pub(crate) fn unique() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
