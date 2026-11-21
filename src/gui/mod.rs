@@ -265,6 +265,8 @@ struct Settings {
     use_windows_accent: bool,
     /// "Don't show again" was pressed on the early-version notice.
     early_notice_off: bool,
+    /// "Don't ask again" was ticked when agreeing to M-Lab's speed test.
+    speed_test_ok: bool,
     /// Bootmend asks GitHub once a day whether there's a newer version.
     auto_update: bool,
     /// The day the update check last ran, such as 2026-11-19, so it runs at most once a day.
@@ -284,6 +286,7 @@ impl Default for Settings {
             schedule_asked: false,
             use_windows_accent: false,
             early_notice_off: false,
+            speed_test_ok: false,
             auto_update: true,
             update_checked: None,
             update_notified: None,
@@ -478,6 +481,10 @@ pub struct App {
     snap_mode: Option<SnapMode>,
     cleanup: Option<cleanup_page::CleanupView>,
     net: Option<crate::nettest::NetCheck>,
+    /// The half of the speed test that's running, and its speed so far.
+    net_progress: Arc<std::sync::Mutex<(Option<crate::ndt7::Phase>, Option<f64>)>>,
+    /// The "Don't ask again" tick in the open dialog.
+    dont_ask: bool,
     live: Option<crate::live::Monitor>,
     trends: Vec<crate::trends::Trend>,
     /// The check the trends were drawn for.
@@ -550,6 +557,8 @@ impl App {
             snap_mode: None,
             cleanup: None,
             net: None,
+            net_progress: Default::default(),
+            dont_ask: false,
             live: None,
             trends: vec![],
             trends_for: String::new(),
@@ -1122,11 +1131,13 @@ impl App {
                 yes: "Update and restart".into(),
                 action,
             },
+            // The privacy policy link and the "Don't ask again" tick follow the last paragraph.
             Pending::NetCheck => Confirm {
                 title: "Test your connection?".into(),
                 body: vec![
-                    "Bootmend pings your router, times a few website name lookups, then times how quickly Microsoft's website (www.microsoft.com) answers.".into(),
-                    "It uses very little data and takes a few seconds. Like any website, Microsoft sees this connection's internet address. Nothing about the PC is sent.".into(),
+                    "Bootmend pings your router, times a few name lookups and Microsoft's website, then measures download and upload speed with Measurement Lab (M-Lab), a public research project.".into(),
+                    "Takes about 25 seconds. It can use a few hundred MB of data, or a few GB on a very fast connection.".into(),
+                    "M-Lab publishes every result as open data, including this connection's internet address and that Bootmend ran it. Nothing else about the PC is sent.".into(),
                 ],
                 yes: "Test now".into(),
                 action,
@@ -1153,6 +1164,7 @@ impl App {
             }
         };
         log!("dialog", "shown: {}", c.title);
+        self.dont_ask = false;
         self.confirm = Some(c);
     }
 
@@ -1477,10 +1489,12 @@ impl App {
                 Job::NetChecked(c) => {
                     log!("action", "the connection check {}", if c.internet_ms.is_some() { "finished" } else { "couldn't finish" });
                     self.busy.remove("net");
-                    self.toast(
-                        if c.internet_ms.is_some() { "Connection check finished." } else { "The connection check couldn't finish. The Network page says why." },
-                        c.internet_ms.is_some(),
-                    );
+                    let words = match (c.internet_ms, &c.speed) {
+                        (None, _) => "The connection check couldn't finish.",
+                        (Some(_), None) => "Connection check finished, but the speed test couldn't run.",
+                        _ => "Connection check finished.",
+                    };
+                    self.toast(words, c.internet_ms.is_some());
                     self.net = Some(c);
                 }
                 Job::UpdateChecked(r, manual) => self.on_update_checked(r, manual),
@@ -1725,6 +1739,8 @@ impl App {
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(c) = &self.confirm else { return };
         let (title, body, yes) = (c.title.clone(), c.body.clone(), c.yes.clone());
+        let speed_test = matches!(c.action, Pending::NetCheck);
+        let (mut dont_ask, mut policy) = (self.dont_ask, false);
         let mut decision: Option<bool> = None;
         // Windows dialogs keep 24 px clear around their content.
         let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(S5 as i8));
@@ -1736,6 +1752,11 @@ impl App {
             for b in &body {
                 ui.label(b);
                 ui.add_space(theme::S1);
+            }
+            if speed_test {
+                policy = ui.link("M-Lab's privacy policy").clicked();
+                ui.add_space(S3);
+                widgets::checkbox(ui, &mut dont_ask, true, "Don't ask again");
             }
             ui.add_space(S4);
             widgets::right_row(ui, |ui| {
@@ -1754,8 +1775,21 @@ impl App {
         if m.should_close() && decision.is_none() {
             decision = Some(false);
         }
+        self.dont_ask = dont_ask;
+        if policy {
+            log!("dialog", "opened M-Lab's privacy policy");
+            if let Err(e) = shell_open(crate::ndt7::PRIVACY) {
+                log!("dialog", "couldn't open M-Lab's privacy policy: {e:#}");
+                self.toast(format!("Couldn't open your browser. M-Lab's privacy policy is at {}", crate::ndt7::PRIVACY), false);
+            }
+        }
         if let Some(d) = decision {
             log!("dialog", "{}: {title}", if d { "accepted" } else { "cancelled" });
+            if d && speed_test && dont_ask {
+                log!("dialog", "won't ask before speed tests again");
+                self.settings.speed_test_ok = true;
+                self.save_settings();
+            }
             let c = self.confirm.take();
             if let (true, Some(c)) = (d, c) {
                 self.run(ctx, c.action);

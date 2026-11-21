@@ -5,7 +5,8 @@ use super::widgets::{self, card, icon, kv, muted, section, small, table};
 use super::{App, Job, Page, Pending};
 use crate::cleanup::size_text;
 use crate::live::{verdict, Live, Monitor};
-use crate::nettest::{self, NetCheck};
+use crate::ndt7::Phase;
+use crate::nettest::{self, speed_text, NetCheck};
 use crate::snapshot::Snapshot;
 use crate::util::{shell_open, J};
 use eframe::egui::{self, RichText, Ui};
@@ -36,7 +37,17 @@ impl App {
     pub(super) fn start_net_check(&mut self, ctx: &egui::Context) {
         self.busy.insert("net".into());
         let r = self.snap.as_deref().and_then(router);
-        self.spawn(ctx, move || Job::NetChecked(nettest::run(r)));
+        let progress = std::sync::Arc::new(std::sync::Mutex::new((None, None)));
+        self.net_progress = progress.clone();
+        let c = ctx.clone();
+        self.spawn(ctx, move || {
+            Job::NetChecked(nettest::run(r, &|phase, mbps| {
+                if let Ok(mut p) = progress.lock() {
+                    *p = (phase, mbps);
+                }
+                c.request_repaint();
+            }))
+        });
     }
 
     pub(super) fn live_page(&mut self, ui: &mut Ui) {
@@ -113,16 +124,23 @@ impl App {
         let mut start = false;
         card(ui, |ui| {
             if busy {
+                let (phase, mbps) = self.net_progress.lock().map(|p| *p).unwrap_or_default();
+                let so_far = mbps.map(|m| format!(": {}", speed_text(m))).unwrap_or_default();
+                let words = match phase {
+                    None => "Checking the router and name lookups".to_string(),
+                    Some(Phase::Download) => format!("Measuring download speed{so_far}"),
+                    Some(Phase::Upload) => format!("Measuring upload speed{so_far}"),
+                };
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
-                    ui.label("Testing. This takes a few seconds.");
+                    ui.label(words);
                 });
                 return;
             }
             match &self.net {
                 Some(c) => net_result(ui, c),
                 None => {
-                    muted(ui, "Measure how quickly this connection answers, and whether any delay is in your home network or further out.");
+                    muted(ui, "Measure how fast this connection is, how quickly it answers, and whether any delay is in your home network or further out.");
                 }
             }
             ui.add_space(S3);
@@ -131,7 +149,7 @@ impl App {
             let again = self.net.is_some();
             let row = |ui: &mut Ui| {
                 start = widgets::icon_button(ui, icon::NETWORK, if again { "Test again" } else { "Test my connection" }, true).clicked();
-                ui.add(egui::Label::new(RichText::new("Visits Microsoft's website. Asks before going online.").small().color(muted)).wrap());
+                ui.add(egui::Label::new(RichText::new("About 25 seconds. Uses M-Lab, which publishes the results.").small().color(muted)).wrap());
             };
             if ui.available_width() < widgets::WRAP {
                 ui.vertical(row);
@@ -140,10 +158,39 @@ impl App {
             }
         });
         if start {
-            self.ask(Pending::NetCheck);
+            if self.settings.speed_test_ok {
+                let ctx = ui.ctx().clone();
+                self.run(&ctx, Pending::NetCheck);
+            } else {
+                self.ask(Pending::NetCheck);
+            }
         }
         ui.add_space(S4);
     }
+}
+
+/// One half of the speed headline: a small label over a big number, with its unit on the same
+/// baseline.
+fn speed_figure(ui: &mut Ui, label: &str, mbps: Option<f64>, style: egui::TextStyle) {
+    let p = pal(ui.ctx());
+    ui.vertical(|ui| {
+        ui.label(RichText::new(label).color(p.muted));
+        let Some(m) = mbps else {
+            ui.label(RichText::new("Couldn't measure").color(p.muted));
+            return;
+        };
+        let text = speed_text(m);
+        let (number, unit) = text.split_once(' ').unwrap_or((&text, ""));
+        let big = ui.painter().layout_no_wrap(number.to_string(), style.resolve(ui.style()), p.ink);
+        let small = ui.painter().layout_no_wrap(unit.to_string(), egui::TextStyle::Body.resolve(ui.style()), p.muted);
+        let baseline = |g: &egui::Galley| g.rows.first().and_then(|r| r.row.glyphs.first()).map_or(0.0, |c| c.pos.y);
+        let drop = baseline(&big) - baseline(&small);
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(big.size().x + S1 + small.size().x, big.size().y), egui::Sense::hover());
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("{label}: {text}")));
+        let unit_at = rect.min + egui::vec2(big.size().x + S1, drop);
+        ui.painter().galley(rect.min, big, p.ink);
+        ui.painter().galley(unit_at, small, p.muted);
+    });
 }
 
 fn net_result(ui: &mut Ui, c: &NetCheck) {
@@ -154,21 +201,66 @@ fn net_result(ui: &mut Ui, c: &NetCheck) {
         });
         ui.add_space(S3);
     }
+    let speed = c.speed.as_ref();
+    if let Some(down) = speed.and_then(|s| s.down_mbps) {
+        let up = speed.and_then(|s| s.up_mbps);
+        // Two big numbers don't fit side by side in a narrow card at full size.
+        let style = if ui.available_width() < widgets::WRAP { egui::TextStyle::Heading } else { theme::big() };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::S6;
+            speed_figure(ui, "Download", Some(down), style.clone());
+            speed_figure(ui, "Upload", up, style);
+        });
+        ui.add_space(S2);
+        ui.add(egui::Label::new(nettest::good_for(down, up)).wrap());
+        ui.add_space(S4);
+    }
+    let wifi = c.wifi.as_ref();
+    let (lost, sent) = c.packets();
     kv(
         ui,
         "net",
         &[
             ("Response time", c.internet_ms.map(|ms| format!("{ms:.0} ms. {}", nettest::latency_words(ms)))),
+            ("Lag when busy", speed.and_then(|s| s.lag_ms()).map(|x| format!("{x:.0} ms more. {}.", nettest::lag_words(x)))),
+            ("Steadiness", nettest::steadiness(c.jitter_ms, lost, sent)),
             (
-                "Router",
-                c.router_ms.map(|ms| {
-                    let lost = if c.router_lost == 0 { "no pings lost".to_string() } else { format!("{} of {} pings lost", c.router_lost, c.router_sent) };
-                    format!("{ms:.0} ms, {lost}")
+                "Wi-Fi",
+                wifi.map(|w| {
+                    let signal = w.signal.map(|s| format!("{} signal ({s}%)", nettest::signal_words(s)));
+                    [signal, w.band.clone()].into_iter().flatten().collect::<Vec<_>>().join(", ")
                 }),
             ),
-            ("Name lookups (DNS)", c.dns_ms.map(|ms| format!("{ms:.0} ms"))),
         ],
     );
+    ui.add_space(S2);
+    ui.collapsing("More details", |ui| {
+        kv(
+            ui,
+            "net-more",
+            &[
+                ("Jitter", c.jitter_ms.map(|j| if j < 10.0 { format!("{j:.1} ms") } else { format!("{j:.0} ms") })),
+                (
+                    "Router",
+                    c.router_ms.map(|ms| {
+                        let lost = if c.router_lost == 0 { "no pings lost".to_string() } else { format!("{} of {} pings lost", c.router_lost, c.router_sent) };
+                        format!("{ms:.0} ms, {lost}")
+                    }),
+                ),
+                ("Name lookups (DNS)", c.dns_ms.map(|ms| format!("{ms:.0} ms"))),
+                (
+                    "Wi-Fi link speed",
+                    wifi.and_then(|w| {
+                        w.link_mbps.as_ref().map(|l| match &w.channel {
+                            Some(ch) => format!("{l} Mbps on channel {ch}"),
+                            None => format!("{l} Mbps"),
+                        })
+                    }),
+                ),
+                ("Test server", speed.map(|s| s.place.as_ref().map_or("M-Lab".to_string(), |pl| format!("M-Lab, {pl}")))),
+            ],
+        );
+    });
     for prob in &c.problems {
         ui.add_space(S1);
         ui.add(egui::Label::new(RichText::new(prob).color(p.muted)).wrap());

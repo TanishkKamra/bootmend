@@ -2,7 +2,7 @@
 
 A Windows desktop app that checks a PC (hardware, health, security, software) and explains, in plain words, what is worth fixing. It is written for people who aren't technical.
 
-Bootmend only reads until you press a button, and every change explains itself first. Changes to Windows settings can be undone from History. Clearing space and updating apps can't be undone, and Bootmend says so before it runs them. It goes online on its own for one thing: once a day it asks GitHub whether a newer Bootmend is out, and Settings can turn that off. Anything else online (checking for app updates, updating an app, reading crash files, testing the connection, updating Bootmend) waits for a button press and asks first.
+Bootmend only reads until you press a button, and every change explains itself first. Changes to Windows settings can be undone from History. Clearing space and updating apps can't be undone, and Bootmend says so before it runs them. It goes online on its own for one thing: once a day it asks GitHub whether a newer Bootmend is out, and Settings can turn that off. Anything else online (checking for app updates, updating an app, reading crash files, testing the connection, updating Bootmend) waits for a button press and asks first. The connection test measures speed with [Measurement Lab (M-Lab)](https://www.measurementlab.net/), which publishes every result as open data, including the connection's internet address ([M-Lab's privacy policy](https://www.measurementlab.net/privacy/)). Bootmend says so before a test, until you tick Don't ask again.
 
 ## Download
 
@@ -22,7 +22,7 @@ After that, Bootmend offers new versions itself. It installs one only if the dow
 - **This PC:** device details, an upgrade advisor (for example, a matching memory stick), and, on Windows 10, whether the PC can move to Windows 11.
 - **Storage:** drive health, wear and free space. When a failing drive holds Documents, Desktop or Pictures, Bootmend offers to copy them to a USB drive.
 - **Free up space:** measures caches and leftovers first, then clears only what you tick. Files an app has open are skipped.
-- **Network:** adapters, Wi-Fi, what accepts connections from the network, and a connection test that times the router, DNS lookups and Microsoft's website, to show where any delay is.
+- **Network:** adapters, Wi-Fi, what accepts connections from the network, and a connection test that times the router, DNS lookups and Microsoft's website, to show where any delay is, then measures download and upload speed and the lag while busy with M-Lab's ndt7 test. It reads out what the connection is good for, how steady it is and the Wi-Fi signal.
 - **Security:** Windows Security, firewall, updates, System Restore, and which apps used the camera, microphone and location.
 - **Apps & extensions:** installed apps, outdated ones (updated through winget), and browser extensions with a link to each one's own page.
 - **Startup & background:** on/off switches for apps that open at sign-in, plus services and scheduled tasks from other makers.

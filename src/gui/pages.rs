@@ -161,7 +161,7 @@ impl App {
             Page::Cleanup => "See what's taking up space before anything is removed.".into(),
             Page::Startup => "Apps that open by themselves when you sign in.".into(),
             Page::Live => "Which apps are using the processor, memory and drive at this moment.".into(),
-            Page::NetCheck => "How quickly this connection answers, and where any delay comes from.".into(),
+            Page::NetCheck => "How fast this connection is, and where any delay comes from.".into(),
             Page::ThisPc => "What's inside, as Windows reports it.".into(),
             Page::Storage => "Drive health, wear and free space.".into(),
             Page::Security => "Virus protection, the firewall and who can reach this PC.".into(),
