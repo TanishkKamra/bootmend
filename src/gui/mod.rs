@@ -2,7 +2,7 @@
 
 mod cleanup_page;
 mod copy_dialog;
-mod crash_summary;
+pub mod crash_summary;
 mod home;
 mod live_page;
 mod mark;

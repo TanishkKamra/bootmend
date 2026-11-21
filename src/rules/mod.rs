@@ -1152,6 +1152,20 @@ mod tests {
     }
 
     #[test]
+    fn the_home_crash_finding_gives_the_crashes_page_steps() {
+        let mut s = base();
+        s.health = json!({"bugchecks": [{"Date": "2026-11-14 06:47", "Text": "The bugcheck was: 0x0000000a (0x0, 0x0)."}]});
+        s.dumps = vec![dump("ntkrnlmp.exe", "2026-11-14 06:47")];
+        let f = evaluate(&s).into_iter().find(|f| f.id == "bsod").expect("finding");
+        let p = crate::gui::crash_summary::plan(&s.dumps).expect("plan");
+        assert_eq!(f.steps, p.steps.iter().map(|st| st.text.clone()).collect::<Vec<_>>());
+        for a in p.steps.iter().filter_map(|st| st.action.as_ref()) {
+            assert!(f.actions.contains(a), "{a:?} missing from {:?}", f.actions);
+        }
+        assert!(f.summary.ends_with(" Likeliest cause: Memory or other hardware."), "{}", f.summary);
+    }
+
+    #[test]
     fn crash_files_naming_a_freshly_updated_driver_offer_the_version_before() {
         let mut s = crashed_after_update(&["2026-11-20 21:00", "2026-11-21 22:00"]);
         s.dumps = vec![dump("amdkmdag.sys", "2026-11-20 21:01")];
