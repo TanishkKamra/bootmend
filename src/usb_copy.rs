@@ -107,8 +107,18 @@ impl Copied {
 /// damaged files.
 const GIVE_UP: usize = 25;
 
+/// Returned in an administrator window.
+pub const NOT_AS_ADMIN: &str =
+    "Bootmend can't copy your files while it's running as administrator. Close Bootmend, open it again without administrator rights, then try again";
+
 /// The person's Documents, Desktop and Pictures, and the USB drives plugged in now. Only reads.
 pub fn look() -> Result<(Vec<Folder>, Vec<Target>)> {
+    // As administrator the copy could read files the person can't, through a folder their own
+    // apps point elsewhere, or write into Windows' folders through a junction on the drive.
+    if crate::sys::elevated() {
+        log!("copy", "not copying from an administrator window");
+        return Err(anyhow!(NOT_AS_ADMIN));
+    }
     let out = powershell(LOOK, Duration::from_secs(60))?;
     parse_look(&out.stdout)
 }
@@ -268,6 +278,9 @@ fn so_far(c: &Copied) -> String {
 /// that can't be copied is listed and skipped, as is one bigger than `max_file`; a full or missing
 /// drive stops the copy, and so do many failures in a row.
 pub fn copy_to(found: &Found, dir: &Path, max_file: Option<u64>, done: &AtomicU64, stop: &AtomicBool) -> Result<Copied> {
+    if crate::sys::elevated() {
+        return Err(anyhow!(NOT_AS_ADMIN));
+    }
     std::fs::create_dir_all(dir).map_err(|e| anyhow!("Bootmend couldn't write to the drive: {e}"))?;
     log!("copy", "copying {} files to {}", found.files.len(), dir.display());
     let mut c = Copied { dir: dir.to_path_buf(), files: 0, bytes: 0, failed: vec![], in_use: vec![], too_big: vec![], stopped: false };
@@ -423,7 +436,7 @@ mod tests {
 
     #[test]
     fn reads_the_folders_and_only_drives_plugged_in_by_usb() {
-        let out = "U\tEGG\\sam\tegg\\Sam\r\nF\tMyDocuments\tC:\\Users\\Sam\\OneDrive\\Documents\r\nF\tDesktop\tC:\\Users\\Sam\\Desktop\r\nF\tMyPictures\t\r\n\
+        let out = "U\tHOME-PC\\sam\thome-pc\\Sam\r\nF\tMyDocuments\tC:\\Users\\Sam\\OneDrive\\Documents\r\nF\tDesktop\tC:\\Users\\Sam\\Desktop\r\nF\tMyPictures\t\r\n\
                    D\tE\t62000000000\t131072\texFAT\tSANDISK\r\nD\tF\t1000\t0\tFAT32\t\r\nD\tC\t5000\t4096\tNTFS\tWindows\r\nnoise\r\n";
         let (f, d) = parse_look(out).unwrap();
         assert_eq!(f.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Documents", "Desktop"], "a missing folder is left out");
@@ -433,9 +446,9 @@ mod tests {
         assert_eq!((d[1].name.as_str(), d[1].cluster), ("USB drive", 4096), "no label or cluster size: plain defaults");
         assert_eq!((d[0].max_file(), d[1].max_file()), (None, Some(4_294_967_295)), "FAT32 holds files under 4 GB");
         assert!(parse_look("").is_err(), "PowerShell didn't run");
-        let other = parse_look(&out.replace("EGG\\sam", "EGG\\Mum")).unwrap_err().to_string();
-        assert!(other.contains("running as egg\\Sam, not EGG\\Mum"), "restarted as administrator with another account: {other}");
-        assert!(parse_look(&out.replace("EGG\\sam", "")).is_ok(), "nobody at the screen (a remote session) isn't a mismatch");
+        let other = parse_look(&out.replace("HOME-PC\\sam", "HOME-PC\\Mum")).unwrap_err().to_string();
+        assert!(other.contains("running as home-pc\\Sam, not HOME-PC\\Mum"), "restarted as administrator with another account: {other}");
+        assert!(parse_look(&out.replace("HOME-PC\\sam", "")).is_ok(), "nobody at the screen (a remote session) isn't a mismatch");
     }
 
     /// Only reads this PC's folder locations and drive list. Nothing is copied.

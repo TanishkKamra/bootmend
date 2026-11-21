@@ -49,7 +49,9 @@ pub fn hour_label(hour: u8) -> String {
     format!("{:02}:00", if hour < 24 { hour } else { NOON })
 }
 
+/// Escapes XML's special characters and drops the control characters XML 1.0 can't hold.
 fn xml_escape(s: &str) -> String {
+    let s: String = s.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || (c >= ' ' && !matches!(c, '\u{FFFE}' | '\u{FFFF}'))).collect();
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
@@ -184,6 +186,14 @@ pub fn toast_xml(items: &[&Finding]) -> String {
     )
 }
 
+/// After a scheduled check-up, once per new version.
+pub fn update_toast_xml(version: &str) -> String {
+    format!(
+        r#"<toast activationType="protocol" launch="{PROTOCOL}:open"><visual><binding template="ToastGeneric"><text>{APP} {} is ready</text><text>Open {APP} to install it.</text></binding></visual></toast>"#,
+        xml_escape(version)
+    )
+}
+
 pub fn notify(xml: &str) -> Result<()> {
     let script = format!(
         "$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]\n\
@@ -237,6 +247,11 @@ mod tests {
 
     fn f(id: &str, level: Level) -> Finding {
         Finding::new(id, Area::Security, level, format!("Title {id}"))
+    }
+
+    #[test]
+    fn xml_drops_characters_xml_cannot_hold() {
+        assert_eq!(xml_escape("a\u{1}b\u{1b}c\td<\"&'\u{FFFF}"), "abc\td&lt;&quot;&amp;&apos;");
     }
 
     fn task_exists(name: &str) -> String {
@@ -304,6 +319,9 @@ mod tests {
         assert!(x.contains("Bootmend found something new") && x.contains(r#"launch="bootmend:open""#) && !x.contains("rigscan"), "{x}");
         let y = toast_xml(&[&b]);
         assert!(y.contains("Title b&lt;&amp;&gt;") && !y.contains("b<&>"), "{y}");
+        let u = update_toast_xml("0.2.0");
+        assert!(u.contains("Bootmend 0.2.0 is ready") && u.contains(r#"launch="bootmend:open""#), "{u}");
+        assert!(update_toast_xml("<x>").contains("&lt;x&gt;"));
     }
 
     #[test]

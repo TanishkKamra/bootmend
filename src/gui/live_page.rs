@@ -115,14 +115,14 @@ impl App {
             if busy {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
-                    ui.label("Testing. This takes under a minute.");
+                    ui.label("Testing. This takes a few seconds.");
                 });
                 return;
             }
             match &self.net {
                 Some(c) => net_result(ui, c),
                 None => {
-                    muted(ui, "Measure how fast this connection is, and whether any delay is in your home network or further out.");
+                    muted(ui, "Measure how quickly this connection answers, and whether any delay is in your home network or further out.");
                 }
             }
             ui.add_space(S3);
@@ -131,7 +131,7 @@ impl App {
             let again = self.net.is_some();
             let row = |ui: &mut Ui| {
                 start = widgets::icon_button(ui, icon::NETWORK, if again { "Test again" } else { "Test my connection" }, true).clicked();
-                ui.add(egui::Label::new(RichText::new("Uses Cloudflare's public speed test. Asks before going online.").small().color(muted)).wrap());
+                ui.add(egui::Label::new(RichText::new("Visits Microsoft's website. Asks before going online.").small().color(muted)).wrap());
             };
             if ui.available_width() < widgets::WRAP {
                 ui.vertical(row);
@@ -158,8 +158,6 @@ fn net_result(ui: &mut Ui, c: &NetCheck) {
         ui,
         "net",
         &[
-            ("Download", c.down_mbps.map(|m| format!("{m:.0} Mbps. {}", nettest::speed_words(m)))),
-            ("Upload", c.up_mbps.map(|m| format!("{m:.0} Mbps"))),
             ("Response time", c.internet_ms.map(|ms| format!("{ms:.0} ms. {}", nettest::latency_words(ms)))),
             (
                 "Router",

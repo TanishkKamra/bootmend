@@ -2,7 +2,19 @@
 
 A Windows desktop app that checks a PC (hardware, health, security, software) and explains, in plain words, what is worth fixing. It is written for people who aren't technical.
 
-Bootmend only reads until you press a button, and every change explains itself first. Changes to Windows settings can be undone from History. Clearing space and updating apps can't be undone, and Bootmend says so before it runs them. It only goes online when you press one of four buttons (check for app updates, update an app, read crash files, test my connection), and each one asks first.
+Bootmend only reads until you press a button, and every change explains itself first. Changes to Windows settings can be undone from History. Clearing space and updating apps can't be undone, and Bootmend says so before it runs them. It goes online on its own for one thing: once a day it asks GitHub whether a newer Bootmend is out, and Settings can turn that off. Anything else online (checking for app updates, updating an app, reading crash files, testing the connection, updating Bootmend) waits for a button press and asks first.
+
+## Download
+
+Bootmend 0.1.0 is an early version, so expect a few rough edges. Download `bootmend.exe` from the [latest release](https://github.com/TanishkKamra/bootmend/releases/latest). It's a single file with no installer, for Windows 10 and 11 (64-bit).
+
+Bootmend isn't code-signed yet, so the first time you open it Windows may say "Windows protected your PC". Click **More info**, then **Run anyway**. To check your copy is the real one, compare its SHA-256 checksum with the one on the release page. In PowerShell, in the folder you saved it to:
+
+```
+Get-FileHash .\bootmend.exe -Algorithm SHA256
+```
+
+After that, Bootmend offers new versions itself. It installs one only if the download is signed with Bootmend's release key, and your saved checks and settings stay as they are.
 
 ## What it does
 
@@ -10,7 +22,7 @@ Bootmend only reads until you press a button, and every change explains itself f
 - **This PC:** device details, an upgrade advisor (for example, a matching memory stick), and, on Windows 10, whether the PC can move to Windows 11.
 - **Storage:** drive health, wear and free space. When a failing drive holds Documents, Desktop or Pictures, Bootmend offers to copy them to a USB drive.
 - **Free up space:** measures caches and leftovers first, then clears only what you tick. Files an app has open are skipped.
-- **Network:** adapters, Wi-Fi, what accepts connections from the network, and a connection test (router, DNS, internet delay, download and upload speed) that uses Cloudflare's public speed test.
+- **Network:** adapters, Wi-Fi, what accepts connections from the network, and a connection test that times the router, DNS lookups and Microsoft's website, to show where any delay is.
 - **Security:** Windows Security, firewall, updates, System Restore, and which apps used the camera, microphone and location.
 - **Apps & extensions:** installed apps, outdated ones (updated through winget), and browser extensions with a link to each one's own page.
 - **Startup & background:** on/off switches for apps that open at sign-in, plus services and scheduled tasks from other makers.
@@ -32,7 +44,9 @@ Needs Windows 10 or 11 and Rust (MSVC toolchain).
 cargo build --release
 ```
 
-The app is `target\release\bootmend.exe`. It's a single file with no installer.
+The app is `target\release\bootmend.exe`. It's a single file with no installer, and it doesn't need the Visual C++ Redistributable.
+
+After changing dependencies, run `python tools/third_party_notices.py` to refresh `THIRD-PARTY-NOTICES.txt`, which is built into the app.
 
 ## Run
 
@@ -47,6 +61,8 @@ bootmend --screenshots <folder> [--theme light|dark] [--size WxH]
 `--scheduled` is what the regular check-up task runs. You don't need to use it yourself.
 
 Saved checks live in `%LOCALAPPDATA%\Bootmend\snapshots\<PC name>\`.
+
+History is kept in `%LOCALAPPDATA%\Bootmend\history.json`. A change that removes settings saves a copy of them first, under `HKCU\SOFTWARE\Bootmend\Changes` for your own settings and `HKLM\SOFTWARE\Bootmend\Changes` for settings that apply to everyone on the PC. A change made as administrator also leaves a record there, and Undo checks it first, so editing `history.json` can't change what an undo does. Deleting Bootmend's data in Settings removes these too; the `HKLM` ones only go when Bootmend is running as administrator.
 
 Everything the app does is written to a log, one file per day, in a `logs` folder beside `bootmend.exe` (or `%LOCALAPPDATA%\Bootmend\logs` when that folder can't be written to). It records:
 
@@ -69,6 +85,27 @@ cargo clippy --all-targets
 
 Tests that change the PC (cleaning, Task Scheduler, notifications, the live connection test) are marked `#[ignore]`. Run them on purpose with `cargo test -- --ignored`.
 
+## Release
+
+Releases are built and signed on GitHub, never on a personal PC.
+
+1. Raise `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, and merge to `main`.
+2. Tag that commit and push the tag, for example `git tag v0.1.1` and `git push origin v0.1.1`.
+3. The Release workflow tests and builds `bootmend.exe`. Approve the signing job when GitHub asks; it signs the exe, then opens a draft release with the exe, its signature and its SHA-256.
+4. Add the notes and publish the draft. Installed copies offer the update at their next daily check.
+
+The build runs on Windows and never sees the signing key. A separate Linux job signs the exe with Ubuntu's `minisign`, then checks the signature against `PUBLIC_KEY` in `src/update.rs` before drafting the release. The secret key is `BOOTMEND_SIGNING_KEY` in the `release` environment, which only `v*` tags can use, and only once the maintainer approves the run. Running the workflow by hand is a rehearsal: it builds and signs with a throwaway key, and makes no release.
+
 ## Design
 
 See [DESIGN.md](DESIGN.md) for the palette, type, spacing, components and the reasoning behind them.
+
+## Contributing
+
+Found a problem? Use **Report a problem** in Bootmend, or the [bug form](https://github.com/TanishkKamra/bootmend/issues/new?template=bug_report.yml). Fixes are welcome too: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Licence
+
+Bootmend is free software under the GNU General Public License v3.0 or later. It comes with no warranty: see [LICENSE](LICENSE). Third-party licences are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
+
+Windows, OneDrive and other product names are trademarks of their owners. Bootmend isn't made or endorsed by Microsoft or any other company it mentions.

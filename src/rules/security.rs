@@ -525,7 +525,7 @@ pub fn friendly_app(raw: &str) -> String {
 
 /// Camera, microphone and location use, newest first, one row per app and device.
 pub fn device_use(s: &Snapshot) -> Vec<DeviceUse> {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()).to_lowercase();
+    let windir = crate::sys::windows_dir().to_string_lossy().to_lowercase();
     let mut out: Vec<DeviceUse> = vec![];
     for d in s.security.a("deviceAccess") {
         let what = match d.s("Kind").as_deref() {

@@ -11,6 +11,7 @@ mod schedule_ui;
 mod screens;
 mod system;
 pub mod theme;
+mod update_ui;
 mod widgets;
 
 use crate::collect::{self, Progress};
@@ -19,7 +20,7 @@ use crate::fixes::{self, Fix, HistoryEntry};
 use crate::rules::{self, Finding};
 use crate::scan;
 use crate::snapshot::{self, AppUpgrade, DumpAnalysis, ScanResult, Snapshot};
-use crate::util::data_dir;
+use crate::util::{data_dir, shell_open};
 use eframe::egui::{self, RichText};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -121,10 +122,11 @@ pub enum Page {
     Trends,
     Saved,
     Settings,
+    Privacy,
 }
 
 impl Page {
-    pub const ALL: [Page; 17] = [
+    pub const ALL: [Page; 18] = [
         Page::Home,
         Page::Report,
         Page::Cleanup,
@@ -142,6 +144,7 @@ impl Page {
         Page::Trends,
         Page::Saved,
         Page::Settings,
+        Page::Privacy,
     ];
     pub fn place(self) -> Place {
         match self {
@@ -149,8 +152,13 @@ impl Page {
             Page::Cleanup | Page::Startup | Page::Live | Page::NetCheck => Place::TuneUp,
             Page::ThisPc | Page::Storage | Page::Security | Page::Software | Page::Network | Page::Crashes => Place::MyPc,
             Page::History | Page::Changes | Page::Trends | Page::Saved => Place::History,
-            Page::Settings => Place::Settings,
+            Page::Settings | Page::Privacy => Place::Settings,
         }
+    }
+    /// A view opened from inside its place rather than from a tab or the sidebar. Its header shows
+    /// the way back, as Windows Settings does: "Home > Save a report".
+    pub fn inner(self) -> bool {
+        matches!(self, Page::Report | Page::Privacy)
     }
     /// The tab's name, or the view's own name for a view inside Home.
     pub fn title(self) -> &'static str {
@@ -172,6 +180,7 @@ impl Page {
             Page::Trends => "Over time",
             Page::Saved => "Saved checks",
             Page::Settings => "Settings",
+            Page::Privacy => "Privacy",
         }
     }
     fn slug(self) -> String {
@@ -201,6 +210,7 @@ pub enum Pending {
     Clean(Vec<&'static str>),
     EmptyRecycleBin,
     NetCheck,
+    UpdateBootmend(crate::update::Version),
 }
 
 pub struct Confirm {
@@ -235,6 +245,10 @@ pub enum Job {
     Points(Result<Vec<fixes::RestorePoint>, String>),
     CopyLooked(Result<copy_dialog::Looked, String>),
     Copied(Result<crate::usb_copy::Copied, String>),
+    /// The update check: the newer version it found, and whether Check now was pressed.
+    UpdateChecked(Result<Option<crate::update::Version>, String>, bool),
+    /// The update was downloaded, checked and put in place: the exe to start.
+    Updated(Result<PathBuf, String>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -249,12 +263,38 @@ struct Settings {
     schedule_asked: bool,
     /// Buttons, links and switches take the Windows accent colour instead of cobalt.
     use_windows_accent: bool,
+    /// "Don't show again" was pressed on the early-version notice.
+    early_notice_off: bool,
+    /// Bootmend asks GitHub once a day whether there's a newer version.
+    auto_update: bool,
+    /// The day the update check last ran, such as 2026-11-19, so it runs at most once a day.
+    update_checked: Option<String>,
+    /// The newest version a notification has already announced.
+    update_notified: Option<String>,
+    /// The version that ran last, to say so after an update.
+    ran_version: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { privacy_ack: false, schedule: Default::default(), schedule_hour: crate::schedule::NOON, schedule_asked: false, use_windows_accent: false }
+        Settings {
+            privacy_ack: false,
+            schedule: Default::default(),
+            schedule_hour: crate::schedule::NOON,
+            schedule_asked: false,
+            use_windows_accent: false,
+            early_notice_off: false,
+            auto_update: true,
+            update_checked: None,
+            update_notified: None,
+            ran_version: String::new(),
+        }
     }
+}
+
+/// GitHub's bug form, with this version filled in.
+fn report_url() -> String {
+    format!("{}/issues/new?template=bug_report.yml&version={}", env!("CARGO_PKG_REPOSITORY"), env!("CARGO_PKG_VERSION"))
 }
 
 /// How a background job ended, for the log.
@@ -273,7 +313,16 @@ fn load_settings() -> Settings {
     settings_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
+fn write_settings(s: &Settings) {
+    if let Some(p) = settings_path() {
+        if let Err(e) = std::fs::write(&p, serde_json::to_vec(s).unwrap_or_default()) {
+            log!("settings", "couldn't save settings: {e}");
+        }
+    }
+}
+
 pub use system::mica_available;
+pub use update_ui::update_in_background;
 
 /// The check-up pace and hour the person chose, for setting the task up again outside the window.
 pub fn saved_schedule() -> (crate::schedule::Every, u8) {
@@ -318,6 +367,8 @@ enum Shot {
     Menu,
     /// A confirmation open over the Crashes page.
     Dialog,
+    /// The early-version notice over Home.
+    Early,
     /// The Queue screen while choosing, part way through, and part way through with its details open.
     Queue,
     Fixing,
@@ -404,6 +455,8 @@ pub struct App {
     /// A queue picked up after the restart as administrator: what to do next, and whether the
     /// leftover files still need adding (and ticking).
     resume_wait: Option<(run::Then, Option<bool>)>,
+    /// A queue saved before the restart as administrator, waiting for the check-up that runs first.
+    resume_check: Option<run::Resume>,
     taskbar: Option<system::Taskbar>,
     check_error: Option<String>,
     tx: Sender<Job>,
@@ -435,6 +488,16 @@ pub struct App {
     win_accent: Option<theme::AccentShades>,
     accent_read: Option<Instant>,
     motion_read: Option<Instant>,
+    /// The early-version notice is open. It opens at each launch until "Don't show again".
+    early_notice: bool,
+    /// A newer Bootmend the update check found.
+    update: Option<crate::update::Version>,
+    /// An update check finished this session, so Settings can say this is the newest version.
+    update_known: bool,
+    /// "Not now" was pressed on Home's update note.
+    update_hidden: bool,
+    /// The automatic update check has had its look this session.
+    update_looked: bool,
 }
 
 impl App {
@@ -468,6 +531,7 @@ impl App {
             clock: 0.0,
             page_fade: None,
             resume_wait: None,
+            resume_check: None,
             taskbar: if snap_dir.is_none() { system::Taskbar::new(cc) } else { None },
             check_error: None,
             tx,
@@ -493,18 +557,28 @@ impl App {
             win_accent: None,
             accent_read: None,
             motion_read: None,
+            early_notice: false,
+            update: None,
+            update_known: false,
+            update_hidden: false,
+            update_looked: false,
         };
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
         }
         app.mark.set_lift(if app.raised() { 1.0 } else { 0.0 }, true);
+        // Not again when Bootmend restarts as administrator to carry on with a fix.
+        app.early_notice = !app.settings.early_notice_off && snap_dir.is_none() && !resume;
+        if snap_dir.is_none() {
+            app.note_new_version();
+        }
         if let Some(dir) = snap_dir {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
-            queue.extend([Shot::Dialog, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
+            queue.extend([Shot::Dialog, Shot::Early, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         } else if resume {
-            app.resume(&cc.egui_ctx);
+            app.resume();
         }
         app
     }
@@ -589,11 +663,7 @@ impl App {
     }
 
     fn save_settings(&self) {
-        if let Some(p) = settings_path() {
-            if let Err(e) = std::fs::write(&p, serde_json::to_vec(&self.settings).unwrap_or_default()) {
-                log!("settings", "couldn't save settings: {e}");
-            }
-        }
+        write_settings(&self.settings);
     }
 
     pub fn start_check(&mut self) {
@@ -607,6 +677,8 @@ impl App {
         std::thread::spawn(move || collect::collect(tx));
         self.check_rx = Some(rx);
         self.check_error = None;
+        // A queue waiting for the check-up after the restart is picked up only by that one.
+        self.resume_check = None;
         self.force_welcome = false;
         self.ui.nav_open = false;
         self.run = Some(run::Run::check(self.page, self.snap.is_none()));
@@ -648,6 +720,7 @@ impl App {
         let Some(q) = self.run.take() else { return };
         log!("queue", "closed while {:?} ({:?})", q.stage, q.mode);
         self.resume_wait = None;
+        self.resume_check = None;
         self.go(if q.mode == run::Mode::Check { Page::Home } else { q.origin });
         self.page_fade = Some(self.clock);
     }
@@ -752,8 +825,9 @@ impl App {
         }
     }
 
-    /// Picks up the queue saved before the restart as administrator, if it's recent.
-    fn resume(&mut self, ctx: &egui::Context) {
+    /// Picks up the queue saved before the restart as administrator, if it's recent. A check-up
+    /// runs first, and only the fixes it still offers carry on (see `resumed_check`).
+    fn resume(&mut self) {
         let Some(path) = resume_path() else { return };
         let Ok(bytes) = std::fs::read(&path) else { return };
         if let Err(e) = std::fs::remove_file(&path) {
@@ -766,35 +840,40 @@ impl App {
                 return;
             }
         };
-        if !saved.fresh(unix_now()) {
-            return;
-        }
-        let mut items = vec![];
-        let mut leftovers = None;
-        for ri in &saved.items {
-            let Some(f) = &ri.fix else {
-                leftovers = Some(ri.ticked);
-                continue;
-            };
-            let found = self.findings.iter().find(|x| x.actions.iter().any(|a| matches!(a, rules::Action::Fix(y) if y == f)));
-            // A fix offered outside the plan, such as a background service, keeps its own name.
-            let mut it = match found {
-                Some(x) => run::Item::fix(f.clone(), x.title.clone(), x.area),
-                None => run::Item::fix(f.clone(), ri.title.clone(), rules::Area::Speed),
-            };
-            it.ticked = ri.ticked;
-            items.push(it);
-        }
-        if items.is_empty() && leftovers.is_none() {
+        if !saved.fresh(unix_now()) || saved.items.is_empty() {
             return;
         }
         let origin = saved.origin();
-        let gate = self.gate_now();
-        log!("queue", "picked up after restarting as administrator, back to {origin:?}");
+        log!("queue", "picked up after restarting as administrator; checking again before going back to {origin:?}");
         if self.page != origin {
             log!("page", "{:?} -> {origin:?}", self.page);
         }
         self.page = origin;
+        self.start_check();
+        self.resume_check = Some(saved);
+    }
+
+    /// The check-up run before picking up a saved queue is over. The fixes it still offers carry
+    /// on, and anything else is left out with a line saying so.
+    fn resumed_check(&mut self, ctx: &egui::Context, saved: run::Resume) {
+        let Some(snap) = self.snap.clone() else {
+            log!("queue", "the saved fixes were left out because the check-up left no result");
+            return;
+        };
+        let (items, dropped) = saved.still_offered(&self.findings, &snap);
+        let leftovers = saved.leftovers();
+        log!("queue", "the new check-up still offers {} of the saved fixes, leaving out {dropped}", items.len());
+        if items.is_empty() && leftovers.is_none() {
+            self.toast(if dropped == 1 { "The fix you picked isn't needed now." } else { "The fixes you picked aren't needed now." }, true);
+            return;
+        }
+        match dropped {
+            0 => {}
+            1 => self.toast("One fix you picked isn't needed now, so Bootmend left it out.", true),
+            n => self.toast(format!("{n} fixes you picked aren't needed now, so Bootmend left them out."), true),
+        }
+        let origin = saved.origin();
+        let gate = self.gate_now();
         self.set_mark_kind(mark::Kind::Healing);
         self.run = Some(run::Run::fixes(items, origin, gate));
         self.resume_wait = Some((saved.then, leftovers));
@@ -868,6 +947,11 @@ impl App {
             }
             if ev.rested {
                 q.rested();
+            }
+        }
+        if ev.rested && self.run.as_ref().is_some_and(|q| q.mode == run::Mode::Check && q.stage == run::Stage::Over) {
+            if let Some(saved) = self.resume_check.take() {
+                self.resumed_check(ctx, saved);
             }
         }
         if let Some(tb) = &mut self.taskbar {
@@ -1032,11 +1116,17 @@ impl App {
                 }
                 Confirm { title: format!("Free up {size}?"), body, yes: "Free up space".into(), action }
             }
+            Pending::UpdateBootmend(v) => Confirm {
+                title: format!("Update to Bootmend {v}?"),
+                body: vec!["Bootmend downloads it from GitHub, checks it's signed by Bootmend, then restarts.".into()],
+                yes: "Update and restart".into(),
+                action,
+            },
             Pending::NetCheck => Confirm {
                 title: "Test your connection?".into(),
                 body: vec![
-                    "Bootmend pings your router, times a few website name lookups, then downloads and uploads test data with Cloudflare's public speed test (speed.cloudflare.com).".into(),
-                    "It uses up to about 135 MB of data and takes under a minute. Like any website, Cloudflare sees this connection's internet address. Nothing about the PC is sent.".into(),
+                    "Bootmend pings your router, times a few website name lookups, then times how quickly Microsoft's website (www.microsoft.com) answers.".into(),
+                    "It uses very little data and takes a few seconds. Like any website, Microsoft sees this connection's internet address. Nothing about the PC is sent.".into(),
                 ],
                 yes: "Test now".into(),
                 action,
@@ -1053,15 +1143,14 @@ impl App {
                     action,
                 }
             }
-            Pending::DeleteData => Confirm {
-                title: "Delete everything Bootmend saved?".into(),
-                body: vec![
-                    "This removes all saved checks, the undo history and settings from this PC. Changes you already made to Windows stay as they are.".into(),
-                    "This can't be undone.".into(),
-                ],
-                yes: "Delete".into(),
-                action,
-            },
+            Pending::DeleteData => {
+                let mut body = vec!["This removes all saved checks, the undo history and settings from this PC. Changes you already made to Windows stay as they are.".into()];
+                if !self.elevated && fixes::admin_records_kept() {
+                    body.push("Undo records for changes made as administrator stay until you do this from an administrator window.".into());
+                }
+                body.push("This can't be undone.".into());
+                Confirm { title: "Delete everything Bootmend saved?".into(), body, yes: "Delete".into(), action }
+            }
         };
         log!("dialog", "shown: {}", c.title);
         self.confirm = Some(c);
@@ -1083,6 +1172,7 @@ impl App {
             Pending::Clean(ids) => format!("clear {}", ids.join(", ")),
             Pending::EmptyRecycleBin => "empty the Recycle Bin".into(),
             Pending::NetCheck => "test the connection".into(),
+            Pending::UpdateBootmend(v) => format!("update Bootmend to {v}"),
         };
         log!("action", "{what}");
         match action {
@@ -1145,6 +1235,7 @@ impl App {
             },
             Pending::Clean(ids) => self.start_cleaning(ctx, ids),
             Pending::NetCheck => self.start_net_check(ctx),
+            Pending::UpdateBootmend(v) => self.start_update(ctx, v),
             Pending::EmptyRecycleBin => {
                 self.busy.insert("recycle".into());
                 self.spawn(ctx, || Job::RecycleEmptied(crate::cleanup::empty_recycle_bin().map_err(|e| format!("{e:#}"))));
@@ -1156,7 +1247,10 @@ impl App {
             Pending::DeleteData => {
                 self.busy.insert("delete".into());
                 self.spawn(ctx, || {
-                    let r = data_dir("").map_err(|e| format!("{e:#}")).and_then(|d| std::fs::remove_dir_all(&d).map_err(|e| format!("{e}")));
+                    let r = data_dir("")
+                        .map_err(|e| format!("{e:#}"))
+                        .and_then(|d| std::fs::remove_dir_all(&d).map_err(|e| format!("{e}")))
+                        .and_then(|()| fixes::forget_changes().map_err(|e| format!("{e:#}")));
                     Job::Deleted(r)
                 });
             }
@@ -1180,6 +1274,9 @@ impl App {
                 }
                 Progress::Failed(e) => {
                     log!("check", "the check-up didn't finish: {e}");
+                    if self.resume_check.take().is_some() {
+                        log!("queue", "the saved fixes were left out because the check-up didn't finish");
+                    }
                     self.check_rx = None;
                     self.run = None;
                     let reduced = self.mark.reduced;
@@ -1378,14 +1475,16 @@ impl App {
                     self.points = Some(r);
                 }
                 Job::NetChecked(c) => {
-                    log!("action", "the connection check {}", if c.down_mbps.is_some() { "finished" } else { "couldn't finish" });
+                    log!("action", "the connection check {}", if c.internet_ms.is_some() { "finished" } else { "couldn't finish" });
                     self.busy.remove("net");
                     self.toast(
-                        if c.down_mbps.is_some() { "Connection check finished." } else { "The connection check couldn't finish. The Network page says why." },
-                        c.down_mbps.is_some(),
+                        if c.internet_ms.is_some() { "Connection check finished." } else { "The connection check couldn't finish. The Network page says why." },
+                        c.internet_ms.is_some(),
                     );
                     self.net = Some(c);
                 }
+                Job::UpdateChecked(r, manual) => self.on_update_checked(r, manual),
+                Job::Updated(r) => self.on_updated(ctx, r),
                 Job::Deleted(r) => {
                     log!("action", "deleting everything saved {}", ended(&r));
                     self.busy.remove("delete");
@@ -1511,8 +1610,7 @@ impl App {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str) {
         let p = pal(ui.ctx());
         let place = self.page.place();
-        // A view inside Home shows the way back the way Windows Settings does: "Home > Save a report".
-        let crumb = self.page == Page::Report;
+        let crumb = self.page.inner();
         let fold = !self.ui.docked;
         let compact = ui.available_width() < COMPACT;
         let draw_title = |this: &mut Self, ui: &mut egui::Ui| {
@@ -1532,15 +1630,15 @@ impl App {
             }
             if crumb {
                 // Short of room the way back folds to an ellipsis, as WinUI's BreadcrumbBar does.
-                let words = if compact { "…" } else { Place::Home.title() };
-                let home = egui::Button::new(RichText::new(words).text_style(egui::TextStyle::Heading).color(p.muted)).frame(false);
-                let r = ui.add(home).on_hover_cursor(egui::CursorIcon::PointingHand);
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, Place::Home.title()));
-                let r = if compact { r.on_hover_text(Place::Home.title()) } else { r };
+                let words = if compact { "…" } else { place.title() };
+                let back = egui::Button::new(RichText::new(words).text_style(egui::TextStyle::Heading).color(p.muted)).frame(false);
+                let r = ui.add(back).on_hover_cursor(egui::CursorIcon::PointingHand);
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, place.title()));
+                let r = if compact { r.on_hover_text(place.title()) } else { r };
                 if r.clicked() {
-                    this.go(Page::Home);
+                    this.go(place.first());
                 }
-                ui.label(widgets::ico(icon::CHEVRON_RIGHT, 16.0).color(p.muted));
+                ui.add(widgets::Glyph(widgets::ico(icon::CHEVRON_RIGHT, 16.0).color(p.muted)));
             }
             if !title.is_empty() {
                 widgets::page_title(ui, title);
@@ -1599,7 +1697,7 @@ impl App {
     /// edge, so they're added right to left. `compact` shows them as icons alone, and leaves
     /// "Checked ..." to a line under the title.
     fn header_actions(&mut self, ui: &mut egui::Ui, place: Place, compact: bool) {
-        if !matches!(place, Place::Home | Place::MyPc) || self.page == Page::Report {
+        if !matches!(place, Place::Home | Place::MyPc) || self.page.inner() {
             return;
         }
         let button = |ui: &mut egui::Ui, ic: &str, text: &str| {
@@ -1665,6 +1763,74 @@ impl App {
         }
     }
 
+    /// Says Bootmend is an early version and where to report problems.
+    fn early_notice(&mut self, ctx: &egui::Context) {
+        if !self.early_notice || self.confirm.is_some() || self.copy.is_some() {
+            return;
+        }
+        let (mut close, mut hide, mut report) = (false, false, false);
+        let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(S5 as i8));
+        let m = egui::Modal::new(egui::Id::new("early")).frame(frame).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 2.0 * (S5 + S4)).min(440.0));
+            let title = "Bootmend is new";
+            let t = ui.label(RichText::new(title).text_style(theme::h2()));
+            widgets::heading_role(ui, &t, 2, title);
+            ui.add_space(S2);
+            ui.add(egui::Label::new("This is an early version, so some things may not work quite right. If you find a problem, please tell us on GitHub. You can report it, or fix it and send a pull request.").wrap());
+            ui.add_space(S4);
+            // The quiet choice sits at the left, or under the buttons when the window is narrow.
+            let narrow = ui.available_width() < 360.0;
+            ui.horizontal(|ui| {
+                if !narrow {
+                    hide = widgets::subtle_text(ui, "Don't show again").clicked();
+                }
+                widgets::right_row(ui, |ui| {
+                    let ok = widgets::primary(ui, "Got it");
+                    if ui.memory(|m| m.focused().is_none()) {
+                        ok.request_focus();
+                    }
+                    close = ok.clicked();
+                    report = widgets::secondary(ui, "Report a problem").clicked();
+                });
+            });
+            if narrow {
+                ui.add_space(S2);
+                hide = widgets::subtle_text(ui, "Don't show again").clicked();
+            }
+        });
+        if !(close || hide || report || m.should_close()) {
+            return;
+        }
+        log!(
+            "dialog",
+            "early-version notice: {}",
+            if hide {
+                "won't show again"
+            } else if report {
+                "report a problem"
+            } else {
+                "got it"
+            }
+        );
+        self.early_notice = false;
+        if hide {
+            self.settings.early_notice_off = true;
+            self.save_settings();
+        }
+        if report {
+            self.report_problem();
+        }
+    }
+
+    /// Opens GitHub's bug form in the browser.
+    fn report_problem(&mut self) {
+        log!("action", "pressed Report a problem");
+        if let Err(e) = shell_open(&report_url()) {
+            log!("action", "couldn't open the bug form: {e:#}");
+            self.toast(format!("Couldn't open your browser. Problems can be reported at {}/issues.", env!("CARGO_PKG_REPOSITORY")), false);
+        }
+    }
+
     fn toasts_ui(&self, ctx: &egui::Context) {
         if self.toasts.is_empty() {
             return;
@@ -1681,7 +1847,7 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_max_width((ctx.content_rect().width() - 2.0 * (S5 + S4)).min(420.0));
                         ui.horizontal(|ui| {
-                            ui.label(ico(ic, 16.0).color(fg));
+                            ui.add(widgets::Glyph(ico(ic, 16.0).color(fg)));
                             ui.add(egui::Label::new(RichText::new(t).color(fg)).wrap());
                         });
                     });
@@ -1705,6 +1871,7 @@ impl App {
                 Some(Shot::View(p)) => p.slug(),
                 Some(Shot::Menu) => "menu".to_string(),
                 Some(Shot::Dialog) => "dialog".to_string(),
+                Some(Shot::Early) => "early".to_string(),
                 Some(Shot::Queue) => "queue".to_string(),
                 Some(Shot::Fixing) => "fixing".to_string(),
                 Some(Shot::Details) => "fixing-details".to_string(),
@@ -1720,6 +1887,9 @@ impl App {
             } else {
                 if matches!(m.queue.first(), Some(Shot::Dialog)) {
                     self.confirm = None;
+                }
+                if matches!(m.queue.first(), Some(Shot::Early)) {
+                    self.early_notice = false;
                 }
                 if matches!(m.queue.first(), Some(Shot::Copy(_))) {
                     self.copy = None;
@@ -1745,7 +1915,7 @@ impl App {
                 self.ui.nav_open = matches!(target, Shot::Menu);
                 let page = match target {
                     Shot::View(p) => Some(p),
-                    Shot::Menu | Shot::Queue | Shot::Fixing | Shot::Details | Shot::Copy(_) => Some(Page::Home),
+                    Shot::Menu | Shot::Early | Shot::Queue | Shot::Fixing | Shot::Details | Shot::Copy(_) => Some(Page::Home),
                     Shot::Dialog => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
@@ -1765,6 +1935,9 @@ impl App {
                     }
                 }
                 open_dialog = matches!(target, Shot::Dialog) && self.confirm.is_none();
+                if matches!(target, Shot::Early) {
+                    self.early_notice = true;
+                }
                 if let (Shot::Copy(n), None) = (target, &self.copy) {
                     self.copy = Some(copy_dialog::Flow::sample(n));
                 }
@@ -1903,6 +2076,8 @@ impl eframe::App for App {
         if !fit.docked && !full_screen {
             self.nav_overlay(&ctx);
         }
+        self.auto_update_check(&ctx);
+        self.early_notice(&ctx);
         self.confirm_dialog(&ctx);
         self.copy_dialog(&ctx);
         self.toasts_ui(&ctx);
@@ -1938,6 +2113,16 @@ mod tests {
     use super::{Page, Place};
 
     #[test]
+    fn report_a_problem_opens_the_bug_form_with_the_version() {
+        let form = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/.github/ISSUE_TEMPLATE/bug_report.yml")).unwrap();
+        assert!(form.contains("id: version"), "the form has the field the link fills in");
+        assert_eq!(
+            super::report_url(),
+            format!("https://github.com/TanishkKamra/bootmend/issues/new?template=bug_report.yml&version={}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
     fn a_check_that_finishes_and_hangs_up_is_not_reported_as_failed() {
         use super::{drain_check, Progress};
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1970,7 +2155,7 @@ mod tests {
         }
         for page in Page::ALL {
             let place = page.place();
-            let reachable = place.first() == page || place.tabs().contains(&page) || page == Page::Report;
+            let reachable = place.first() == page || place.tabs().contains(&page) || page.inner();
             assert!(reachable, "{page:?} can't be reached from the sidebar or a tab");
         }
     }

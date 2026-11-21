@@ -25,7 +25,7 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.set_max_width(ui.available_width().min(600.0));
                 ui.add_space(S5);
-                ui.label(ico(icon::PC, 36.0).color(p.accent));
+                ui.add(widgets::Glyph(ico(icon::PC, 36.0).color(p.accent)));
                 ui.add_space(S3);
                 widgets::page_title(ui, "A plain-English check-up for your PC");
                 ui.add_space(S2);
@@ -39,10 +39,10 @@ impl App {
                         for (ic, title, body) in [
                             (icon::LOCK, "Stays on this PC", "Everything Bootmend finds is kept on this computer. There's no account, no tracking and no ads."),
                             (icon::CHECK, "Changes nothing on its own", "Bootmend only looks. Every fix waits for you to press a button, tells you what it will do, and can be undone."),
-                            (icon::NETWORK, "Goes online only when you ask", "Two optional features use the internet: checking for app updates and reading crash files. Each one asks first."),
+                            (icon::NETWORK, "Online only when needed", "Once a day, Bootmend asks GitHub whether a newer version is out (Settings can turn this off). Anything else that goes online asks you first."),
                         ] {
                             ui.horizontal_top(|ui| {
-                                ui.label(ico(ic, 18.0).color(p.accent));
+                                ui.add(widgets::Glyph(ico(ic, 18.0).color(p.accent)));
                                 ui.add_space(S2);
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new(title).family(super::theme::semibold()));

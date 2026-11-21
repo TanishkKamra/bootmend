@@ -186,6 +186,7 @@ impl App {
                 });
             });
         }
+        self.update_note(ui);
         ui.add_space(S6);
         self.plan_list(ui, &plan.todos, &safe);
         self.schedule_offer(ui);
@@ -313,7 +314,7 @@ impl App {
                     if open {
                         for f in &fine {
                             ui.horizontal_top(|ui| {
-                                ui.add_sized(egui::vec2(20.0, 20.0), egui::Label::new(widgets::ico(icon::CHECK, 14.0).color(p.green)));
+                                ui.add_sized(egui::vec2(20.0, 20.0), widgets::Glyph(widgets::ico(icon::CHECK, 14.0).color(p.green)));
                                 ui.add_space(S4);
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new(&f.title).family(theme::semibold()));
@@ -448,7 +449,7 @@ impl App {
                 ui,
                 rtl,
                 |ui| {
-                    ui.label(widgets::ico(icon::CHECK, 14.0).color(p.green));
+                    ui.add(widgets::Glyph(widgets::ico(icon::CHECK, 14.0).color(p.green)));
                 },
                 |ui| {
                     ui.label(RichText::new("Done").color(p.green));

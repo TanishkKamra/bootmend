@@ -32,7 +32,8 @@ impl Kind {
 
 /// Microsoft recommends the newest copy under ProgramData's Platform folder, then Program Files.
 pub fn mpcmdrun() -> Option<PathBuf> {
-    let platform = std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join(r"Microsoft\Windows Defender\Platform"));
+    use windows::Win32::UI::Shell::{FOLDERID_ProgramData, FOLDERID_ProgramFiles};
+    let platform = crate::sys::known_folder(&FOLDERID_ProgramData).map(|d| d.join(r"Microsoft\Windows Defender\Platform"));
     let newest = platform.and_then(|p| std::fs::read_dir(p).ok()).and_then(|rd| {
         rd.flatten().map(|e| e.path()).filter(|p| p.join("MpCmdRun.exe").is_file()).max_by(|a, b| {
             if crate::util::version_lt(&a.to_string_lossy(), &b.to_string_lossy()) {
@@ -43,7 +44,7 @@ pub fn mpcmdrun() -> Option<PathBuf> {
         })
     });
     newest.map(|d| d.join("MpCmdRun.exe")).or_else(|| {
-        let p = PathBuf::from(std::env::var_os("ProgramFiles")?).join(r"Windows Defender\MpCmdRun.exe");
+        let p = crate::sys::known_folder(&FOLDERID_ProgramFiles)?.join(r"Windows Defender\MpCmdRun.exe");
         p.is_file().then_some(p)
     })
 }
@@ -88,15 +89,10 @@ pub fn run(kind: Kind, target: Option<&Path>, exclusions: &[String], cancel: Arc
     log!("scan", "{} started on {}", kind.label(), if target_s.is_empty() { "this PC" } else { &target_s });
     let started = chrono::Local::now();
     let t0 = Instant::now();
-    let mut child = Command::new(&exe)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .creation_flags(crate::util::CREATE_NO_WINDOW)
-        .spawn()
-        .context("starting Microsoft Defender's scanner")
-        .inspect_err(|e| log!("scan", "{} could not start: {e:#}", kind.label()))?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).creation_flags(crate::util::CREATE_NO_WINDOW);
+    crate::sys::prepare(&mut cmd)?;
+    let mut child = cmd.spawn().context("starting Microsoft Defender's scanner").inspect_err(|e| log!("scan", "{} could not start: {e:#}", kind.label()))?;
     let mut so = child.stdout.take().ok_or_else(|| anyhow!("no output from the scanner"))?;
     let reader = std::thread::spawn(move || {
         let mut b = Vec::new();

@@ -16,7 +16,9 @@ mod rules;
 mod scan;
 mod schedule;
 mod snapshot;
+mod sys;
 mod trends;
+mod update;
 mod usb_copy;
 mod util;
 
@@ -120,6 +122,9 @@ fn scheduled() {
     if let Err(e) = collect_now().and_then(schedule::run_scheduled) {
         log_error(&e);
     }
+    if let Err(e) = gui::update_in_background() {
+        log_error(&e);
+    }
 }
 
 /// The app used to be called rigscan. The first time it runs under the new name, its saved checks
@@ -163,6 +168,10 @@ fn headless(out: PathBuf, pdf: bool, hide: bool) -> Result<()> {
 }
 
 fn main() {
+    // Before anything draws, and before anything else loads a DLL.
+    let gl = sys::load_opengl();
+    // Next, before Bootmend touches any folder as administrator.
+    let guarded = elevate::is_elevated().then(sys::guard_redirections);
     // The move only runs while the new folder doesn't exist yet, and starting the log can create it.
     let moved = move_from_old_name();
     log::init();
@@ -184,6 +193,14 @@ fn main() {
     };
     let admin = if elevate::is_elevated() { " as administrator" } else { "" };
     log!("app", "Bootmend {} started{admin} for {mode}", env!("CARGO_PKG_VERSION"));
+    if let Err(e) = &gl {
+        log!("app", "couldn't load OpenGL from System32: {e}");
+    }
+    match guarded {
+        Some(Ok(())) => log!("app", "Windows won't follow junctions made without administrator rights"),
+        Some(Err(e)) => log!("app", "this Windows can't refuse junctions made without administrator rights: {e}"),
+        None => {}
+    }
     after_move(moved);
     if args.scheduled {
         scheduled();
@@ -191,12 +208,20 @@ fn main() {
     }
     if let Some(out) = args.report {
         console();
-        if let Err(e) = headless(out, args.pdf, !args.show_personal) {
+        let r = headless(out, args.pdf, !args.show_personal);
+        sys::remove_tmp();
+        if let Err(e) = r {
             log_error(&e);
             eprintln!("{e:#}");
             std::process::exit(1);
         }
         return;
+    }
+    // The window draws with OpenGL. Loaded later by name, it could come from beside the exe.
+    if let Err(e) = gl {
+        console();
+        eprintln!("Bootmend couldn't open its window, because Windows' own OpenGL couldn't be loaded: {e}");
+        std::process::exit(1);
     }
     let (w, h) = args.size.unwrap_or((1180.0, 780.0));
     let mut viewport =
@@ -207,6 +232,9 @@ fn main() {
         Err(e) => log!("app", "couldn't load the window icon: {e}"),
     }
     let shots = args.screenshots;
+    if shots.is_none() {
+        update::tidy();
+    }
     if shots.is_some() {
         // Screenshots are taken in a window parked off-screen with no taskbar button, so
         // nothing appears while they're taken.
@@ -245,6 +273,7 @@ fn main() {
         eprintln!("Bootmend couldn't open its window: {e}");
         std::process::exit(1);
     }
+    sys::remove_tmp();
     log!("app", "closed");
 }
 

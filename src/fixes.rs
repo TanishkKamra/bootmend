@@ -110,6 +110,49 @@ const DISABLED: &str = "([byte[]](3,0,0,0,0,0,0,0,0,0,0,0))";
 const NATIVE: &str = "function Native([scriptblock]$b) { $ErrorActionPreference = 'Continue'; & $b 2>&1 | Out-Null; $LASTEXITCODE }\n";
 const ENABLED: &str = "([byte[]](2,0,0,0,0,0,0,0,0,0,0,0))";
 
+/// The keys holding each startup item's on/off switch, as the check-up reads them.
+const STARTUP_APPROVED: [&str; 5] = [
+    r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
+    r"HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
+    r"HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32",
+    r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
+    r"HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
+];
+
+/// The policy key Windows Update's settings live under, as reg.exe writes it.
+pub const UPDATE_POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate";
+
+/// Said when a fix read back from a file isn't one the check-up would give.
+/// Stops a change to the person's own settings in an administrator window that runs as another
+/// account, as it does when someone else typed their password: HKCU there is that account's.
+const SAME_PERSON: &str = r#"$u = (Get-CimInstance Win32_ComputerSystem).UserName; $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+if ($u -and $u -ne $me) { throw "Bootmend is running as $me, not $u, so it would change the wrong person's settings." }
+"#;
+
+const APPLY_CHANGED: &str = "Bootmend didn't make this change, because its details were altered after it was set up.";
+/// Said when a History entry, or the record kept for a change made as administrator, was altered.
+const UNDO_CHANGED: &str = "Bootmend can't undo this, because its record was altered. A restore point can still take the PC back.";
+
+/// Plain text: not empty, not too long, and no control characters.
+fn text(s: &str) -> bool {
+    !s.is_empty() && s.chars().count() <= 400 && !s.chars().any(char::is_control)
+}
+
+/// A registry path below a known key: no empty parts, and no "." or "..", which PowerShell
+/// follows even in a literal path.
+fn below(s: &str) -> bool {
+    text(s) && s.split('\\').all(|p| !p.is_empty() && p != "." && p != "..")
+}
+
+fn starts_ci(s: &str, prefix: &str) -> bool {
+    s.get(..prefix.len()).is_some_and(|h| h.eq_ignore_ascii_case(prefix))
+}
+
+/// A Windows service name: no slashes, which Windows doesn't allow in one.
+fn service(name: &str) -> bool {
+    text(name) && name.chars().count() <= 256 && !name.contains(['/', '\\'])
+}
+
 impl Fix {
     /// Short button label: a verb naming the outcome.
     pub fn label(&self) -> &'static str {
@@ -235,18 +278,88 @@ impl Fix {
         self.up_to_minutes().map_or(Duration::from_secs(300), |m| Duration::from_secs(u64::from(m) * 60 * 3))
     }
 
-    /// Per-user startup entries can be changed without administrator rights; everything else needs them.
+    /// Per-user startup entries and proxy settings can be changed without administrator rights;
+    /// everything else needs them. That includes a person's own policies key, which they can only read.
     pub fn needs_admin(&self) -> bool {
         match self {
-            Fix::DisableStartup { approved_key, .. } | Fix::EnableStartup { approved_key, .. } => approved_key.starts_with("HKLM"),
+            Fix::DisableStartup { approved_key, .. } | Fix::EnableStartup { approved_key, .. } => starts_ci(approved_key, "HKLM"),
             Fix::TurnOffProxy { winhttp, .. } => !winhttp.is_empty(),
-            Fix::RemoveBrowserPolicies { key, .. } | Fix::RemoveUpdateBlock { key, .. } => key.starts_with("HKLM"),
+            Fix::RemoveUpdateBlock { key, .. } => starts_ci(key, "HKLM"),
             _ => true,
         }
     }
 
-    /// PowerShell that applies the change, and PowerShell that reverses it.
-    pub fn scripts(&self) -> (String, String) {
+    /// Whether every detail has the shape the check-up gives it. History, and the queue saved before
+    /// Bootmend restarts as administrator, are files any app the user runs can change, so a fix is
+    /// checked before it runs or is undone.
+    pub fn check(&self) -> bool {
+        let settings = |s: &[String]| !s.is_empty() && s.iter().all(|x| below(x));
+        match self {
+            Fix::DisableStartup { name, approved_key } | Fix::EnableStartup { name, approved_key } => {
+                text(name) && STARTUP_APPROVED.iter().any(|k| k.eq_ignore_ascii_case(approved_key))
+            }
+            Fix::RemoveExclusion { value, .. } => text(value),
+            Fix::DisableFirewallRule { name, .. } | Fix::RollBackDriver { device: name, .. } => text(name),
+            Fix::ServiceManual { name, .. } => service(name),
+            Fix::EnableService { name, start, .. } => service(name) && ["Automatic", "Manual", "Delayed"].contains(&start.as_str()),
+            // Windows' rules for account names, which also keep out PowerShell's wildcards.
+            Fix::DisableAccount { name } => text(name) && name.chars().count() <= 20 && !name.contains(|c| "\"/\\[]:;|=,+*?<>@".contains(c)),
+            Fix::ResumeEncryption { drive } => matches!(drive.as_bytes(), [l, b':'] if l.is_ascii_alphabetic()),
+            Fix::TurnOffProxy { pac, winhttp, .. } => [pac, winhttp].iter().all(|s| s.is_empty() || text(s)),
+            Fix::DnsAutomatic { adapter, servers } => text(adapter) && !servers.is_empty() && servers.iter().all(|s| s.parse::<std::net::IpAddr>().is_ok()),
+            Fix::RemoveBrowserPolicies { key, settings: s, .. } => {
+                [r"HKLM\SOFTWARE\Policies\", r"HKCU\SOFTWARE\Policies\"].iter().any(|p| starts_ci(key, p) && below(&key[p.len()..])) && settings(s)
+            }
+            Fix::RemoveUpdateBlock { key, settings: s } => key.eq_ignore_ascii_case(UPDATE_POLICY) && settings(s),
+            _ => true,
+        }
+    }
+
+    /// Where the change's record and saved copies are kept, as reg.exe writes it. A change that
+    /// needs administrator rights keeps them under HKLM, which only administrators can change.
+    fn store(&self, id: &str) -> String {
+        format!(r"{}\SOFTWARE\Bootmend\Changes\{id}", if self.needs_admin() { "HKLM" } else { "HKCU" })
+    }
+
+    /// PowerShell that applies the change, and PowerShell that reverses it. `id` names the change.
+    /// A change made as administrator first records the fix under HKLM, and its undo runs only
+    /// while that record still holds the same fix, since History is a file any app the user runs can change.
+    pub fn scripts(&self, id: &str) -> (String, String) {
+        let store = self.store(id);
+        let (mut apply, mut undo) = self.steps(&store);
+        if !self.undoable() {
+            return (apply, undo);
+        }
+        if self.needs_admin() {
+            let key = ps_quote(&store[r"HKLM\".len()..]);
+            let fix = ps_quote(&serde_json::to_string(self).expect("a fix is plain data"));
+            apply = format!("$r = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey({key}); $r.SetValue('Fix', {fix}); $r.Close()\n{apply}");
+            undo = format!(
+                "$r = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey({key})\nif (-not $r -or $r.GetValue('Fix') -cne {fix}) {{ throw {} }}\n$r.Close()\n{undo}",
+                ps_quote(UNDO_CHANGED)
+            );
+        }
+        if self.needs_admin() || matches!(self, Fix::RemoveBrowserPolicies { .. } | Fix::RemoveUpdateBlock { .. }) {
+            let s = ps_quote(&format!("Registry::{store}"));
+            undo = format!("{undo}\nif (Test-Path -LiteralPath {s}) {{ Remove-Item -LiteralPath {s} -Recurse }}");
+        }
+        if self.needs_admin() && self.changes_own_settings() {
+            (apply, undo) = (format!("{SAME_PERSON}{apply}"), format!("{SAME_PERSON}{undo}"));
+        }
+        (apply, undo)
+    }
+
+    /// Whether the change is to the person's own settings, under HKCU.
+    fn changes_own_settings(&self) -> bool {
+        match self {
+            Fix::RemoveBrowserPolicies { key, .. } => starts_ci(key, "HKCU"),
+            Fix::TurnOffProxy { enabled, pac, .. } => *enabled || !pac.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// The change itself and its reverse. `store` is where saved copies go.
+    fn steps(&self, store: &str) -> (String, String) {
         match self {
             Fix::DisableStartup { name, approved_key } | Fix::EnableStartup { name, approved_key } => {
                 let (k, n) = (ps_quote(approved_key), ps_quote(name));
@@ -273,7 +386,9 @@ impl Fix {
             }
             Fix::DisableFirewallRule { name, .. } => {
                 let n = ps_quote(name);
-                (format!("Disable-NetFirewallRule -Name {n}"), format!("Enable-NetFirewallRule -Name {n}"))
+                // -Name treats [ ] * ? as wildcards, so the rule is matched exactly instead.
+                let rule = format!("Get-NetFirewallRule | Where-Object Name -CEQ {n}");
+                (format!("{rule} | Disable-NetFirewallRule"), format!("{rule} | Enable-NetFirewallRule"))
             }
             Fix::ServiceManual { name, .. } => {
                 let n = ps_quote(name);
@@ -301,9 +416,14 @@ impl Fix {
                 };
                 (apply, format!("Set-Service -Name {n} -StartupType Disabled"))
             }
+            // Only the Guest and built-in Administrator accounts, the two the check-up offers to switch
+            // off, and never the account signed in now, whatever a changed file asks for.
             Fix::DisableAccount { name } => {
-                let n = ps_quote(name);
-                (format!("Disable-LocalUser -Name {n}"), format!("Enable-LocalUser -Name {n}"))
+                let guard = format!(
+                    "$u = Get-LocalUser -Name {}\nif ($u.SID.Value -notmatch '-50[01]$' -or $u.SID.Value -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) {{ throw 'Bootmend only switches the Guest and built-in Administrator accounts on or off' }}",
+                    ps_quote(name)
+                );
+                (format!("{guard}\nDisable-LocalUser -SID $u.SID"), format!("{guard}\nEnable-LocalUser -SID $u.SID"))
             }
             // With tamper protection on, Windows Security can ignore the change without an error.
             Fix::EnableCloudProtection => (
@@ -325,12 +445,18 @@ impl Fix {
             // Switching to automatic replaces the list of page files, so the old list is saved for the undo.
             Fix::SystemManagedPagefile => {
                 let k = r"'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'";
-                let f = format!("$f = {}", ps_quote(&backup_file("pagefiles", "txt")));
+                let s = ps_quote(&format!("Registry::{store}"));
                 let set = |v: &str| format!("Get-CimInstance Win32_ComputerSystem | Set-CimInstance -Property @{{ AutomaticManagedPagefile = ${v} }}");
                 (
-                    format!("{f}\n[IO.File]::WriteAllLines($f, [string[]]@((Get-ItemProperty {k}).PagingFiles | Where-Object {{ $_ }}))\n{}", set("true")),
+                    format!(
+                        "Set-ItemProperty -LiteralPath {s} -Name PagingFiles -Value ([string[]]@((Get-ItemProperty {k}).PagingFiles | Where-Object {{ $_ }})) -Type MultiString\n{}",
+                        set("true")
+                    ),
                     // Read the copy first: if it's gone, the undo stops before anything has changed.
-                    format!("{f}\n$lines = [IO.File]::ReadAllLines($f)\n{}\nSet-ItemProperty {k} -Name PagingFiles -Value $lines -Type MultiString", set("false")),
+                    format!(
+                        "$lines = [string[]](Get-ItemProperty -LiteralPath {s} -Name PagingFiles).PagingFiles\n{}\nSet-ItemProperty {k} -Name PagingFiles -Value $lines -Type MultiString",
+                        set("false")
+                    ),
                 )
             }
             Fix::EnableDriverBlocklist => {
@@ -377,12 +503,12 @@ impl Fix {
                 let list = servers.iter().map(|x| ps_quote(x)).collect::<Vec<_>>().join(",");
                 (format!("Set-DnsClientServerAddress -InterfaceAlias {a} -ResetServerAddresses"), format!("Set-DnsClientServerAddress -InterfaceAlias {a} -ServerAddresses {list}"))
             }
-            Fix::RemoveBrowserPolicies { browser, key, settings } => remove_policies(&format!("policies-{browser}"), key, settings),
+            Fix::RemoveBrowserPolicies { key, settings, .. } => remove_policies(store, key, settings),
             Fix::EnableRecovery => (
                 format!("{NATIVE}if (Native {{ reagentc.exe /enable }}) {{ throw 'Windows could not switch its recovery tools back on' }}"),
                 format!("{NATIVE}if (Native {{ reagentc.exe /disable }}) {{ throw 'Windows could not switch its recovery tools off' }}"),
             ),
-            Fix::RemoveUpdateBlock { key, settings } => remove_policies("policies-windowsupdate", key, settings),
+            Fix::RemoveUpdateBlock { key, settings } => remove_policies(store, key, settings),
             // Microsoft's order: DISM mends the store sfc copies from. sfc's exit code means
             // nothing, so Windows' own health record has the last word. 3010 asks for a restart.
             Fix::RepairWindowsFiles => (
@@ -436,16 +562,16 @@ if ($e -eq 259) { throw "Windows no longer has the earlier driver, so it can't g
 if ($e -eq -536870389) { throw "That device isn't plugged in any more" }
 if ($e -ne 0) { throw ("Windows couldn't go back to the earlier driver (error {0})" -f $e) }"#;
 
-/// Saves a copy of a policy key, then removes the named settings from it: values, or subkeys (lists,
-/// Firefox's groups). A name with a backslash is in a subkey ("AU\UseWUServer"). Undo imports the copy.
-fn remove_policies(what: &str, key: &str, settings: &[String]) -> (String, String) {
-    let hive = key.split('\\').next().unwrap_or_default();
-    let f = ps_quote(&backup_file(&format!("{what}-{hive}"), "reg"));
+/// Saves a copy of a policy key in the change's record, then removes the named settings from it:
+/// values, or subkeys (lists, Firefox's groups). A name with a backslash is in a subkey
+/// ("AU\UseWUServer"). Undo copies the saved key back. The copy sits in the same hive as the key,
+/// so a copy of machine-wide settings is one only administrators can change.
+fn remove_policies(store: &str, key: &str, settings: &[String]) -> (String, String) {
+    let copy = ps_quote(&format!(r"{store}\Backup"));
     let (reg, path) = (ps_quote(key), ps_quote(&format!("Registry::{key}")));
     let names = settings.iter().map(|x| ps_quote(x)).collect::<Vec<_>>().join(", ");
     let apply = format!(
-        r#"{NATIVE}$f = {f}
-if (Native {{ reg.exe export {reg} $f /y }}) {{ throw 'Could not save a copy of the settings first, so nothing was changed' }}
+        r#"{NATIVE}if (Native {{ reg.exe copy {reg} {copy} /s /f }}) {{ throw 'Could not save a copy of the settings first, so nothing was changed' }}
 $p = {path}
 foreach ($n in @({names})) {{
   $i = $n.LastIndexOf('\'); $k = $(if ($i -ge 0) {{ "$p\$($n.Substring(0, $i))" }} else {{ $p }}); $v = $n.Substring($i + 1)
@@ -453,15 +579,8 @@ foreach ($n in @({names})) {{
   if ((Get-ItemProperty -LiteralPath $k).PSObject.Properties.Name -contains $v) {{ Remove-ItemProperty -LiteralPath $k -Name $v }}
 }}"#
     );
-    let undo = format!("{NATIVE}$f = {f}\nif (Native {{ reg.exe import $f }}) {{ throw 'Could not put the settings back from the saved copy' }}");
+    let undo = format!("{NATIVE}if (Native {{ reg.exe copy {copy} {reg} /s /f }}) {{ throw 'Could not put the settings back from the saved copy' }}");
     (apply, undo)
-}
-
-/// Where a copy of settings is kept before they are removed, so undo can put them back.
-fn backup_file(what: &str, ext: &str) -> String {
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let dir = data_dir("backups").unwrap_or_else(|_| std::env::temp_dir());
-    dir.join(format!("{what}-{stamp}.{ext}")).display().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,8 +588,65 @@ pub struct HistoryEntry {
     pub when: String,
     pub title: String,
     pub fix: Fix,
-    pub undo_script: String,
+    /// Names the change's record and saved copies. The undo is rebuilt from `fix`, never read from
+    /// the file, which any app the user runs can change.
+    #[serde(default)]
+    pub id: String,
     pub undone: Option<String>,
+}
+
+/// A new name for a change: when it was made, and a random part.
+fn new_id() -> String {
+    format!("{}-{:012x}", chrono::Local::now().format("%Y%m%d%H%M%S"), crate::util::unique() & 0xFFFF_FFFF_FFFF)
+}
+
+/// Letters, digits and dashes only, so a changed History can't point at another key.
+fn id_ok(id: &str) -> bool {
+    (1..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Removes the records and saved copies kept for undoing changes. Those for changes made as
+/// administrator can only be removed from an administrator window.
+pub fn forget_changes() -> Result<()> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    delete_key(HKEY_CURRENT_USER, r"SOFTWARE\Bootmend")?;
+    if crate::sys::elevated() {
+        delete_key(HKEY_LOCAL_MACHINE, r"SOFTWARE\Bootmend")?;
+    }
+    Ok(())
+}
+
+/// Whether records of changes made as administrator are kept. Only an administrator window can
+/// remove them.
+pub fn admin_records_kept() -> bool {
+    key_exists(windows::Win32::System::Registry::HKEY_LOCAL_MACHINE, r"SOFTWARE\Bootmend")
+}
+
+/// Whether a registry key is there. One that can't be opened counts as there, since it may be.
+fn key_exists(root: windows::Win32::System::Registry::HKEY, key: &str) -> bool {
+    use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, HKEY, KEY_READ};
+    let mut h = HKEY::default();
+    // SAFETY: a predefined root key, a string Windows only reads, and a handle closed below.
+    let r = unsafe { RegOpenKeyExW(root, &windows::core::HSTRING::from(key), None, KEY_READ, &mut h) };
+    if r.is_ok() {
+        // SAFETY: the key was opened above and isn't used again.
+        let _ = unsafe { RegCloseKey(h) };
+        return true;
+    }
+    r != ERROR_FILE_NOT_FOUND
+}
+
+/// Deletes a key and everything in it. A key that isn't there is already gone.
+fn delete_key(root: windows::Win32::System::Registry::HKEY, key: &str) -> Result<()> {
+    use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    use windows::Win32::System::Registry::RegDeleteTreeW;
+    // SAFETY: a predefined root key and a string Windows only reads.
+    let r = unsafe { RegDeleteTreeW(root, &windows::core::HSTRING::from(key)) };
+    if r == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    r.ok().with_context(|| format!("removing {key} from the registry"))
 }
 
 fn history_path() -> Result<std::path::PathBuf> {
@@ -557,10 +733,15 @@ type Run<'a> = &'a dyn Fn(&str) -> Result<()>;
 
 /// The undo step is saved before anything changes, so Bootmend never makes a change it can't take back.
 fn apply_with(fix: &Fix, title: &str, mut h: Vec<HistoryEntry>, save: Save, run: Run) -> Result<()> {
-    let (apply, undo) = fix.scripts();
+    if !fix.check() {
+        log!("fix", "\"{}\" wasn't run because its details aren't ones the check-up gives", title);
+        return Err(anyhow!(APPLY_CHANGED));
+    }
+    let id = new_id();
+    let (apply, _) = fix.scripts(&id);
     log!("fix", "applying \"{}\"", title);
     let t0 = Instant::now();
-    h.push(HistoryEntry { when: crate::util::now_stamp(), title: title.to_string(), fix: fix.clone(), undo_script: undo, undone: None });
+    h.push(HistoryEntry { when: crate::util::now_stamp(), title: title.to_string(), fix: fix.clone(), id, undone: None });
     save(&h).map_err(|e| {
         log!("fix", "\"{}\" wasn't run because its undo step couldn't be saved: {e:#}", title);
         anyhow!("Bootmend couldn't save how to undo it, so nothing was changed")
@@ -634,7 +815,11 @@ fn undo_with(index: usize, mut h: Vec<HistoryEntry>, save: Save, run: Run) -> Re
     if !e.fix.undoable() {
         return Err(anyhow!("there's nothing to undo for that change"));
     }
-    let (title, script) = (e.title.clone(), e.undo_script.clone());
+    if !id_ok(&e.id) || !e.fix.check() {
+        log!("undo", "\"{}\" wasn't undone because its entry in History was altered", e.title);
+        return Err(anyhow!(UNDO_CHANGED));
+    }
+    let (title, script) = (e.title.clone(), e.fix.scripts(&e.id).1);
     log!("undo", "undoing \"{}\"", title);
     e.undone = Some(crate::util::now_stamp());
     save(&h).map_err(|e| {
@@ -659,11 +844,184 @@ mod tests {
     use std::cell::Cell;
 
     fn steam() -> Fix {
-        Fix::DisableStartup { name: "Steam".into(), approved_key: r"HKCU:\Software\X\Run".into() }
+        Fix::DisableStartup { name: "Steam".into(), approved_key: STARTUP_APPROVED[0].into() }
     }
 
     fn applied() -> Vec<HistoryEntry> {
-        vec![HistoryEntry { when: "2026-11-15 18:00".into(), title: "Steam".into(), fix: steam(), undo_script: "undo".into(), undone: None }]
+        vec![HistoryEntry { when: "2026-11-15 18:00".into(), title: "Steam".into(), fix: steam(), id: "20261115180000-abc".into(), undone: None }]
+    }
+
+    /// Details a changed History or queue file could hold, none of which the check-up ever gives.
+    fn tampered() -> Vec<Fix> {
+        let policies = |key: &str, settings: &[&str]| Fix::RemoveBrowserPolicies {
+            browser: "Chrome".into(),
+            key: key.into(),
+            settings: settings.iter().map(|s| s.to_string()).collect(),
+        };
+        vec![
+            Fix::DisableStartup { name: "x".into(), approved_key: r"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\x".into() },
+            Fix::EnableStartup { name: "a\nb".into(), approved_key: STARTUP_APPROVED[1].into() },
+            Fix::RemoveExclusion { kind: ExclusionKind::Path, value: String::new() },
+            Fix::ServiceManual { name: r"..\WinDefend".into(), display: "x".into() },
+            Fix::EnableService { name: "wuauserv".into(), display: "x".into(), start: "Disabled".into() },
+            Fix::DisableAccount { name: "*".into() },
+            Fix::DisableAccount { name: "a,b".into() },
+            Fix::ResumeEncryption { drive: r"C:\Windows".into() },
+            Fix::DnsAutomatic { adapter: "Wi-Fi".into(), servers: vec!["dns.example".into()] },
+            Fix::DnsAutomatic { adapter: "Wi-Fi".into(), servers: vec![] },
+            Fix::TurnOffProxy { enabled: true, pac: "a\u{0}b".into(), winhttp: String::new() },
+            policies(r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", &["x"]),
+            policies(r"HKLM\SOFTWARE\Policies\..\Microsoft\Windows\CurrentVersion\Run", &["x"]),
+            policies(r"HKLM\SOFTWARE\Policies\", &["x"]),
+            policies(r"HKLM\SOFTWARE\Policies\Google\Chrome", &[r"..\..\Microsoft"]),
+            policies(r"HKLM\SOFTWARE\Policies\Google\Chrome", &[r"a\\b"]),
+            policies(r"HKLM\SOFTWARE\Policies\Google\Chrome", &[]),
+            Fix::RemoveUpdateBlock { key: r"HKLM\SYSTEM\CurrentControlSet\Services".into(), settings: vec!["x".into()] },
+            Fix::RollBackDriver { device: String::new(), name: "x".into() },
+        ]
+    }
+
+    #[test]
+    fn only_fixes_shaped_like_the_check_ups_own_are_accepted() {
+        for fx in every_fix() {
+            assert!(fx.check(), "{fx:?}");
+        }
+        for key in STARTUP_APPROVED {
+            assert!(Fix::EnableStartup { name: "App".into(), approved_key: key.to_lowercase() }.check(), "{key}");
+        }
+        assert!(Fix::RemoveBrowserPolicies {
+            browser: "Firefox".into(),
+            key: r"HKCU\SOFTWARE\Policies\Mozilla\Firefox".into(),
+            settings: vec!["Homepage".into()]
+        }
+        .check());
+        for fx in tampered() {
+            assert!(!fx.check(), "{fx:?}");
+        }
+    }
+
+    #[test]
+    fn a_tampered_fix_is_never_run() {
+        for fx in tampered() {
+            let (ran, saved) = (Cell::new(false), Cell::new(false));
+            let r = apply_with(
+                &fx,
+                "x",
+                vec![],
+                &mut |_| {
+                    saved.set(true);
+                    Ok(())
+                },
+                &|_| {
+                    ran.set(true);
+                    Ok(())
+                },
+            );
+            assert_eq!(r.unwrap_err().to_string(), APPLY_CHANGED, "{fx:?}");
+            assert!(!ran.get() && !saved.get(), "{fx:?}");
+        }
+    }
+
+    /// History is a file any app the user runs can change, so the undo comes from the fix itself.
+    #[test]
+    fn an_undo_is_rebuilt_from_the_fix_never_read_from_history() {
+        let json = r#"[{"when":"2026-11-15 18:00","title":"Steam","fix":{"DisableStartup":{"name":"Steam","approved_key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run"}},"id":"20261115180000-abc","undo_script":"Start-Process evil.exe","undone":null}]"#;
+        let h: Vec<HistoryEntry> = serde_json::from_str(json).unwrap();
+        let script = std::cell::RefCell::new(String::new());
+        undo_with(0, h, &mut |_| Ok(()), &|s| {
+            *script.borrow_mut() = s.to_string();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(*script.borrow(), steam().scripts("20261115180000-abc").1);
+        assert!(!script.borrow().contains("evil"));
+        assert!(!serde_json::to_string(&applied()).unwrap().contains("undo_script"));
+    }
+
+    #[test]
+    fn a_tampered_history_entry_is_never_undone() {
+        let mut entries: Vec<HistoryEntry> = tampered().into_iter().filter(Fix::undoable).map(|fix| HistoryEntry { fix, ..applied().remove(0) }).collect();
+        for id in ["", r"x\..\y", "x y", &"a".repeat(41)] {
+            entries.push(HistoryEntry { id: id.to_string(), ..applied().remove(0) });
+        }
+        for e in entries {
+            let ran = Cell::new(false);
+            let r = undo_with(0, vec![e.clone()], &mut |_| Ok(()), &|_| {
+                ran.set(true);
+                Ok(())
+            });
+            assert_eq!(r.unwrap_err().to_string(), UNDO_CHANGED, "{e:?}");
+            assert!(!ran.get(), "{e:?}");
+        }
+    }
+
+    /// A change made as administrator records the fix where only administrators can write, and its
+    /// undo checks that record first, so changing History can't change what an undo does.
+    #[test]
+    fn an_administrator_change_is_undone_only_while_its_record_matches() {
+        let fx = Fix::RemoveExclusion { kind: ExclusionKind::Path, value: "C:\\it's here".into() };
+        let (a, u) = fx.scripts("20261121-ab");
+        let record = ps_quote(&serde_json::to_string(&fx).unwrap());
+        assert!(
+            a.starts_with(r"$r = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey('SOFTWARE\Bootmend\Changes\20261121-ab'); $r.SetValue('Fix', "),
+            "{a}"
+        );
+        assert!(a.contains(&record) && a.ends_with("Remove-MpPreference -ExclusionPath 'C:\\it''s here'"), "{a}");
+        let (check, change) = (u.find(&format!("-cne {record}")).unwrap(), u.find("Add-MpPreference").unwrap());
+        assert!(check < change && u.contains(&ps_quote(UNDO_CHANGED)), "the record is checked before anything changes: {u}");
+        assert!(u.trim_end().ends_with(r"Remove-Item -LiteralPath 'Registry::HKLM\SOFTWARE\Bootmend\Changes\20261121-ab' -Recurse }"), "{u}");
+        // Per-user changes need no record, and nothing to undo needs none either.
+        let (a, u) = steam().scripts("x");
+        assert!(!a.contains("Bootmend") && !u.contains("Bootmend"), "{a} / {u}");
+        assert!(!Fix::RepairWindowsFiles.scripts("x").0.contains("Bootmend"));
+    }
+
+    #[test]
+    fn the_account_fix_only_touches_guest_and_the_built_in_administrator() {
+        let (a, u) = Fix::DisableAccount { name: "Guest".into() }.scripts("x");
+        for s in [&a, &u] {
+            let guard = s.find("-notmatch '-50[01]$'").expect("guarded");
+            let act = s.find("-LocalUser -SID $u.SID").expect("acts on the account checked");
+            assert!(guard < act && s.contains("GetCurrent().User.Value"), "{s}");
+        }
+        assert!(a.contains("Get-LocalUser -Name 'Guest'") && a.contains("Disable-LocalUser") && u.contains("Enable-LocalUser"), "{a} / {u}");
+    }
+
+    /// Runs the record lines of a change made as administrator against a stand-in key under HKCU:
+    /// the undo goes ahead while the record matches, and stops when it was altered or removed.
+    #[test]
+    #[ignore = "writes to the registry; run with --ignored"]
+    fn the_record_check_stops_an_undo_whose_record_was_altered() {
+        let fx = Fix::RemoveExclusion { kind: ExclusionKind::Path, value: r"C:\Games 'n' more".into() };
+        let (a, u) = fx.scripts("20261121-ab");
+        let stand_in = format!(r"Software\bootmend-selftest-record-{:x}", crate::util::unique());
+        let here = |s: &str| s.replace("LocalMachine", "CurrentUser").replace(r"SOFTWARE\Bootmend\Changes", &stand_in);
+        let record = here(a.lines().next().unwrap());
+        let check = here(&u.lines().take(3).collect::<Vec<_>>().join("\n"));
+        assert!(record.contains(&stand_in) && check.contains(&stand_in) && check.contains("-cne"), "{record}\n{check}");
+        let key = ps_quote(&format!(r"HKCU:\{stand_in}\20261121-ab"));
+        run_ps(&record).unwrap();
+        let matching = run_ps(&check);
+        run_ps(&format!("Set-ItemProperty -LiteralPath {key} -Name Fix -Value ((Get-ItemProperty -LiteralPath {key}).Fix -replace 'Games', 'Malware')"))
+            .unwrap();
+        let altered = run_ps(&check);
+        run_ps(&format!("Remove-Item -LiteralPath {} -Recurse", ps_quote(&format!(r"HKCU:\{stand_in}")))).unwrap();
+        let missing = run_ps(&check);
+        assert!(matching.is_ok(), "{matching:?}");
+        assert_eq!(altered.unwrap_err().to_string(), UNDO_CHANGED);
+        assert_eq!(missing.unwrap_err().to_string(), UNDO_CHANGED);
+    }
+
+    #[test]
+    #[ignore = "writes to the registry; run with --ignored"]
+    fn removing_bootmends_records_leaves_nothing_behind() {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        let key = format!(r"Software\bootmend-selftest-records-{}", crate::util::unique());
+        run_ps(&format!("New-Item {} -Force | Out-Null", ps_quote(&format!(r"HKCU:\{key}\Changes\x\Backup")))).unwrap();
+        delete_key(HKEY_CURRENT_USER, &key).unwrap();
+        let left = powershell(&format!("Test-Path {}", ps_quote(&format!(r"HKCU:\{key}"))), Duration::from_secs(60)).unwrap();
+        assert_eq!(left.stdout.trim(), "False");
+        delete_key(HKEY_CURRENT_USER, &key).unwrap();
     }
 
     #[test]
@@ -690,7 +1048,7 @@ mod tests {
     #[test]
     fn going_back_to_an_earlier_driver_names_the_device_and_has_nothing_to_undo() {
         let fx = Fix::RollBackDriver { device: r"PCI\VEN_1002&DEV_73DF\6&15bb'039d".into(), name: "AMD Radeon RX 6750 XT".into() };
-        let (a, u) = fx.scripts();
+        let (a, u) = fx.scripts("x");
         assert!(a.contains(r"[BootmendRollBack]::Run('PCI\VEN_1002&DEV_73DF\6&15bb''039d')"), "{a}");
         assert!(
             a.contains("DiRollbackDriver(set, ref info, IntPtr.Zero, 1,") && a.contains("259"),
@@ -705,7 +1063,7 @@ mod tests {
     #[test]
     fn repairing_windows_files_is_listed_but_has_nothing_to_undo() {
         let fx = Fix::RepairWindowsFiles;
-        let (a, u) = fx.scripts();
+        let (a, u) = fx.scripts("x");
         let (dism, sfc, check) = (a.find("/RestoreHealth").unwrap(), a.find("sfc.exe /scannow").unwrap(), a.find("-CheckHealth").unwrap());
         assert!(dism < sfc && sfc < check, "DISM first, then sfc, then Windows' own verdict: {a}");
         assert!(a.contains("3010") && a.contains("-2146498529"), "a restart-needed result is fine; missing source files get plain words: {a}");
@@ -801,7 +1159,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved.len(), 1);
-        assert!(saved[0].undone.is_none() && saved[0].undo_script == steam().scripts().1);
+        assert!(saved[0].undone.is_none() && id_ok(&saved[0].id));
     }
 
     #[test]
@@ -841,7 +1199,7 @@ mod tests {
                 saved = h.to_vec();
                 Ok(())
             },
-            &|s| if s == "undo" { Ok(()) } else { Err(anyhow!("wrong script")) },
+            &|s| if s == steam().scripts("20261115180000-abc").1 { Ok(()) } else { Err(anyhow!("wrong script")) },
         )
         .unwrap();
         assert!(saved[0].undone.is_some());
@@ -849,8 +1207,8 @@ mod tests {
 
     #[test]
     fn startup_scripts_flip_the_approved_flag() {
-        let f = Fix::DisableStartup { name: "Steam".into(), approved_key: r"HKCU:\Software\X\Run".into() };
-        let (a, u) = f.scripts();
+        let f = steam();
+        let (a, u) = f.scripts("x");
         assert!(a.contains("(3,0,") && u.contains("(2,0,"));
         assert!(!f.needs_admin());
     }
@@ -858,7 +1216,7 @@ mod tests {
     #[test]
     fn values_are_quoted() {
         let f = Fix::RemoveExclusion { kind: ExclusionKind::Path, value: "C:\\it's here".into() };
-        let (a, u) = f.scripts();
+        let (a, u) = f.steps("x");
         assert_eq!(a, "Remove-MpPreference -ExclusionPath 'C:\\it''s here'");
         assert!(u.starts_with("Add-MpPreference"));
         assert!(f.needs_admin());
@@ -866,10 +1224,10 @@ mod tests {
 
     #[test]
     fn restore_and_update_fixes_can_be_undone() {
-        let (a, u) = Fix::EnableSystemProtection.scripts();
+        let (a, u) = Fix::EnableSystemProtection.steps("x");
         assert!(a.starts_with("Enable-ComputerRestore") && u.starts_with("Disable-ComputerRestore"), "{a} / {u}");
         assert!(a.contains(r#""$env:SystemDrive\""#), "{a}");
-        let (a, u) = Fix::AllowAutoUpdates.scripts();
+        let (a, u) = Fix::AllowAutoUpdates.steps("x");
         assert!(a.contains("Remove-ItemProperty") && a.contains(r"WindowsUpdate\AU") && u.contains("-Value 1"));
         assert!(Fix::AllowAutoUpdates.needs_admin());
     }
@@ -880,7 +1238,7 @@ mod tests {
     fn startup_fix_and_undo_on_a_scratch_key() {
         let key = r"HKCU:\Software\bootmend-selftest\Run";
         let f = Fix::DisableStartup { name: "Sample app".into(), approved_key: key.into() };
-        let (apply, undo) = f.scripts();
+        let (apply, undo) = f.scripts("x");
         let first = |k: &str| {
             let o = powershell(&format!("(Get-ItemProperty -Path {} -Name 'Sample app').'Sample app'[0]", ps_quote(k)), Duration::from_secs(60)).unwrap();
             o.stdout.trim().to_string()
@@ -894,56 +1252,55 @@ mod tests {
 
     #[test]
     fn new_fixes_record_an_exact_undo() {
-        let svc = |start: &str| Fix::EnableService { name: "UsoSvc".into(), display: "Update Orchestrator Service".into(), start: start.into() }.scripts();
+        let svc = |start: &str| Fix::EnableService { name: "UsoSvc".into(), display: "Update Orchestrator Service".into(), start: start.into() }.scripts("x");
         let (a, u) = svc("Delayed");
         assert!(a.contains("sc.exe config 'UsoSvc' start= delayed-auto") && u.contains("Set-Service -Name 'UsoSvc' -StartupType Disabled"), "{a} / {u}");
         assert!(svc("Manual").0.contains("-StartupType Manual"));
-        let (a, u) = Fix::DisableAccount { name: "Guest".into() }.scripts();
-        assert_eq!((a.as_str(), u.as_str()), ("Disable-LocalUser -Name 'Guest'", "Enable-LocalUser -Name 'Guest'"));
-        let (a, u) = Fix::EnableSampleSubmission.scripts();
+        let (a, u) = Fix::EnableSampleSubmission.scripts("x");
         assert!(a.contains("SendSafeSamples") && a.contains("throw") && u.contains("NeverSend"), "checks Windows Security took it");
-        let (a, u) = Fix::EnableLsaProtection.scripts();
+        let (a, u) = Fix::EnableLsaProtection.scripts("x");
         assert!(a.contains("RunAsPPL -Value 2") && a.contains("RunAsPPLBoot -Value 2") && u.contains("RunAsPPL -Value 0") && u.contains("Remove-ItemProperty"));
-        let (a, u) = Fix::ResumeEncryption { drive: "C:".into() }.scripts();
+        let (a, u) = Fix::ResumeEncryption { drive: "C:".into() }.steps("x");
         assert!(a.starts_with("Resume-BitLocker -MountPoint 'C:'") && u.contains("Suspend-BitLocker -MountPoint 'C:' -RebootCount 0"));
-        let (a, u) = Fix::TurnOffProxy { enabled: true, pac: "http://x/p.pac".into(), winhttp: "10.0.0.1:3128".into() }.scripts();
+        let (a, u) = Fix::TurnOffProxy { enabled: true, pac: "http://x/p.pac".into(), winhttp: "10.0.0.1:3128".into() }.scripts("x");
         assert!(a.contains("ProxyEnable -Value 0") && a.contains("AutoConfigURL") && a.contains("winhttp reset proxy"), "{a}");
         assert!(u.contains("ProxyEnable -Value 1") && u.contains("'http://x/p.pac'") && u.contains("'proxy-server=10.0.0.1:3128'"), "{u}");
-        let (a, u) = Fix::TurnOffProxy { enabled: false, pac: "http://x/p.pac".into(), winhttp: String::new() }.scripts();
+        let (a, u) = Fix::TurnOffProxy { enabled: false, pac: "http://x/p.pac".into(), winhttp: String::new() }.scripts("x");
         assert!(!a.contains("ProxyEnable") && !a.contains("winhttp") && !u.contains("ProxyEnable"), "only what was on: {a} / {u}");
         assert!(!Fix::TurnOffProxy { enabled: true, pac: String::new(), winhttp: String::new() }.needs_admin(), "your own proxy setting");
-        let (a, u) = Fix::DnsAutomatic { adapter: "Wi-Fi".into(), servers: vec!["185.10.10.10".into(), "1.1.1.1".into()] }.scripts();
+        let (a, u) = Fix::DnsAutomatic { adapter: "Wi-Fi".into(), servers: vec!["185.10.10.10".into(), "1.1.1.1".into()] }.scripts("x");
         assert!(a.contains("-InterfaceAlias 'Wi-Fi' -ResetServerAddresses") && u.contains("-ServerAddresses '185.10.10.10','1.1.1.1'"), "{u}");
         let p = Fix::RemoveBrowserPolicies {
             browser: "Chrome".into(),
             key: r"HKCU\SOFTWARE\Policies\Google\Chrome".into(),
             settings: vec!["HomepageLocation".into()],
         };
-        let (a, u) = p.scripts();
-        assert!(a.contains("export") && a.contains("'HomepageLocation'") && u.contains("import"), "{a} / {u}");
-        let backup = a.lines().find(|l| l.starts_with("$f = ")).expect("backup path");
-        assert!(u.contains(backup), "the undo imports the same copy");
-        assert!(!p.needs_admin());
-        let (a, u) = Fix::SystemManagedPagefile.scripts();
-        let backup = a.lines().find(|l| l.starts_with("$f = ")).expect("backup path");
-        assert!(a.contains("WriteAllLines") && a.contains("AutomaticManagedPagefile = $true"), "{a}");
-        assert!(u.contains(backup) && u.contains("ReadAllLines") && u.contains("PagingFiles"), "puts back the exact page files: {u}");
-        let (read, change) = (u.find("ReadAllLines").unwrap(), u.find("AutomaticManagedPagefile").unwrap());
+        let (a, u) = p.scripts("id1");
+        let copy = r"'HKLM\SOFTWARE\Bootmend\Changes\id1\Backup'";
+        assert!(a.contains(&format!(r"reg.exe copy 'HKCU\SOFTWARE\Policies\Google\Chrome' {copy} /s /f")) && a.contains("'HomepageLocation'"), "{a}");
+        assert!(u.contains(&format!(r"reg.exe copy {copy} 'HKCU\SOFTWARE\Policies\Google\Chrome' /s /f")), "the undo copies the same key back: {u}");
+        assert!(u.trim_end().ends_with(r"Remove-Item -LiteralPath 'Registry::HKLM\SOFTWARE\Bootmend\Changes\id1' -Recurse }"), "{u}");
+        assert!(p.needs_admin(), "people can only read their own policies key, and its backup must be out of their apps' reach");
+        let (a, u) = Fix::SystemManagedPagefile.scripts("id2");
+        let copy = r"-LiteralPath 'Registry::HKLM\SOFTWARE\Bootmend\Changes\id2' -Name PagingFiles";
+        assert!(a.contains(&format!("Set-ItemProperty {copy}")) && a.contains("AutomaticManagedPagefile = $true"), "{a}");
+        assert!(u.contains(&format!("Get-ItemProperty {copy}")) && u.contains("Set-ItemProperty 'HKLM:"), "puts back the exact page files: {u}");
+        let (read, change) = (u.find(&format!("Get-ItemProperty {copy}")).unwrap(), u.find("AutomaticManagedPagefile").unwrap());
         assert!(read < change, "a missing copy stops the undo before anything changes: {u}");
-        let (a, u) = Fix::EnableCrashFiles.scripts();
+        let (a, u) = Fix::EnableCrashFiles.scripts("x");
         assert!(a.contains("CrashDumpEnabled -Value 7") && u.contains("CrashDumpEnabled -Value 0"), "{a} / {u}");
-        let (a, u) = Fix::EnableRecovery.scripts();
+        let (a, u) = Fix::EnableRecovery.scripts("x");
         assert!(a.contains("reagentc.exe /enable") && a.contains("throw") && u.contains("reagentc.exe /disable"), "{a} / {u}");
         let w = Fix::RemoveUpdateBlock {
             key: r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate".into(),
             settings: vec!["WUServer".into(), r"AU\UseWUServer".into()],
         };
-        let (a, u) = w.scripts();
-        let backup = a.lines().find(|l| l.starts_with("$f = ")).expect("backup path");
-        assert!(a.contains("export") && a.contains(r"'AU\UseWUServer'") && u.contains("import") && u.contains(backup), "{a} / {u}");
+        let (a, u) = w.scripts("id3");
+        let copy = r"'HKLM\SOFTWARE\Bootmend\Changes\id3\Backup'";
+        assert!(a.contains(copy) && a.contains(r"'AU\UseWUServer'") && u.contains(&format!("reg.exe copy {copy}")), "{a} / {u}");
         assert!(w.needs_admin());
         for fx in [Fix::EnableCloudProtection, Fix::EnableTrim, Fix::EnableDriverBlocklist] {
-            let (a, u) = fx.scripts();
+            let (a, u) = fx.scripts("x");
             assert!(!a.is_empty() && !u.is_empty() && a != u, "{fx:?}");
         }
     }
@@ -953,7 +1310,7 @@ mod tests {
     #[test]
     fn every_fix_says_what_it_is_doing() {
         let mut fixes = every_fix();
-        fixes.push(Fix::EnableStartup { name: "Steam.lnk".into(), approved_key: r"HKCU:\Software\X\Run".into() });
+        fixes.push(Fix::EnableStartup { name: "Steam.lnk".into(), approved_key: STARTUP_APPROVED[3].into() });
         for fx in fixes {
             let d = fx.doing();
             assert!(d.chars().next().is_some_and(char::is_uppercase), "{fx:?}: {d}");
@@ -967,7 +1324,8 @@ mod tests {
 
     fn every_fix() -> Vec<Fix> {
         vec![
-            Fix::DisableStartup { name: "App".into(), approved_key: r"HKCU:\Software\X\Run".into() },
+            Fix::DisableStartup { name: "App".into(), approved_key: STARTUP_APPROVED[0].into() },
+            Fix::EnableStartup { name: "App".into(), approved_key: STARTUP_APPROVED[2].into() },
             Fix::RemoveExclusion { kind: ExclusionKind::Path, value: r"C:\Games".into() },
             Fix::EnablePua,
             Fix::DisableRemoteAssistance,
@@ -1004,13 +1362,45 @@ mod tests {
         ]
     }
 
+    /// An administrator window opened with another account's password runs as that account, so
+    /// HKCU there is theirs. A change to the person's own settings from it stops before anything.
+    #[test]
+    fn a_change_to_your_own_settings_checks_whose_window_it_is() {
+        let policies = |key: &str| Fix::RemoveBrowserPolicies { browser: "Chrome".into(), key: key.into(), settings: vec!["HomepageLocation".into()] };
+        let proxy = |enabled: bool| Fix::TurnOffProxy { enabled, pac: String::new(), winhttp: "10.0.0.1:3128".into() };
+        for fx in [policies(r"HKCU\SOFTWARE\Policies\Google\Chrome"), proxy(true)] {
+            let (a, u) = fx.scripts("x");
+            assert!(a.starts_with(SAME_PERSON) && u.starts_with(SAME_PERSON), "{fx:?}: checked before anything is recorded or changed");
+        }
+        for fx in [policies(r"HKLM\SOFTWARE\Policies\Google\Chrome"), proxy(false), Fix::EnablePua] {
+            let (a, u) = fx.scripts("x");
+            assert!(!a.contains(SAME_PERSON) && !u.contains(SAME_PERSON), "{fx:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "starts PowerShell; run with --ignored"]
+    fn only_the_signed_in_person_passes_the_account_check() {
+        assert!(run_ps(SAME_PERSON).is_ok(), "this window runs as the person signed in");
+        let other = SAME_PERSON.replace("[Security.Principal.WindowsIdentity]::GetCurrent().Name", r"'PC\someone-else'");
+        let e = run_ps(&other).unwrap_err().to_string();
+        assert!(e.starts_with(r"Bootmend is running as PC\someone-else, not "), "{e}");
+    }
+
+    #[test]
+    fn a_registry_key_is_found_only_when_it_is_there() {
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        assert!(key_exists(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"));
+        assert!(!key_exists(HKEY_LOCAL_MACHINE, r"SOFTWARE\Bootmend test key that is never made"));
+    }
+
     /// Parses every apply and undo script with PowerShell's own parser. Nothing runs.
     #[test]
     #[ignore = "starts PowerShell; run with --ignored"]
     fn every_fix_script_parses() {
         let mut checks = String::new();
         for fx in every_fix() {
-            let (a, u) = fx.scripts();
+            let (a, u) = fx.scripts("20261121-ab");
             for s in [a, u] {
                 checks += &format!(
                     "$t = $null; $e = $null; [void][System.Management.Automation.Language.Parser]::ParseInput({}, [ref]$t, [ref]$e); if ($e) {{ 'BAD ' + {} + ': ' + $e[0].Message }}\n",
@@ -1023,7 +1413,8 @@ mod tests {
         assert!(!out.stdout.contains("BAD "), "{}", out.stdout);
     }
 
-    /// Removes a forced setting from a throwaway policy key under HKCU, then puts it back from the copy.
+    /// Removes a forced setting from a throwaway policy key under HKCU, then puts it back from the
+    /// copy. The copy is kept where changes made as administrator keep theirs, stood in for under HKCU.
     #[test]
     #[ignore = "writes to the registry; run with --ignored"]
     fn browser_policy_fix_and_undo_on_a_scratch_key() {
@@ -1044,14 +1435,36 @@ mod tests {
             key: key.into(),
             settings: vec!["HomepageLocation".into(), "ExtensionInstallForcelist".into()],
         };
-        let (apply, undo) = f.scripts();
-        run_ps(&apply).unwrap();
-        assert_eq!(state(), "|1|False", "only the forced settings go");
-        run_ps(&undo).unwrap();
-        assert_eq!(state(), "http://x.example|1|True");
-        let backup = apply.lines().find_map(|l| l.strip_prefix("$f = ")).unwrap().trim_matches('\'').to_string();
+        let id = format!("selftest-{:x}", crate::util::unique());
+        let (apply, undo) = f.scripts(&id);
+        let stand_in = format!(r"Software\bootmend-selftest-copies-{:x}", crate::util::unique());
+        let here = |s: &str| {
+            s.replace(r"HKLM\SOFTWARE\Bootmend\Changes", &format!(r"HKCU\{stand_in}"))
+                .replace("LocalMachine", "CurrentUser")
+                .replace(r"SOFTWARE\Bootmend\Changes", &stand_in)
+        };
+        let (apply, undo) = (here(&apply), here(&undo));
+        assert!(!apply.contains("HKLM") && !undo.contains("HKLM") && apply.contains(&stand_in), "{apply}\n{undo}");
+        // Everything is measured first and cleaned up before any assert, so a failure leaves nothing behind.
+        let applied = run_ps(&apply);
+        let removed = state();
+        let undone = applied.is_ok().then(|| run_ps(&undo));
+        let back = state();
+        let copy = powershell(&format!(r"Test-Path 'HKCU:\{stand_in}\{id}'"), Duration::from_secs(60)).unwrap();
         run_ps(r"Remove-Item -Path 'HKCU:\Software\bootmend-selftest' -Recurse").unwrap();
-        std::fs::remove_file(backup).unwrap();
+        run_ps(&format!(r"if (Test-Path 'HKCU:\{stand_in}') {{ Remove-Item -Path 'HKCU:\{stand_in}' -Recurse }}")).unwrap();
+        applied.unwrap();
+        assert_eq!(removed, "|1|False", "only the forced settings go");
+        undone.unwrap().unwrap();
+        assert_eq!(back, "http://x.example|1|True");
+        assert_eq!(copy.stdout.trim(), "False", "the undo removes the change's saved copy");
+    }
+
+    /// The undo removes the change's saved copy; empty parent keys go too, so the test leaves nothing.
+    fn assert_copy_gone(id: &str) {
+        let left = powershell(&format!(r"Test-Path 'HKCU:\SOFTWARE\Bootmend\Changes\{id}'"), Duration::from_secs(60)).unwrap();
+        run_ps(r"foreach ($k in 'HKCU:\SOFTWARE\Bootmend\Changes', 'HKCU:\SOFTWARE\Bootmend') { if ((Test-Path $k) -and -not (Get-ChildItem $k) -and -not (Get-Item $k).Property) { Remove-Item $k } }").unwrap();
+        assert_eq!(left.stdout.trim(), "False");
     }
 
     /// Removes update-blocking values, one of them in a subkey, from a throwaway key under HKCU, then puts them back.
@@ -1073,13 +1486,13 @@ mod tests {
             key: r"HKCU\Software\bootmend-selftest-wu\WindowsUpdate".into(),
             settings: vec!["WUServer".into(), r"AU\UseWUServer".into()],
         };
-        let (apply, undo) = f.scripts();
+        let id = format!("selftest-{:x}", crate::util::unique());
+        let (apply, undo) = f.scripts(&id);
         run_ps(&apply).unwrap();
         assert_eq!(state(), "|1||4", "only the blocking values go");
         run_ps(&undo).unwrap();
         assert_eq!(state(), "http://127.0.0.1:8530|1|1|4");
-        let backup = apply.lines().find_map(|l| l.strip_prefix("$f = ")).unwrap().trim_matches('\'').to_string();
         run_ps(r"Remove-Item -Path 'HKCU:\Software\bootmend-selftest-wu' -Recurse").unwrap();
-        std::fs::remove_file(backup).unwrap();
+        assert_copy_gone(&id);
     }
 }

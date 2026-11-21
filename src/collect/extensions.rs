@@ -51,7 +51,7 @@ fn chromium(browser: &str, user_data: &Path, out: &mut Vec<Extension>) {
     let names = read_json(&user_data.join("Local State"));
     for e in rd.flatten() {
         let dir_name = e.file_name().to_string_lossy().to_string();
-        if !(dir_name == "Default" || dir_name.starts_with("Profile ")) || !e.path().is_dir() {
+        if !profile_dir_ok(&dir_name) || !e.path().is_dir() {
             continue;
         }
         let shown = names.as_ref().and_then(|n| n.g("profile").g("info_cache").g(&dir_name).s("name")).unwrap_or_else(|| dir_name.clone());
@@ -63,9 +63,23 @@ fn chromium(browser: &str, user_data: &Path, out: &mut Vec<Extension>) {
     }
 }
 
+/// Chromium extension ids are 32 letters from a to p. Anything else came from a tampered file.
+fn chromium_id_ok(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
+}
+
+/// Chromium profile folders are "Default" or "Profile" and a number.
+fn profile_dir_ok(dir: &str) -> bool {
+    dir == "Default" || dir.strip_prefix("Profile ").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// The browser's program and the address of an extension's own page in it.
 pub fn manage_target(e: &Extension) -> Option<(&'static str, String)> {
     let id = &e.id;
+    // The id goes on a browser's command line, so only a well-formed one is used.
+    if matches!(e.browser.as_str(), "Chrome" | "Edge" | "Brave" | "Vivaldi") && !chromium_id_ok(id) {
+        return None;
+    }
     Some(match e.browser.as_str() {
         "Chrome" => ("chrome.exe", format!("chrome://extensions/?id={id}")),
         "Edge" => ("msedge.exe", format!("edge://extensions/?id={id}")),
@@ -80,7 +94,7 @@ pub fn manage_target(e: &Extension) -> Option<(&'static str, String)> {
 /// Opens the extension's page in its browser and profile, where it can be switched off or removed.
 pub fn open_manage(e: &Extension) -> anyhow::Result<()> {
     let (exe, url) = manage_target(e).ok_or_else(|| anyhow::anyhow!("Bootmend doesn't know how to open {}", e.browser))?;
-    let params = if e.profile_dir.is_empty() { url } else { format!("--profile-directory=\"{}\" {url}", e.profile_dir) };
+    let params = if profile_dir_ok(&e.profile_dir) { format!("--profile-directory=\"{}\" {url}", e.profile_dir) } else { url };
     log!("extensions", "opening the page for {} in {}", e.name, e.browser);
     crate::util::shell_run(exe, &params).map_err(|err| {
         log!("extensions", "could not open {}: {err:#}", e.browser);
@@ -188,7 +202,7 @@ fn chromium_profile(browser: &str, profile: &str, dir: &Path, out: &mut Vec<Exte
     if let Ok(rd) = std::fs::read_dir(dir.join("Extensions")) {
         for e in rd.flatten() {
             let id = e.file_name().to_string_lossy().to_string();
-            if id.len() != 32 {
+            if !chromium_id_ok(&id) {
                 continue;
             }
             let st = settings.get(&id);
@@ -204,7 +218,7 @@ fn chromium_profile(browser: &str, profile: &str, dir: &Path, out: &mut Vec<Exte
     }
     // Unpacked or command-line extensions live outside the Extensions folder (locations 4 and 8).
     for (id, st) in &settings {
-        if seen.contains(id) || !matches!(st.i("location"), Some(4) | Some(8)) {
+        if seen.contains(id) || !chromium_id_ok(id) || !matches!(st.i("location"), Some(4) | Some(8)) {
             continue;
         }
         if let Some(p) = st.s("path").map(PathBuf::from).filter(|p| p.is_absolute()) {
@@ -251,11 +265,24 @@ mod tests {
 
     #[test]
     fn each_browser_opens_its_own_extension_page() {
-        let e = |browser: &str| Extension { browser: browser.into(), id: "abc".into(), ..Default::default() };
-        assert_eq!(manage_target(&e("Chrome")), Some(("chrome.exe", "chrome://extensions/?id=abc".to_string())));
-        assert_eq!(manage_target(&e("Edge")).unwrap().1, "edge://extensions/?id=abc");
+        const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+        let e = |browser: &str| Extension { browser: browser.into(), id: ID.into(), ..Default::default() };
+        assert_eq!(manage_target(&e("Chrome")), Some(("chrome.exe", format!("chrome://extensions/?id={ID}"))));
+        assert_eq!(manage_target(&e("Edge")).unwrap().1, format!("edge://extensions/?id={ID}"));
         assert_eq!(manage_target(&e("Firefox")).unwrap().1, "about:addons");
         assert_eq!(manage_target(&e("Netscape")), None);
+    }
+
+    #[test]
+    fn a_tampered_id_or_profile_never_reaches_the_command_line() {
+        for id in ["abc", "x --gpu-launcher=\"cmd /c evil\"", "abcdefghijklmnopabcdefghijklmnoq", "ABCDEFGHIJKLMNOPABCDEFGHIJKLMNOP"] {
+            let e = Extension { browser: "Chrome".into(), id: id.into(), ..Default::default() };
+            assert_eq!(manage_target(&e), None, "{id}");
+        }
+        assert!(profile_dir_ok("Default") && profile_dir_ok("Profile 12"));
+        for dir in ["", "Profile ", "Profile 1 --x", "Profile x", "System Profile"] {
+            assert!(!profile_dir_ok(dir), "{dir}");
+        }
     }
 
     #[test]

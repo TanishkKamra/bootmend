@@ -6,8 +6,24 @@ use crate::util::run_hidden;
 use anyhow::{anyhow, Result};
 use std::time::{Duration, Instant};
 
+/// Shown, and returned, in an administrator window.
+pub const NOT_AS_ADMIN: &str = "Bootmend checks app updates when it isn't running as administrator.";
+
+/// winget is an app alias in the user's own folder, not part of System32. As administrator it
+/// isn't used: the user's own apps can change that folder, and what's there would run with full rights.
+fn winget() -> Result<String> {
+    if crate::sys::elevated() {
+        return Err(anyhow!(NOT_AS_ADMIN));
+    }
+    let p = crate::sys::known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData)
+        .map(|d| d.join(r"Microsoft\WindowsApps\winget.exe"))
+        .filter(|p| p.exists())
+        .ok_or_else(|| anyhow!("winget isn't installed"))?;
+    Ok(p.to_string_lossy().to_string())
+}
+
 pub fn available() -> bool {
-    std::env::var_os("LOCALAPPDATA").map(|l| std::path::PathBuf::from(l).join(r"Microsoft\WindowsApps\winget.exe").exists()).unwrap_or(false)
+    winget().is_ok()
 }
 
 /// Parse `winget upgrade` table output. Column starts come from the header line.
@@ -45,7 +61,7 @@ pub fn check() -> Result<Vec<AppUpgrade>> {
     log!("winget", "checking for app updates");
     let t0 = Instant::now();
     let out = run_hidden(
-        "winget",
+        &winget()?,
         &["upgrade", "--include-unknown", "--source", "winget", "--accept-source-agreements", "--disable-interactivity"],
         Duration::from_secs(180),
     )
@@ -72,7 +88,7 @@ pub fn upgrade(id: &str) -> Result<String> {
     log!("winget", "updating {id}");
     let t0 = Instant::now();
     let out = run_hidden(
-        "winget",
+        &winget()?,
         &[
             "upgrade",
             "--id",

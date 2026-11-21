@@ -95,7 +95,7 @@ Try-Section 'displays' {
 Try-Section 'directx' {
   $dx = Join-Path $env:BOOTMEND_TMP 'dxdiag.txt'
   Remove-Item $dx -Force
-  $p = Start-Process dxdiag -ArgumentList '/whql:off', '/t', $dx -WindowStyle Hidden -PassThru
+  $p = Start-Process dxdiag -ArgumentList "/whql:off /t `"$dx`"" -WindowStyle Hidden -PassThru
   if (-not $p.WaitForExit(90000)) { Stop-Process -Id $p.Id -Force }
   if (Test-Path $dx) { $k = KV (Get-Content $dx)
     $R.directx = [ordered]@{ DirectX = $k['DirectX Version']; WDDM = $k['Driver Model']; FeatureLevels = $k['Feature Levels']; HDR = $k['HDR Support']; NativeMode = $k['Native Mode']; HWScheduling = $k['Hardware Scheduling'] }

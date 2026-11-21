@@ -27,8 +27,7 @@ fn check_on(s: &Snapshot, today: NaiveDate, f: &mut Vec<Finding>) {
     recovery(s, f);
 }
 
-/// The policy key Windows Update's settings live under, as reg.exe writes it.
-const UPDATE_POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate";
+use crate::fixes::UPDATE_POLICY;
 
 /// Policies that send updates to another server (WSUS) or hide Windows Update. On a home PC these
 /// come from "tweaking" tools; work and school PCs are their IT department's call.

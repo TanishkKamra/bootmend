@@ -108,15 +108,11 @@ pub struct Output {
 
 /// Run a program without flashing a console window, with a hard timeout.
 pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Output> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .inspect_err(|e| log!("run", "couldn't start {program}: {e}"))
-        .with_context(|| format!("starting {program}"))?;
+    let mut cmd = Command::new(crate::sys::program(program));
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(CREATE_NO_WINDOW);
+    crate::sys::prepare(&mut cmd)?;
+    let mut child = cmd.spawn().inspect_err(|e| log!("run", "couldn't start {program}: {e}")).with_context(|| format!("starting {program}"))?;
+    let job = Job::hold(&child, program);
     // Drain pipes on threads so a chatty child can't block on a full pipe.
     let mut so = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let mut se = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
@@ -136,8 +132,10 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
         }
         if start.elapsed() > timeout {
             timed_out = true;
-            if let Err(e) = child.kill() {
-                log!("run", "couldn't stop {program} after it took too long: {e}");
+            if !job.as_ref().is_some_and(|j| j.stop(program)) {
+                if let Err(e) = child.kill() {
+                    log!("run", "couldn't stop {program} after it took too long: {e}");
+                }
             }
             break child.wait().ok();
         }
@@ -163,6 +161,52 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
     Ok(out)
 }
 
+/// A Windows job holding a program and everything it starts. Stopping only the program would
+/// leave, say, DISM running under a stopped repair script, still holding the output pipe open,
+/// so the timeout would wait for DISM after all.
+struct Job(windows::Win32::Foundation::HANDLE);
+
+impl Job {
+    fn hold(child: &std::process::Child, program: &str) -> Option<Job> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        // SAFETY: a new unnamed job, and the child's handle stays open while `child` is alive.
+        let job = match unsafe { CreateJobObjectW(None, windows::core::PCWSTR::null()) } {
+            Ok(h) => Job(h),
+            Err(e) => {
+                log!("run", "couldn't make a job for {program}, so a timeout stops only {program}: {e}");
+                return None;
+            }
+        };
+        if let Err(e) = unsafe { AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())) } {
+            log!("run", "couldn't put {program} in a job, so a timeout stops only {program}: {e}");
+            return None;
+        }
+        Some(job)
+    }
+
+    fn stop(&self, program: &str) -> bool {
+        // SAFETY: the handle is a job this struct owns.
+        match unsafe { windows::Win32::System::JobObjects::TerminateJobObject(self.0, 1) } {
+            Ok(()) => true,
+            Err(e) => {
+                log!("run", "couldn't stop what {program} started: {e}");
+                false
+            }
+        }
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        // SAFETY: the handle is a job this struct owns, closed once here.
+        if let Err(e) = unsafe { windows::Win32::Foundation::CloseHandle(self.0) } {
+            log!("run", "couldn't close a job handle: {e}");
+        }
+    }
+}
+
 /// PowerShell and Windows tools mix UTF-8, UTF-16LE and the OEM code page. Handle the first two.
 pub fn decode_bytes(b: &[u8]) -> String {
     if b.len() >= 2 && b[0] == 0xFF && b[1] == 0xFE {
@@ -175,7 +219,9 @@ pub fn decode_bytes(b: &[u8]) -> String {
 
 /// Run a PowerShell script (passed as text) hidden, returning stdout.
 pub fn powershell(script: &str, timeout: Duration) -> Result<Output> {
-    let dir = data_dir("tmp")?;
+    // Between writing the script and PowerShell reading it, anything the user runs could swap a
+    // script kept in a folder the user can change. As administrator that would run their code.
+    let dir = crate::sys::tmp_dir()?;
     let file = dir.join(format!("run-{}-{}.ps1", std::process::id(), unique()));
     // UTF-8 with BOM so Windows PowerShell 5.1 reads non-ASCII text correctly.
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
@@ -189,39 +235,56 @@ pub fn powershell(script: &str, timeout: Duration) -> Result<Output> {
     out
 }
 
-fn unique() -> u128 {
+pub(crate) fn unique() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     t ^ N.fetch_add(1, Ordering::Relaxed) as u128
 }
 
-/// Quote a value for a single-quoted PowerShell string literal.
+/// Quote a value for a single-quoted PowerShell string literal. PowerShell also ends these strings
+/// at the curly single quotes, so those are doubled too, as its own escaping does.
 pub fn ps_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
-/// Open a URL, settings URI or folder with the shell (no console window).
-/// Starts a program by name with arguments. Windows finds installed apps such as chrome.exe on its own.
-pub fn shell_run(program: &str, params: &str) -> Result<()> {
+/// Asks the shell to open `file`. As administrator the desktop's shell is asked instead, so what
+/// opens runs as the signed-in user: the user's apps can change which program opens a link,
+/// folder or file type, and that program shouldn't get administrator rights.
+fn shell_execute(file: &str, params: &str) -> bool {
     use windows::core::HSTRING;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let r = unsafe { ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(program), &HSTRING::from(params), None, SW_SHOWNORMAL) };
-    if r.0 as isize > 32 {
+    if crate::sys::elevated() {
+        return crate::elevate::open_as_user(file, params, SW_SHOWNORMAL.0).inspect_err(|e| log!("app", "{e:#}")).is_ok();
+    }
+    // SAFETY: the strings live for the call.
+    let r = unsafe { ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(file), &HSTRING::from(params), None, SW_SHOWNORMAL) };
+    // ShellExecute returns a value > 32 on success.
+    r.0 as isize > 32
+}
+
+/// Starts a program by name with arguments. Windows finds installed apps such as chrome.exe on its own.
+pub fn shell_run(program: &str, params: &str) -> Result<()> {
+    if shell_execute(program, params) {
         Ok(())
     } else {
         Err(anyhow!("Windows could not start {program}"))
     }
 }
 
+/// Opens a URL, settings URI, folder or file with the shell (no console window).
 pub fn shell_open(target: &str) -> Result<()> {
-    use windows::core::HSTRING;
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let r = unsafe { ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL) };
-    // ShellExecute returns a value > 32 on success.
-    if r.0 as isize > 32 {
+    if shell_execute(target, "") {
         Ok(())
     } else {
         Err(anyhow!("Windows could not open {target}"))
@@ -278,6 +341,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "starts PowerShell; run with --ignored"]
+    fn a_timeout_stops_what_the_program_started_too() {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let file = std::env::temp_dir().join(format!("bootmend-tree-{}.txt", std::process::id()));
+        // The way DISM runs under a repair script: PowerShell waits on a program it started.
+        let script = format!(
+            "$p = Start-Process ping.exe -ArgumentList '-n','30','127.0.0.1' -NoNewWindow -PassThru; Set-Content -LiteralPath {} -Value $p.Id; Start-Sleep 30",
+            ps_quote(&file.to_string_lossy())
+        );
+        let t0 = Instant::now();
+        let out = run_hidden("powershell.exe", &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script], Duration::from_secs(4)).unwrap();
+        let took = t0.elapsed();
+        assert!(out.timed_out);
+        assert!(took < Duration::from_secs(15), "returned after {took:?}, not soon after the timeout");
+        let pid: u32 = std::fs::read_to_string(&file).unwrap().trim().parse().unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let mut sys = System::new();
+        let pid = sysinfo::Pid::from_u32(pid);
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
+        assert!(sys.process(pid).is_none(), "the program PowerShell started is still running");
+    }
+
+    #[test]
     fn lenient_accessors_treat_empty_objects_as_missing() {
         let v = json!({"a": {}, "b": "", "c": "12.5", "d": 3, "e": [1, null, 2], "f": "x"});
         assert_eq!(v.s("a"), None);
@@ -305,6 +391,24 @@ mod tests {
         assert!(version_lt("24.08", "24.09"));
         assert!(!version_lt("25.01", "24.09"));
         assert!(version_lt("6.0.28", "6.0.36"));
+    }
+
+    #[test]
+    fn ps_quote_doubles_every_quote_powershell_ends_a_string_at() {
+        for q in ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            assert_eq!(ps_quote(&format!("a{q}b")), format!("'a{q}{q}b'"));
+        }
+    }
+
+    #[test]
+    #[ignore = "starts PowerShell; run with --ignored"]
+    fn quoted_values_stay_text_in_powershell() {
+        for s in ["it's", "O\u{2019}Neil", "x\u{2019}+$(Write-Output pwned)+\u{2019}", "\u{2018}a\u{201A}b\u{201B}", "$env:USERNAME `n ;& |", "line1\nline2"] {
+            // Compared as code points, so the console's code page can't blur the result.
+            let out = powershell(&format!("$s = {}\n[string]::Join(',', [int[]][char[]]$s)", ps_quote(s)), Duration::from_secs(60)).unwrap();
+            let want: Vec<String> = s.encode_utf16().map(|u| u.to_string()).collect();
+            assert_eq!(out.stdout.trim(), want.join(","), "{s:?}: {}", out.stderr);
+        }
     }
 
     #[test]

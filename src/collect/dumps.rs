@@ -8,11 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub fn cdb_path() -> Option<PathBuf> {
-    ["ProgramFiles(x86)", "ProgramFiles"]
-        .iter()
-        .filter_map(std::env::var_os)
-        .map(|b| PathBuf::from(b).join(r"Windows Kits\10\Debuggers\x64\cdb.exe"))
-        .find(|p| p.is_file())
+    crate::sys::program_files().into_iter().map(|b| b.join(r"Windows Kits\10\Debuggers\x64\cdb.exe")).find(|p| p.is_file())
 }
 
 /// Plain-language name and likely cause for common stop codes.

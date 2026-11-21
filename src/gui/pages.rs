@@ -17,6 +17,12 @@ fn s(v: &Value, k: &str) -> String {
     v.s(k).unwrap_or_default()
 }
 
+/// A background service from another maker that starts by itself can be set to start only when
+/// it's needed.
+pub(super) fn service_fix(sv: &Value) -> Option<Fix> {
+    (s(sv, "StartMode") == "Auto").then(|| Fix::ServiceManual { name: s(sv, "Name"), display: s(sv, "Display") })
+}
+
 fn num(v: Option<f64>, unit: &str) -> Option<String> {
     v.map(|x| if (x - x.round()).abs() < 0.05 { format!("{x:.0}{unit}") } else { format!("{x:.1}{unit}") })
 }
@@ -37,19 +43,11 @@ fn two_lines(ui: &mut Ui, title: &str, detail: &str, hover: &str) {
 
 /// A row like the ones in Windows Settings: a name over a wrapped explanation, and the
 /// control on the right, centred against both lines. In a narrow card the control goes under them.
-fn setting<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
+pub(super) fn setting<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
     const CONTROL_W: f32 = 200.0;
     let muted = pal(ui.ctx()).muted;
     if ui.available_width() < widgets::WRAP {
-        return ui
-            .vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = S1;
-                ui.label(RichText::new(title).family(theme::semibold()));
-                ui.add(egui::Label::new(RichText::new(detail).color(muted)).wrap());
-                ui.add_space(S2);
-                ui.horizontal(control).inner
-            })
-            .inner;
+        return stacked(ui, title, detail, control);
     }
     let text_w = (ui.available_width() - CONTROL_W).max(160.0);
     let detail = egui::WidgetText::from(RichText::new(detail).color(muted)).into_galley(ui, Some(egui::TextWrapMode::Wrap), text_w, egui::TextStyle::Body);
@@ -64,6 +62,61 @@ fn setting<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut 
         r
     })
     .inner
+}
+
+/// A setting's name over its explanation, with the controls under them. `setting` falls back to
+/// this in a narrow card, and rows with several buttons use it at any width.
+pub(super) fn stacked<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
+    let muted = pal(ui.ctx()).muted;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = S1;
+        ui.label(RichText::new(title).family(theme::semibold()));
+        ui.add(egui::Label::new(RichText::new(detail).color(muted)).wrap());
+        ui.add_space(S2);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.y = S2;
+            control(ui)
+        })
+        .inner
+    })
+    .inner
+}
+
+/// A row that opens another page, like a Windows Settings card with a chevron. The whole row is
+/// the button, and the chevron stays on the right at any width.
+fn open_row(ui: &mut Ui, title: &str, detail: &str) -> bool {
+    let p = pal(ui.ctx());
+    let wash = ui.painter().add(egui::Shape::Noop);
+    let text_w = ui.available_width() - 32.0;
+    let detail = egui::WidgetText::from(RichText::new(detail).color(p.muted)).into_galley(ui, Some(egui::TextWrapMode::Wrap), text_w, egui::TextStyle::Body);
+    let h = (ui.text_style_height(&egui::TextStyle::Body) + S1 + detail.size().y).max(40.0);
+    let rect = ui
+        .allocate_ui_with_layout(egui::vec2(ui.available_width(), h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(widgets::Glyph(ico(icon::CHEVRON_RIGHT, 16.0).color(p.muted)));
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.y = S1;
+                ui.add(egui::Label::new(RichText::new(title).family(theme::semibold())).selectable(false));
+                ui.add(egui::Label::new(detail).selectable(false));
+            });
+        })
+        .response
+        .rect
+        .expand2(egui::vec2(S2, S1));
+    let r = ui.interact(rect, ui.id().with(("open", title)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title));
+    widgets::ring_radius(ui, &r, f32::from(theme::CONTROL_RADIUS));
+    // The same faint wash of the text colour as the sidebar's rows.
+    let a = if r.is_pointer_button_down_on() {
+        0.09
+    } else if r.hovered() {
+        0.06
+    } else {
+        0.0
+    };
+    if a > 0.0 {
+        ui.painter().set(wash, egui::Shape::rect_filled(rect, theme::CONTROL_RADIUS, p.ink.gamma_multiply(a)));
+    }
+    r.clicked()
 }
 
 fn yes_no(v: Option<bool>) -> Option<String> {
@@ -108,7 +161,7 @@ impl App {
             Page::Cleanup => "See what's taking up space before anything is removed.".into(),
             Page::Startup => "Apps that open by themselves when you sign in.".into(),
             Page::Live => "Which apps are using the processor, memory and drive at this moment.".into(),
-            Page::NetCheck => "How fast this connection is, and where any delay comes from.".into(),
+            Page::NetCheck => "How quickly this connection answers, and where any delay comes from.".into(),
             Page::ThisPc => "What's inside, as Windows reports it.".into(),
             Page::Storage => "Drive health, wear and free space.".into(),
             Page::Security => "Virus protection, the firewall and who can reach this PC.".into(),
@@ -123,11 +176,12 @@ impl App {
             Page::Trends => "How this PC has changed from one check to the next.".into(),
             Page::Saved => "Each check is kept on this PC, so the next one can show what changed.".into(),
             Page::Settings => String::new(),
+            Page::Privacy => "What Bootmend reads, when it goes online, and what it keeps.".into(),
         };
         let title = match page {
             // Home's title is its verdict, drawn large beside the Keystone.
             Page::Home => "",
-            Page::Report => page.title(),
+            _ if page.inner() => page.title(),
             _ => page.place().title(),
         };
         self.header(ui, title, &subtitle);
@@ -158,6 +212,7 @@ impl App {
             Page::Trends => self.trends_ui(ui),
             Page::Saved => self.saved_checks(ui),
             Page::Settings => self.settings_page(ui),
+            Page::Privacy => privacy_page(ui),
         }
     }
 
@@ -254,7 +309,7 @@ impl App {
     fn fix_button_as(&mut self, ui: &mut Ui, fx: &Fix, title: &str, area: Area, primary: bool) {
         let p = pal(ui.ctx());
         if self.fixed(fx) {
-            ui.label(ico(icon::CHECK, 14.0).color(p.green));
+            ui.add(widgets::Glyph(ico(icon::CHECK, 14.0).color(p.green)));
             ui.label(RichText::new("Done").color(p.green));
             return;
         }
@@ -584,6 +639,10 @@ impl App {
         let p = pal(ui.ctx());
         section(ui, "App updates");
         card(ui, |ui| {
+            if self.elevated {
+                muted(ui, crate::collect::winget::NOT_AS_ADMIN);
+                return;
+            }
             if !crate::collect::winget::available() {
                 muted(ui, "Update checks use winget, Windows' own app installer, which isn't available on this PC. Install \"App Installer\" from the Microsoft Store to turn this on.");
                 return;
@@ -766,15 +825,16 @@ impl App {
             ui.add_space(S2);
             let services = snap.software.a("services");
             for (i, sv) in services.iter().enumerate() {
-                let (name, disp) = (s(sv, "Name"), s(sv, "Display"));
+                let disp = s(sv, "Display");
                 if i > 0 {
                     ui.separator();
                 }
                 row(ui, |ui| {
-                    if s(sv, "StartMode") == "Auto" {
-                        self.fix_button_as(ui, &Fix::ServiceManual { name: name.clone(), display: disp.clone() }, &disp, Area::Speed, false);
-                    } else {
-                        small(ui, "Starts when needed");
+                    match service_fix(sv) {
+                        Some(fx) => self.fix_button_as(ui, &fx, &disp, Area::Speed, false),
+                        None => {
+                            small(ui, "Starts when needed");
+                        }
                     }
                     ui.add_space(S3);
                     two_lines(ui, &disp, &format!("{} · {}", s(sv, "State"), s(sv, "Signer")), &s(sv, "Path"));
@@ -1022,7 +1082,7 @@ impl App {
             card(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (ic, fg) = if r.ok { (icon::CHECK, p.green) } else { (icon::WARN, p.amber) };
-                    ui.label(ico(ic, 16.0).color(fg));
+                    ui.add(widgets::Glyph(ico(ic, 16.0).color(fg)));
                     ui.label(RichText::new(format!("{}: {}", r.kind, r.message)).family(theme::semibold()));
                 });
                 small(ui, format!("{} · {} · {:.1} minutes", r.started, r.target, r.minutes));
@@ -1228,10 +1288,79 @@ impl App {
 
     fn settings_page(&mut self, ui: &mut Ui) {
         self.schedule_setting(ui);
+        self.updates(ui);
         self.appearance(ui);
-        self.privacy(ui);
-        if about(ui) {
+        self.your_data(ui);
+        self.help(ui);
+        if footer(ui) {
+            self.open_licences();
+        }
+    }
+
+    fn your_data(&mut self, ui: &mut Ui) {
+        section(ui, "Your data");
+        card(ui, |ui| {
+            if open_row(ui, "Privacy", "What Bootmend reads, when it goes online, and what it keeps.") {
+                self.go(Page::Privacy);
+            }
+            ui.separator();
+            stacked(ui, "Saved checks", "Each check and the undo history are kept on this PC, so Bootmend can show what changed next time.", |ui| {
+                if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
+                    if let Ok(d) = crate::util::data_dir("") {
+                        log!("action", "opening {}", &d.to_string_lossy());
+                        if let Err(e) = shell_open(&d.to_string_lossy()) {
+                            self.toast(format!("{e:#}"), false);
+                        }
+                    }
+                }
+                if widgets::secondary_enabled(ui, "Delete everything Bootmend saved", !self.busy.contains("delete")).clicked() {
+                    self.ask(Pending::DeleteData);
+                }
+            });
+        });
+    }
+
+    fn help(&mut self, ui: &mut Ui) {
+        section(ui, "Help");
+        let (mut report, mut log) = (false, false);
+        card(ui, |ui| {
+            stacked(ui, "Something not working?", "Tell us on GitHub. The log can help us find out what went wrong.", |ui| {
+                report = widgets::icon_button(ui, icon::OPEN, "Report a problem", true).clicked();
+                log = widgets::icon_button(ui, icon::FOLDER, "Open the log", true).clicked();
+            });
+            ui.separator();
+            let on = !self.settings.early_notice_off;
+            let name = "Show the early-version notice";
+            let flip = setting(ui, name, "The \"Bootmend is new\" message when Bootmend opens.", |ui| {
+                let clicked = widgets::switch(ui, on, true, name).clicked();
+                ui.label(if on { "On" } else { "Off" });
+                clicked
+            });
+            if flip {
+                log!("settings", "the early-version notice turned {}", if on { "off" } else { "on" });
+                self.settings.early_notice_off = on;
+                self.save_settings();
+            }
+        });
+        if report {
+            self.report_problem();
+        }
+        if log {
             self.open_log();
+        }
+    }
+
+    /// Writes Bootmend's licence and the third-party notices to a text file, and opens it.
+    fn open_licences(&mut self) {
+        log!("action", "pressed Licences");
+        let opened = crate::util::data_dir("tmp").and_then(|d| {
+            let f = d.join("Bootmend licences.txt");
+            std::fs::write(&f, licences_text())?;
+            shell_open(&f.to_string_lossy())
+        });
+        if let Err(e) = opened {
+            log!("action", "couldn't open the licences: {e:#}");
+            self.toast("Couldn't open the licences.", false);
         }
     }
 
@@ -1290,48 +1419,6 @@ impl App {
                     if let Err(e) = shell_open("ms-settings:colors") {
                         self.toast(format!("Windows Settings didn't open: {e:#}"), false);
                     }
-                }
-            });
-        });
-    }
-
-    fn privacy(&mut self, ui: &mut Ui) {
-        let p = pal(ui.ctx());
-        let para = |ui: &mut Ui, t: &str| {
-            ui.add(egui::Label::new(t).wrap());
-            ui.add_space(S2);
-        };
-        section(ui, "Privacy");
-        card(ui, |ui| {
-            para(ui, "Bootmend works entirely on this PC. There's no account, no analytics, no ads and no \"cloud scan\". Nothing Bootmend finds is sent to us or anyone else.");
-            para(ui, "It only reads, until you press a fix button. Every fix explains itself first and can be undone from History.");
-            widgets::subsection(ui, "What it reads");
-            for r in super::screens::READS {
-                ui.horizontal_top(|ui| {
-                    ui.label(RichText::new("•").color(p.muted));
-                    ui.add(egui::Label::new(r).wrap());
-                });
-            }
-            widgets::subsection(ui, "When it uses the internet");
-            para(ui, "Only when you press one of these, and each asks first:");
-            para(ui, "• Check for app updates: winget, Windows' own app installer, compares your apps with Microsoft's public app catalog.");
-            para(ui, "• Read crash files: Microsoft's debugger downloads matching debugging files from Microsoft. The crash files stay here.");
-            para(ui, "• Update an app: winget downloads it from the app's publisher.");
-            para(ui, "• Test my connection: test data is downloaded from and uploaded to Cloudflare's public speed test. Cloudflare sees this connection's internet address, as with any website.");
-            para(ui, "Saving a PDF uses Microsoft Edge to print the report, and virus checks are run by Windows Security. Both follow their own settings, as they always do.");
-            widgets::subsection(ui, "What it keeps, and where");
-            para(ui, "Each check is saved as a file in your user folder (AppData\\Local\\Bootmend), so it can show what changed next time. The undo history lives there too. Nothing else is stored.");
-            ui.horizontal(|ui| {
-                if widgets::icon_button(ui, icon::FOLDER, "Open the folder", true).clicked() {
-                    if let Ok(d) = crate::util::data_dir("") {
-                        log!("action", "opening {}", &d.to_string_lossy());
-                        if let Err(e) = shell_open(&d.to_string_lossy()) {
-                            self.toast(format!("{e:#}"), false);
-                        }
-                    }
-                }
-                if widgets::secondary_enabled(ui, "Delete everything Bootmend saved", !self.busy.contains("delete")).clicked() {
-                    self.ask(Pending::DeleteData);
                 }
             });
         });
@@ -1755,24 +1842,72 @@ fn network(ui: &mut Ui, snap: &Snapshot) {
     }
 }
 
-/// Whether the quiet "Open the log" link was pressed.
-fn about(ui: &mut Ui) -> bool {
-    let mut open_log = false;
-    section(ui, "About");
-    card(ui, |ui| {
-        ui.label(RichText::new(format!("Bootmend {}", env!("CARGO_PKG_VERSION"))).text_style(theme::title()));
-        ui.add_space(S2);
-        ui.add(egui::Label::new("Bootmend checks a Windows PC and explains, in plain words, what's worth fixing. It reads what Windows already knows about itself, runs no background service, and leaves no trace beyond its own saved checks.").wrap());
-        ui.add_space(S2);
-        ui.add(
-            egui::Label::new("Every check is a small, readable script built into the app, and every fix shows exactly what it changes before it runs.").wrap(),
-        );
-        ui.add_space(S3);
-        ui.horizontal_wrapped(|ui| {
-            small(ui, "MIT licence. Built with Rust and egui.");
-            open_log = ui.link(RichText::new("Open the log").small()).clicked();
-        });
+/// Bootmend's licence notice, the GPL itself, and every crate's licence, as Licences opens them.
+fn licences_text() -> String {
+    let rule = "=".repeat(78);
+    format!(
+        "Bootmend {}\nCopyright © 2026 Tanishk Kamra\nSource code: {}\n\n\
+         Bootmend is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.\n\n\
+         Bootmend is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License below for more details.\n\n\
+         {rule}\n\n{}\n{rule}\n\n{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_REPOSITORY"),
+        include_str!("../../LICENSE"),
+        include_str!("../../THIRD-PARTY-NOTICES.txt"),
+    )
+}
+
+/// Bootmend's version, copyright and licence, at the foot of Settings. Returns whether Licences
+/// was pressed.
+fn footer(ui: &mut Ui) -> bool {
+    ui.add_space(S5);
+    small(ui, format!("Bootmend {} · Copyright © 2026 Tanishk Kamra", env!("CARGO_PKG_VERSION")));
+    let mut licences = false;
+    ui.horizontal_wrapped(|ui| {
+        small(ui, "Free software under the GNU GPL v3, with no warranty.");
+        licences = ui.link(RichText::new("Licences").small()).clicked();
     });
     ui.add_space(S5);
-    open_log
+    licences
+}
+
+/// What Bootmend reads, when it goes online, and what it keeps. Opened from Settings.
+fn privacy_page(ui: &mut Ui) {
+    let p = pal(ui.ctx());
+    let bullet = |ui: &mut Ui, t: &str| {
+        ui.horizontal_top(|ui| {
+            ui.label(RichText::new("•").color(p.muted));
+            ui.add(egui::Label::new(t).wrap());
+        });
+    };
+    card(ui, |ui| {
+        ui.add(egui::Label::new("Bootmend works entirely on this PC. There's no account, no analytics, no ads and no \"cloud scan\". Nothing Bootmend finds is sent to us or anyone else.").wrap());
+        ui.add_space(S2);
+        ui.add(egui::Label::new("It only reads, until you press a fix button. Every fix explains itself first and can be undone from History.").wrap());
+    });
+    section(ui, "What it reads");
+    card(ui, |ui| {
+        for r in super::screens::READS {
+            bullet(ui, r);
+        }
+    });
+    section(ui, "When it goes online");
+    card(ui, |ui| {
+        ui.add(egui::Label::new("Once a day, Bootmend asks GitHub whether there's a newer version. GitHub sees this connection's internet address and Bootmend's version number, as with any download. Settings can turn this off.").wrap());
+        ui.add_space(S2);
+        ui.add(egui::Label::new("Everything else waits for you to press a button:").wrap());
+        ui.add_space(S1);
+        bullet(ui, "Update Bootmend: downloads the new version from GitHub, and installs it only if it's signed by Bootmend.");
+        bullet(ui, "Check for app updates: winget, Windows' own app installer, compares your apps with Microsoft's public app catalog.");
+        bullet(ui, "Read crash files: Microsoft's debugger downloads matching debugging files from Microsoft. The crash files stay here.");
+        bullet(ui, "Update an app: winget downloads it from the app's publisher.");
+        bullet(ui, "Test my connection: Bootmend times how quickly Microsoft's website answers. Microsoft sees this connection's internet address, as with any website.");
+        ui.add_space(S2);
+        ui.add(egui::Label::new("Saving a PDF uses Microsoft Edge to print the report, and virus checks are run by Windows Security. Both follow their own settings, as they always do.").wrap());
+    });
+    section(ui, "What it keeps, and where");
+    card(ui, |ui| {
+        ui.add(egui::Label::new("Each check is saved as a file in your user folder (AppData\\Local\\Bootmend), so it can show what changed next time. The undo history lives there too. When a fix changes a setting, Windows' registry keeps a copy of the old one, so Undo can put it back. Nothing else is stored. Settings can open the folder or delete it all.").wrap());
+    });
+    ui.add_space(S5);
 }
