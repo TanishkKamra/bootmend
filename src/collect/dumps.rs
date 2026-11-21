@@ -56,26 +56,45 @@ pub fn windows_core(module: &str) -> bool {
     matches!(bare(module).as_str(), "nt" | "ntoskrnl" | "ntkrnlmp" | "hal")
 }
 
-/// Plain name for the driver files that most often show up in crash reports.
-pub fn module_hint(module: &str) -> Option<&'static str> {
+/// What sort of driver a crash file names, which decides the advice for fixing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Core,
+    Graphics,
+    Network,
+    Storage,
+    Defender,
+    AntiCheat,
+    Usb,
+    Audio,
+}
+
+/// Kind and plain name for the driver files that most often show up in crash reports.
+pub fn driver_info(module: &str) -> Option<(Kind, &'static str)> {
+    use Kind::*;
     let m = bare(module);
     Some(match m.as_str() {
-        _ if windows_core(&m) => "Windows core (the real cause is often hardware, RAM or a driver that left no trace)",
-        "nvlddmkm" => "NVIDIA graphics driver",
-        "amdkmdag" | "atikmdag" | "atikmpag" | "amdkmpfd" => "AMD graphics driver",
-        "igdkmd64" | "igdkmdn64" | "igdkmdnd64" => "Intel graphics driver",
-        "dxgkrnl" | "dxgmms2" | "watchdog" => "Windows graphics system (usually the graphics driver underneath)",
-        "tcpip" | "ndis" | "netio" => "Windows networking (often the network adapter driver)",
-        "storport" | "stornvme" | "storahci" | "iastorac" | "iastora" | "iastorvd" => "Storage driver",
-        "wdfilter" | "wdboot" => "Microsoft Defender",
-        "bedaisy" | "easyanticheat" | "vgk" | "faceit" => "Game anti-cheat driver",
-        "usbxhci" | "ucx01000" | "usbhub3" => "USB driver",
-        "hdaudbus" | "portcls" | "ks" => "Audio driver",
-        x if x.starts_with("rt") && (x.contains("640") || x.contains("wlan") || x.contains("68")) => "Realtek network driver",
-        x if x.starts_with("netwtw") || x.starts_with("netwbw") => "Intel Wi-Fi driver",
-        x if x.starts_with("e1") || x.starts_with("e2f") => "Intel Ethernet driver",
+        _ if windows_core(&m) => (Core, "Windows core (the real cause is often hardware, RAM or a driver that left no trace)"),
+        "nvlddmkm" => (Graphics, "NVIDIA graphics driver"),
+        "amdkmdag" | "atikmdag" | "atikmpag" | "amdkmpfd" => (Graphics, "AMD graphics driver"),
+        "igdkmd64" | "igdkmdn64" | "igdkmdnd64" => (Graphics, "Intel graphics driver"),
+        "dxgkrnl" | "dxgmms2" | "watchdog" => (Graphics, "Windows graphics system (usually the graphics driver underneath)"),
+        "tcpip" | "ndis" | "netio" => (Network, "Windows networking (often the network adapter driver)"),
+        "storport" | "stornvme" | "storahci" | "iastorac" | "iastora" | "iastorvd" => (Storage, "Storage driver"),
+        "wdfilter" | "wdboot" => (Defender, "Microsoft Defender"),
+        "bedaisy" | "easyanticheat" | "vgk" | "faceit" => (AntiCheat, "Game anti-cheat driver"),
+        "usbxhci" | "ucx01000" | "usbhub3" => (Usb, "USB driver"),
+        "hdaudbus" | "portcls" | "ks" => (Audio, "Audio driver"),
+        x if x.starts_with("rt") && (x.contains("640") || x.contains("wlan") || x.contains("68")) => (Network, "Realtek network driver"),
+        x if x.starts_with("netwtw") || x.starts_with("netwbw") => (Network, "Intel Wi-Fi driver"),
+        x if x.starts_with("e1") || x.starts_with("e2f") => (Network, "Intel Ethernet driver"),
         _ => return None,
     })
+}
+
+/// Plain name for the driver files that most often show up in crash reports.
+pub fn module_hint(module: &str) -> Option<&'static str> {
+    driver_info(module).map(|(_, name)| name)
 }
 
 /// Pull the useful fields out of `!analyze -v` output.

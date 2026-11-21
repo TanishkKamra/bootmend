@@ -900,10 +900,19 @@ impl App {
                     format!("Windows saved {}. Reading them shows which driver was running when it crashed.", plural(dumps.len(), "crash file", "crash files")),
                 );
             }
+            let fixable = !snap.dumps.is_empty();
             // Once every file is read, reading again would only say the same.
-            if !tried || snap.dumps_unread > 0 || self.busy.contains("dumps") {
+            let again = !tried || snap.dumps_unread > 0 || self.busy.contains("dumps");
+            if fixable || again {
                 ui.add_space(S2);
-                ui.horizontal(|ui| self.dumps_button(ui, if tried { "Try again" } else { "Read crash files" }));
+                ui.horizontal(|ui| {
+                    if fixable && widgets::secondary(ui, "How to fix").clicked() {
+                        self.crash_fix = super::crash_summary::plan(&snap.dumps);
+                    }
+                    if again {
+                        self.dumps_button(ui, if tried { "Try again" } else { "Read crash files" });
+                    }
+                });
             }
             if !snap.dumps.is_empty() {
                 ui.add_space(S2);

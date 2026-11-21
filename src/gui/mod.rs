@@ -376,8 +376,9 @@ enum Shot {
     Details,
     /// The copy dialog choosing a drive (0), copying (1) and done (2).
     Copy(u8),
-    /// The Crashes page after reading the crash files, with what they say open (true) or closed.
-    CrashFiles(bool),
+    /// The Crashes page after reading the crash files: on its own (0), with what they say (1),
+    /// and with how to fix the crashes (2).
+    CrashFiles(u8),
 }
 
 /// Where the logo was last drawn, and its flight from there when it changes hands between Home
@@ -495,6 +496,8 @@ pub struct App {
     early_notice: bool,
     /// What reading the crash files found, shown once when it finishes.
     crash_summary: Option<crash_summary::Summary>,
+    /// How to stop the crashes, open when the person asks.
+    crash_fix: Option<crash_summary::Plan>,
     /// A newer Bootmend the update check found.
     update: Option<crate::update::Version>,
     /// An update check finished this session, so Settings can say this is the newest version.
@@ -564,6 +567,7 @@ impl App {
             motion_read: None,
             early_notice: false,
             crash_summary: None,
+            crash_fix: None,
             update: None,
             update_known: false,
             update_hidden: false,
@@ -583,7 +587,7 @@ impl App {
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
             queue.extend([Shot::Dialog, Shot::Early, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
             // Last, because they swap in sample crash files for the shots that follow.
-            queue.extend([Shot::CrashFiles(false), Shot::CrashFiles(true)]);
+            queue.extend([Shot::CrashFiles(0), Shot::CrashFiles(1), Shot::CrashFiles(2)]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         } else if resume {
             app.resume();
@@ -1893,7 +1897,7 @@ impl App {
                 Some(Shot::Fixing) => "fixing".to_string(),
                 Some(Shot::Details) => "fixing-details".to_string(),
                 Some(Shot::Copy(n)) => format!("copy-{}", ["pick", "copying", "done"][usize::from(*n).min(2)]),
-                Some(Shot::CrashFiles(open)) => if *open { "crash-files-said" } else { "crash-files-read" }.to_string(),
+                Some(Shot::CrashFiles(n)) => format!("crash-files-{}", ["read", "said", "fix"][usize::from(*n).min(2)]),
                 _ => "welcome".to_string(),
             };
             let file = m.dir.join(if m.part == 0 { format!("{name}.png") } else { format!("{name}-{}.png", m.part + 1) });
@@ -1912,8 +1916,9 @@ impl App {
                 if matches!(m.queue.first(), Some(Shot::Copy(_))) {
                     self.copy = None;
                 }
-                if matches!(m.queue.first(), Some(Shot::CrashFiles(true))) {
+                if matches!(m.queue.first(), Some(Shot::CrashFiles(_))) {
                     self.crash_summary = None;
+                    self.crash_fix = None;
                 }
                 if matches!(m.queue.first(), Some(Shot::Queue | Shot::Fixing | Shot::Details)) {
                     self.run = None;
@@ -1940,13 +1945,16 @@ impl App {
                     Shot::Dialog | Shot::CrashFiles(_) => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
-                if let (Shot::CrashFiles(open), Some(s)) = (target, &self.snap) {
+                if let (Shot::CrashFiles(n), Some(s)) = (target, &self.snap) {
                     if s.dumps.is_empty() {
                         self.snap = Some(Arc::new(crash_summary::sample(s)));
                     }
-                    if open && self.crash_summary.is_none() {
-                        let s = self.snap.as_ref().map(|s| crash_summary::summarize(&s.dumps, s.dumps_unread));
-                        self.crash_summary = s;
+                    let s = self.snap.clone();
+                    if n == 1 && self.crash_summary.is_none() {
+                        self.crash_summary = s.as_ref().map(|s| crash_summary::summarize(&s.dumps, s.dumps_unread));
+                    }
+                    if n == 2 && self.crash_fix.is_none() {
+                        self.crash_fix = s.as_ref().and_then(|s| crash_summary::plan(&s.dumps));
                     }
                 }
                 if self.run.is_none() {
@@ -2109,6 +2117,7 @@ impl eframe::App for App {
         self.auto_update_check(&ctx);
         self.early_notice(&ctx);
         self.crash_summary_dialog(&ctx);
+        self.crash_fix_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.copy_dialog(&ctx);
         self.toasts_ui(&ctx);
