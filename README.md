@@ -62,6 +62,8 @@ bootmend --screenshots <folder> [--theme light|dark] [--size WxH]
 
 Saved checks live in `%LOCALAPPDATA%\Bootmend\snapshots\<PC name>\`.
 
+History is kept in `%LOCALAPPDATA%\Bootmend\history.json`. A change that removes settings saves a copy of them first, under `HKCU\SOFTWARE\Bootmend\Changes` for your own settings and `HKLM\SOFTWARE\Bootmend\Changes` for settings that apply to everyone on the PC. A change made as administrator also leaves a record there, and Undo checks it first, so editing `history.json` can't change what an undo does. Deleting Bootmend's data in Settings removes these too; the `HKLM` ones only go when Bootmend is running as administrator.
+
 Everything the app does is written to a log, one file per day, in a `logs` folder beside `bootmend.exe` (or `%LOCALAPPDATA%\Bootmend\logs` when that folder can't be written to). It records:
 
 - each check step and how long it took

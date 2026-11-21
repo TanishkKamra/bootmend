@@ -843,6 +843,11 @@ impl App {
                 leftovers = Some(ri.ticked);
                 continue;
             };
+            // Any app the user runs can change the saved queue, so it only carries fixes the check-up could give.
+            if !f.check() {
+                log!("queue", "left out a saved fix whose details were altered");
+                continue;
+            }
             let found = self.findings.iter().find(|x| x.actions.iter().any(|a| matches!(a, rules::Action::Fix(y) if y == f)));
             // A fix offered outside the plan, such as a background service, keeps its own name.
             let mut it = match found {
@@ -1231,7 +1236,10 @@ impl App {
             Pending::DeleteData => {
                 self.busy.insert("delete".into());
                 self.spawn(ctx, || {
-                    let r = data_dir("").map_err(|e| format!("{e:#}")).and_then(|d| std::fs::remove_dir_all(&d).map_err(|e| format!("{e}")));
+                    let r = data_dir("")
+                        .map_err(|e| format!("{e:#}"))
+                        .and_then(|d| std::fs::remove_dir_all(&d).map_err(|e| format!("{e}")))
+                        .and_then(|()| fixes::forget_changes().map_err(|e| format!("{e:#}")));
                     Job::Deleted(r)
                 });
             }
