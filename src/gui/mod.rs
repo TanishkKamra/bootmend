@@ -1023,7 +1023,7 @@ impl App {
             Pending::Fix(f, title) => {
                 let mut body = vec![f.describe(), format!("This is for: {title}.")];
                 if self.restore_point_first() {
-                    body.push("Bootmend saves a restore point first, so the whole PC can be rolled back if anything goes wrong.".into());
+                    body.push("Bootmend saves a restore point first, so the whole PC can be rolled back if anything goes wrong. That can take up to a minute.".into());
                 }
                 Confirm { title: f.label().to_string(), body, yes: f.label().to_string(), action }
             }
@@ -1180,6 +1180,10 @@ impl App {
                 self.busy.insert(format!("fix:{fix:?}"));
                 let first = self.restore_point_first();
                 self.restore_saved |= first;
+                if first {
+                    // Cleared with the fix's own marker when the job ends.
+                    self.busy.insert("fix:restore".into());
+                }
                 self.spawn(ctx, move || {
                     let note = first.then(|| match fixes::restore_point("Before changes made with Bootmend") {
                         Ok(()) => "A restore point was saved first.".to_string(),
