@@ -2,7 +2,7 @@
 
 A Windows desktop app that checks a PC (hardware, health, security, software) and explains, in plain words, what is worth fixing. It is written for people who aren't technical.
 
-Bootmend only reads until you press a button, and every change explains itself first. Changes to Windows settings can be undone from History. Clearing space and updating apps can't be undone, and Bootmend says so before it runs them. It only goes online when you press one of four buttons (check for app updates, update an app, read crash files, test my connection), and each one asks first.
+Bootmend only reads until you press a button, and every change explains itself first. Changes to Windows settings can be undone from History. Clearing space and updating apps can't be undone, and Bootmend says so before it runs them. It goes online on its own for one thing: once a day it asks GitHub whether a newer Bootmend is out, and Settings can turn that off. Anything else online (checking for app updates, updating an app, reading crash files, testing the connection, updating Bootmend) waits for a button press and asks first.
 
 ## Download
 
@@ -13,6 +13,8 @@ Bootmend isn't code-signed yet, so the first time you open it Windows may say "W
 ```
 Get-FileHash .\bootmend.exe -Algorithm SHA256
 ```
+
+After that, Bootmend offers new versions itself. It installs one only if the download is signed with Bootmend's release key, and your saved checks and settings stay as they are.
 
 ## What it does
 

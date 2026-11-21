@@ -21,6 +21,7 @@ tiny-skia = "0.11.4"
 raw-window-handle = "0.6"
 rfd = "0.15"
 sysinfo = { version = "0.35", default-features = false, features = ["system"] }
+minisign-verify = "0.3"
 
 [dependencies.windows]
 version = "0.61"
@@ -51,3 +52,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+minisign = "0.10"

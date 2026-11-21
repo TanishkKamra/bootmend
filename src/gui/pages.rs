@@ -37,7 +37,7 @@ fn two_lines(ui: &mut Ui, title: &str, detail: &str, hover: &str) {
 
 /// A row like the ones in Windows Settings: a name over a wrapped explanation, and the
 /// control on the right, centred against both lines. In a narrow card the control goes under them.
-fn setting<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
+pub(super) fn setting<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
     const CONTROL_W: f32 = 200.0;
     let muted = pal(ui.ctx()).muted;
     if ui.available_width() < widgets::WRAP {
@@ -60,7 +60,7 @@ fn setting<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut 
 
 /// A setting's name over its explanation, with the controls under them. `setting` falls back to
 /// this in a narrow card, and rows with several buttons use it at any width.
-fn stacked<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
+pub(super) fn stacked<R>(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
     let muted = pal(ui.ctx()).muted;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = S1;
@@ -1277,6 +1277,7 @@ impl App {
 
     fn settings_page(&mut self, ui: &mut Ui) {
         self.schedule_setting(ui);
+        self.updates(ui);
         self.appearance(ui);
         self.your_data(ui);
         self.help(ui);
@@ -1881,8 +1882,11 @@ fn privacy_page(ui: &mut Ui) {
     });
     section(ui, "When it goes online");
     card(ui, |ui| {
-        ui.add(egui::Label::new("Only when you press one of these, and each asks first:").wrap());
+        ui.add(egui::Label::new("Once a day, Bootmend asks GitHub whether there's a newer version. GitHub sees this connection's internet address and Bootmend's version number, as with any download. Settings can turn this off.").wrap());
+        ui.add_space(S2);
+        ui.add(egui::Label::new("Everything else waits for you to press a button:").wrap());
         ui.add_space(S1);
+        bullet(ui, "Update Bootmend: downloads the new version from GitHub, and installs it only if it's signed by Bootmend.");
         bullet(ui, "Check for app updates: winget, Windows' own app installer, compares your apps with Microsoft's public app catalog.");
         bullet(ui, "Read crash files: Microsoft's debugger downloads matching debugging files from Microsoft. The crash files stay here.");
         bullet(ui, "Update an app: winget downloads it from the app's publisher.");

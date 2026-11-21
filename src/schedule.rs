@@ -184,6 +184,14 @@ pub fn toast_xml(items: &[&Finding]) -> String {
     )
 }
 
+/// After a scheduled check-up, once per new version.
+pub fn update_toast_xml(version: &str) -> String {
+    format!(
+        r#"<toast activationType="protocol" launch="{PROTOCOL}:open"><visual><binding template="ToastGeneric"><text>{APP} {} is ready</text><text>Open {APP} to install it.</text></binding></visual></toast>"#,
+        xml_escape(version)
+    )
+}
+
 pub fn notify(xml: &str) -> Result<()> {
     let script = format!(
         "$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]\n\
@@ -304,6 +312,9 @@ mod tests {
         assert!(x.contains("Bootmend found something new") && x.contains(r#"launch="bootmend:open""#) && !x.contains("rigscan"), "{x}");
         let y = toast_xml(&[&b]);
         assert!(y.contains("Title b&lt;&amp;&gt;") && !y.contains("b<&>"), "{y}");
+        let u = update_toast_xml("0.2.0");
+        assert!(u.contains("Bootmend 0.2.0 is ready") && u.contains(r#"launch="bootmend:open""#), "{u}");
+        assert!(update_toast_xml("<x>").contains("&lt;x&gt;"));
     }
 
     #[test]

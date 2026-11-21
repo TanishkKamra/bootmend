@@ -17,6 +17,7 @@ mod scan;
 mod schedule;
 mod snapshot;
 mod trends;
+mod update;
 mod usb_copy;
 mod util;
 
@@ -120,6 +121,9 @@ fn scheduled() {
     if let Err(e) = collect_now().and_then(schedule::run_scheduled) {
         log_error(&e);
     }
+    if let Err(e) = gui::update_in_background() {
+        log_error(&e);
+    }
 }
 
 /// The app used to be called rigscan. The first time it runs under the new name, its saved checks
@@ -207,6 +211,9 @@ fn main() {
         Err(e) => log!("app", "couldn't load the window icon: {e}"),
     }
     let shots = args.screenshots;
+    if shots.is_none() {
+        update::tidy();
+    }
     if shots.is_some() {
         // Screenshots are taken in a window parked off-screen with no taskbar button, so
         // nothing appears while they're taken.

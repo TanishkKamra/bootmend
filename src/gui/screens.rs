@@ -39,7 +39,7 @@ impl App {
                         for (ic, title, body) in [
                             (icon::LOCK, "Stays on this PC", "Everything Bootmend finds is kept on this computer. There's no account, no tracking and no ads."),
                             (icon::CHECK, "Changes nothing on its own", "Bootmend only looks. Every fix waits for you to press a button, tells you what it will do, and can be undone."),
-                            (icon::NETWORK, "Goes online only when you ask", "Two optional features use the internet: checking for app updates and reading crash files. Each one asks first."),
+                            (icon::NETWORK, "Online only when needed", "Once a day, Bootmend asks GitHub whether a newer version is out (Settings can turn this off). Anything else that goes online asks you first."),
                         ] {
                             ui.horizontal_top(|ui| {
                                 ui.add(widgets::Glyph(ico(ic, 18.0).color(p.accent)));

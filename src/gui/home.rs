@@ -186,6 +186,7 @@ impl App {
                 });
             });
         }
+        self.update_note(ui);
         ui.add_space(S6);
         self.plan_list(ui, &plan.todos, &safe);
         self.schedule_offer(ui);

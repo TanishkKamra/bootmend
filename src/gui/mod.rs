@@ -11,6 +11,7 @@ mod schedule_ui;
 mod screens;
 mod system;
 pub mod theme;
+mod update_ui;
 mod widgets;
 
 use crate::collect::{self, Progress};
@@ -209,6 +210,7 @@ pub enum Pending {
     Clean(Vec<&'static str>),
     EmptyRecycleBin,
     NetCheck,
+    UpdateBootmend(crate::update::Version),
 }
 
 pub struct Confirm {
@@ -243,6 +245,10 @@ pub enum Job {
     Points(Result<Vec<fixes::RestorePoint>, String>),
     CopyLooked(Result<copy_dialog::Looked, String>),
     Copied(Result<crate::usb_copy::Copied, String>),
+    /// The update check: the newer version it found, and whether Check now was pressed.
+    UpdateChecked(Result<Option<crate::update::Version>, String>, bool),
+    /// The update was downloaded, checked and put in place: the exe to start.
+    Updated(Result<PathBuf, String>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -259,6 +265,14 @@ struct Settings {
     use_windows_accent: bool,
     /// "Don't show again" was pressed on the early-version notice.
     early_notice_off: bool,
+    /// Bootmend asks GitHub once a day whether there's a newer version.
+    auto_update: bool,
+    /// The day the update check last ran, such as 2026-11-19, so it runs at most once a day.
+    update_checked: Option<String>,
+    /// The newest version a notification has already announced.
+    update_notified: Option<String>,
+    /// The version that ran last, to say so after an update.
+    ran_version: String,
 }
 
 impl Default for Settings {
@@ -270,6 +284,10 @@ impl Default for Settings {
             schedule_asked: false,
             use_windows_accent: false,
             early_notice_off: false,
+            auto_update: true,
+            update_checked: None,
+            update_notified: None,
+            ran_version: String::new(),
         }
     }
 }
@@ -295,7 +313,16 @@ fn load_settings() -> Settings {
     settings_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
+fn write_settings(s: &Settings) {
+    if let Some(p) = settings_path() {
+        if let Err(e) = std::fs::write(&p, serde_json::to_vec(s).unwrap_or_default()) {
+            log!("settings", "couldn't save settings: {e}");
+        }
+    }
+}
+
 pub use system::mica_available;
+pub use update_ui::update_in_background;
 
 /// The check-up pace and hour the person chose, for setting the task up again outside the window.
 pub fn saved_schedule() -> (crate::schedule::Every, u8) {
@@ -461,6 +488,14 @@ pub struct App {
     motion_read: Option<Instant>,
     /// The early-version notice is open. It opens at each launch until "Don't show again".
     early_notice: bool,
+    /// A newer Bootmend the update check found.
+    update: Option<crate::update::Version>,
+    /// An update check finished this session, so Settings can say this is the newest version.
+    update_known: bool,
+    /// "Not now" was pressed on Home's update note.
+    update_hidden: bool,
+    /// The automatic update check has had its look this session.
+    update_looked: bool,
 }
 
 impl App {
@@ -520,6 +555,10 @@ impl App {
             accent_read: None,
             motion_read: None,
             early_notice: false,
+            update: None,
+            update_known: false,
+            update_hidden: false,
+            update_looked: false,
         };
         if let Some(s) = snapshot::latest(&host) {
             app.set_snapshot(s);
@@ -527,6 +566,9 @@ impl App {
         app.mark.set_lift(if app.raised() { 1.0 } else { 0.0 }, true);
         // Not again when Bootmend restarts as administrator to carry on with a fix.
         app.early_notice = !app.settings.early_notice_off && snap_dir.is_none() && !resume;
+        if snap_dir.is_none() {
+            app.note_new_version();
+        }
         if let Some(dir) = snap_dir {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
@@ -618,11 +660,7 @@ impl App {
     }
 
     fn save_settings(&self) {
-        if let Some(p) = settings_path() {
-            if let Err(e) = std::fs::write(&p, serde_json::to_vec(&self.settings).unwrap_or_default()) {
-                log!("settings", "couldn't save settings: {e}");
-            }
-        }
+        write_settings(&self.settings);
     }
 
     pub fn start_check(&mut self) {
@@ -1061,6 +1099,12 @@ impl App {
                 }
                 Confirm { title: format!("Free up {size}?"), body, yes: "Free up space".into(), action }
             }
+            Pending::UpdateBootmend(v) => Confirm {
+                title: format!("Update to Bootmend {v}?"),
+                body: vec!["Bootmend downloads it from GitHub, checks it's signed by Bootmend, then restarts.".into()],
+                yes: "Update and restart".into(),
+                action,
+            },
             Pending::NetCheck => Confirm {
                 title: "Test your connection?".into(),
                 body: vec![
@@ -1112,6 +1156,7 @@ impl App {
             Pending::Clean(ids) => format!("clear {}", ids.join(", ")),
             Pending::EmptyRecycleBin => "empty the Recycle Bin".into(),
             Pending::NetCheck => "test the connection".into(),
+            Pending::UpdateBootmend(v) => format!("update Bootmend to {v}"),
         };
         log!("action", "{what}");
         match action {
@@ -1174,6 +1219,7 @@ impl App {
             },
             Pending::Clean(ids) => self.start_cleaning(ctx, ids),
             Pending::NetCheck => self.start_net_check(ctx),
+            Pending::UpdateBootmend(v) => self.start_update(ctx, v),
             Pending::EmptyRecycleBin => {
                 self.busy.insert("recycle".into());
                 self.spawn(ctx, || Job::RecycleEmptied(crate::cleanup::empty_recycle_bin().map_err(|e| format!("{e:#}"))));
@@ -1415,6 +1461,8 @@ impl App {
                     );
                     self.net = Some(c);
                 }
+                Job::UpdateChecked(r, manual) => self.on_update_checked(r, manual),
+                Job::Updated(r) => self.on_updated(ctx, r),
                 Job::Deleted(r) => {
                     log!("action", "deleting everything saved {}", ended(&r));
                     self.busy.remove("delete");
@@ -2006,6 +2054,7 @@ impl eframe::App for App {
         if !fit.docked && !full_screen {
             self.nav_overlay(&ctx);
         }
+        self.auto_update_check(&ctx);
         self.early_notice(&ctx);
         self.confirm_dialog(&ctx);
         self.copy_dialog(&ctx);
