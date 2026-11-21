@@ -91,7 +91,8 @@ jobs:
           New-Item -ItemType Directory rehearsal-key | Out-Null
           $pk = cargo run --release --locked --example sign_release -- new-key rehearsal-key/throwaway.key
           if ($LASTEXITCODE -or -not $pk) { throw "Couldn't make the throwaway key." }
-          Set-Content -NoNewline rehearsal-key/throwaway.pub $pk
+          # Named, because with -NoNewline the two bare arguments bind the other way round.
+          Set-Content -NoNewline -LiteralPath rehearsal-key/throwaway.pub -Value $pk
 
       - name: Hand the throwaway key to the signing job
         if: github.event_name == 'workflow_dispatch'
