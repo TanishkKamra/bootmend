@@ -193,7 +193,7 @@ fn main() {
     };
     let admin = if elevate::is_elevated() { " as administrator" } else { "" };
     log!("app", "Bootmend {} started{admin} for {mode}", env!("CARGO_PKG_VERSION"));
-    if let Err(e) = gl {
+    if let Err(e) = &gl {
         log!("app", "couldn't load OpenGL from System32: {e}");
     }
     match guarded {
@@ -216,6 +216,12 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    // The window draws with OpenGL. Loaded later by name, it could come from beside the exe.
+    if let Err(e) = gl {
+        console();
+        eprintln!("Bootmend couldn't open its window, because Windows' own OpenGL couldn't be loaded: {e}");
+        std::process::exit(1);
     }
     let (w, h) = args.size.unwrap_or((1180.0, 780.0));
     let mut viewport =
