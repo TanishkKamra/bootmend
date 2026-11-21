@@ -192,9 +192,13 @@ fn private_dir(parent: &Path) -> Result<PathBuf> {
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::CreateDirectoryW;
     // SYSTEM and Administrators only, and nothing inherited: Temp lets Users add files to its subfolders.
+    const ONLY_ADMINS: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+    // Owned by Administrators too, since an owner can always change who may use a folder. Only an
+    // administrator window may name them as the owner, so tests make the folder without.
+    let sddl = if elevated() { format!("O:BA{ONLY_ADMINS}") } else { ONLY_ADMINS.to_string() };
     let mut sd = PSECURITY_DESCRIPTOR::default();
     // SAFETY: Windows allocates the descriptor, freed below once the folder exists.
-    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&HSTRING::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"), SDDL_REVISION_1, &mut sd, None) }
+    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&HSTRING::from(sddl), SDDL_REVISION_1, &mut sd, None) }
         .context("describing who may use Bootmend's temporary folder")?;
     let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() };
     let mut made = Err(anyhow!("five temporary folder names were already taken in {}", parent.display()));
