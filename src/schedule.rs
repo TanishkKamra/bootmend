@@ -7,7 +7,7 @@ use crate::util::{powershell, ps_quote, APP};
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Local};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 pub const TASK: &str = "Bootmend check-up";
@@ -167,10 +167,11 @@ pub fn move_old_task(every: Every, hour: u8) -> Result<()> {
     Ok(())
 }
 
-/// Suggestions in `now` that weren't in `before`: only the ones worth interrupting someone for.
-pub fn new_items<'a>(before: &[Finding], now: &'a [Finding]) -> Vec<&'a Finding> {
+/// Suggestions in `now` that weren't in `before` and aren't ignored: only the ones worth
+/// interrupting someone for.
+pub fn new_items<'a>(before: &[Finding], now: &'a [Finding], ignored: &BTreeSet<String>) -> Vec<&'a Finding> {
     let old: HashSet<&str> = before.iter().filter(|f| f.level != Level::AllGood).map(|f| f.id.as_str()).collect();
-    now.iter().filter(|f| matches!(f.level, Level::DoFirst | Level::WorthDoing) && !old.contains(f.id.as_str())).collect()
+    now.iter().filter(|f| matches!(f.level, Level::DoFirst | Level::WorthDoing) && !old.contains(f.id.as_str()) && !ignored.contains(&f.id)).collect()
 }
 
 /// The notification: the first new item by name, and how many more.
@@ -232,7 +233,7 @@ pub fn run_scheduled(snap: Snapshot) -> Result<()> {
     snapshot::save(&snap)?;
     prune(&snap.host, KEEP)?;
     let now = crate::rules::evaluate(&snap);
-    let new = new_items(&before, &now);
+    let new = new_items(&before, &now, &crate::gui::ignored_findings());
     log!("schedule", "scheduled check-up finished: {} new suggestion{}", new.len(), if new.len() == 1 { "" } else { "s" });
     if !new.is_empty() {
         notify(&toast_xml(&new))?;
@@ -305,9 +306,18 @@ mod tests {
     fn only_new_important_items_interrupt() {
         let before = vec![f("a", Level::DoFirst), f("b", Level::AllGood)];
         let now = vec![f("a", Level::DoFirst), f("b", Level::WorthDoing), f("c", Level::NiceToHave), f("d", Level::DoFirst)];
-        let ids: Vec<&str> = new_items(&before, &now).iter().map(|x| x.id.as_str()).collect();
+        let none = BTreeSet::new();
+        let ids: Vec<&str> = new_items(&before, &now, &none).iter().map(|x| x.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "d"]);
-        assert!(new_items(&now, &now).is_empty());
+        assert!(new_items(&now, &now, &none).is_empty());
+    }
+
+    #[test]
+    fn ignored_items_never_interrupt() {
+        let now = vec![f("a", Level::DoFirst), f("b", Level::WorthDoing)];
+        let ignored = BTreeSet::from(["a".to_string()]);
+        let ids: Vec<&str> = new_items(&[], &now, &ignored).iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, vec!["b"]);
     }
 
     #[test]
