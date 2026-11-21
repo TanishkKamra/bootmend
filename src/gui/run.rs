@@ -871,7 +871,7 @@ impl Run {
             let b = Rect::from_center_size(slot.center(), Vec2::splat(20.0));
             if it.ticked {
                 painter.rect_filled(b, CornerRadius::same(4), p.accent);
-                painter.text(b.center(), Align2::CENTER_CENTER, icon::CHECK, FontId::new(12.0, theme::icons()), p.on_accent);
+                widgets::paint_tick(&painter, b, p.on_accent);
             } else {
                 painter.rect_stroke(b, CornerRadius::same(4), Stroke::new(1.0, p.control), egui::StrokeKind::Inside);
             }

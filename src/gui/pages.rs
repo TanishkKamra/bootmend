@@ -1237,7 +1237,7 @@ impl App {
         card(ui, |ui| {
             ui.label("The report includes the suggestions, hardware details, drive health, security settings and the list of apps and extensions. It's saved only where you choose.");
             ui.add_space(S3);
-            if ui.checkbox(&mut self.ui.hide_personal, "Hide personal details").changed() {
+            if widgets::checkbox(ui, &mut self.ui.hide_personal, true, "Hide personal details").changed() {
                 log!("settings", "hide personal details in the report turned {}", if self.ui.hide_personal { "on" } else { "off" });
             }
             small(

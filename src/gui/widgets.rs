@@ -300,6 +300,59 @@ pub fn switch(ui: &mut Ui, on: bool, enabled: bool, name: &str) -> Response {
     r
 }
 
+/// The tick inside a ticked box, drawn as a 2 px stroke the way WinUI draws its own, which reads
+/// better at this size than the icon font's thin check.
+pub fn paint_tick(painter: &egui::Painter, b: egui::Rect, color: Color32) {
+    let at = |x: f32, y: f32| b.min + egui::vec2(x, y) * (b.width() / 20.0);
+    painter.add(egui::Shape::line(vec![at(5.5, 10.5), at(8.5, 13.5), at(14.5, 7.0)], Stroke::new(2.0, color)));
+}
+
+/// Size of `checkbox`'s box. Text under a tick box's label lines up at `CHECKBOX + S2`.
+pub const CHECKBOX: f32 = 20.0;
+
+/// A tick box drawn the way Windows 11 draws its own, and like the boxes in the fix queue: an
+/// accent square with a white tick when on, an outlined square when off. The label is part of
+/// what can be clicked.
+pub fn checkbox(ui: &mut Ui, on: &mut bool, enabled: bool, label: impl Into<egui::WidgetText>) -> Response {
+    let p = pal(ui.ctx());
+    let galley = label.into().into_galley(ui, None, ui.available_width() - CHECKBOX - S2, egui::TextStyle::Body);
+    let size = egui::vec2(CHECKBOX + S2 + galley.size().x, CHECKBOX.max(galley.size().y));
+    let (rect, mut r) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
+    if r.clicked() {
+        *on = !*on;
+        r.mark_changed();
+    }
+    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *on, galley.text()));
+    if ui.is_rect_visible(rect) {
+        let b = egui::Rect::from_min_size(egui::pos2(rect.left(), rect.center().y - CHECKBOX / 2.0), egui::Vec2::splat(CHECKBOX));
+        let (down, over) = (enabled && r.is_pointer_button_down_on(), enabled && r.hovered());
+        let radius = CornerRadius::same(CONTROL_RADIUS);
+        let painter = ui.painter();
+        if *on {
+            // Windows lightens the accent under the pointer and a little more while pressed.
+            let fill = match (enabled, down, over) {
+                (false, ..) => p.accent_soft,
+                (_, true, _) => p.accent.gamma_multiply(0.8),
+                (_, _, true) => p.accent.gamma_multiply(0.9),
+                _ => p.accent,
+            };
+            painter.rect_filled(b, radius, fill);
+            paint_tick(painter, b, if enabled { p.on_accent } else { p.control });
+        } else {
+            let (fill, edge) = match (enabled, down, over) {
+                (false, ..) => (p.surface2, p.line),
+                (_, true, _) => (p.surface2, p.muted),
+                (_, _, true) => (p.surface2, p.control),
+                _ => (p.surface, p.control),
+            };
+            painter.rect(b, radius, fill, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+        }
+        let text_at = egui::pos2(b.right() + S2, rect.center().y - galley.size().y / 2.0);
+        painter.galley(text_at, galley, if enabled { p.ink } else { p.muted });
+    }
+    r
+}
+
 fn ring_id(id: egui::Id) -> egui::Id {
     id.with("focus-ring")
 }
