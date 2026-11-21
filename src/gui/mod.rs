@@ -23,7 +23,7 @@ use crate::snapshot::{self, AppUpgrade, DumpAnalysis, ScanResult, Snapshot};
 use crate::util::{data_dir, shell_open};
 use eframe::egui::{self, RichText};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -273,6 +273,8 @@ struct Settings {
     update_notified: Option<String>,
     /// The version that ran last, to say so after an update.
     ran_version: String,
+    /// Findings the person chose to ignore, by id. They stay off the plan until shown again.
+    ignored: BTreeSet<String>,
 }
 
 impl Default for Settings {
@@ -288,6 +290,7 @@ impl Default for Settings {
             update_checked: None,
             update_notified: None,
             ran_version: String::new(),
+            ignored: BTreeSet::new(),
         }
     }
 }
@@ -328,6 +331,11 @@ pub use update_ui::update_in_background;
 pub fn saved_schedule() -> (crate::schedule::Every, u8) {
     let s = load_settings();
     (s.schedule, s.schedule_hour)
+}
+
+/// The findings the person chose to ignore, so a background check-up never announces them.
+pub fn ignored_findings() -> BTreeSet<String> {
+    load_settings().ignored
 }
 
 #[derive(Default)]
@@ -1535,7 +1543,7 @@ impl App {
             ui.label(RichText::new("Bootmend").text_style(theme::title()));
         });
         ui.add_space(S5);
-        let do_first = self.findings.iter().filter(|f| f.level == rules::Level::DoFirst).count();
+        let do_first = self.findings.iter().filter(|f| f.level == rules::Level::DoFirst && !self.settings.ignored.contains(&f.id)).count();
         let here = self.page.place();
         ui.spacing_mut().item_spacing.y = S1;
         // Opened from the menu button, keyboard focus moves to the place on screen.

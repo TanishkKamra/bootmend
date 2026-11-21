@@ -18,7 +18,7 @@ After that, Bootmend offers new versions itself. It installs one only if the dow
 
 ## What it does
 
-- **Overview and Suggestions:** a check of security, stability, speed and hardware, with suggestions sorted by what matters most and the steps to follow. [docs/levels.md](docs/levels.md) explains how each one is ranked.
+- **Overview and Suggestions:** a check of security, stability, speed and hardware, with suggestions sorted by what matters most and the steps to follow. [docs/levels.md](docs/levels.md) explains how each one is ranked. A suggestion you don't need (say, a remote access app you set up yourself) can be ignored; it waits in a folded list at the end of Home and never comes back by itself.
 - **This PC:** device details, an upgrade advisor (for example, a matching memory stick), and, on Windows 10, whether the PC can move to Windows 11.
 - **Storage:** drive health, wear and free space. When a failing drive holds Documents, Desktop or Pictures, Bootmend offers to copy them to a USB drive.
 - **Free up space:** measures caches and leftovers first, then clears only what you tick. Files an app has open are skipped.

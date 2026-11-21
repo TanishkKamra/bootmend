@@ -8,6 +8,7 @@ use crate::fixes::Fix;
 use crate::rules::{plural, Action, Area, Finding, Level};
 use crate::snapshot::Snapshot;
 use eframe::egui::{self, CornerRadius, Margin, RichText, Sense, Stroke, Ui};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// How far through the plan the person is.
@@ -80,6 +81,8 @@ pub fn leftovers_level(findings: &[Finding]) -> Level {
 /// Leftovers smaller than this aren't worth a line on the plan.
 const LEFTOVERS_MIN: u64 = 1 << 30;
 const LEFTOVERS: &str = "leftovers";
+/// The folded list of ignored to-dos, in the set of open rows.
+const IGNORED: &str = "ignored";
 
 /// The leftover files Bootmend clears by itself, as a line on the plan.
 struct Leftovers {
@@ -89,11 +92,20 @@ struct Leftovers {
     ids: Vec<&'static str>,
 }
 
-/// The plan on Home: every to-do and whether it's done, the leftovers line, and the count.
+/// The plan on Home: every to-do and whether it's done, the leftovers line, the count, and the
+/// to-dos the person set aside.
 struct Plan {
     todos: Vec<(Finding, bool)>,
     leftovers: Option<Leftovers>,
     prog: Progress,
+    ignored: Vec<Finding>,
+}
+
+/// Sets the ignored to-dos apart, both lists keeping the plan's order. An ignored id the check
+/// no longer finds is simply left out.
+fn split_ignored(todos: Vec<(Finding, bool)>, ignored: &BTreeSet<String>) -> (Vec<(Finding, bool)>, Vec<Finding>) {
+    let (set_aside, kept): (Vec<_>, Vec<_>) = todos.into_iter().partition(|(f, _)| ignored.contains(&f.id));
+    (kept, set_aside.into_iter().map(|(f, _)| f).collect())
 }
 
 impl App {
@@ -133,8 +145,25 @@ impl App {
         }
         // Stable, so the leftovers line comes last within its level.
         todos.sort_by_key(|(f, _)| f.level);
+        let (todos, ignored) = split_ignored(todos, &self.settings.ignored);
         let prog = progress(todos.iter().map(|(f, d)| (f.level, *d)));
-        Plan { todos, leftovers, prog }
+        Plan { todos, leftovers, prog, ignored }
+    }
+
+    /// Takes a to-do off the plan for good, until the person shows it again.
+    fn ignore(&mut self, f: &Finding) {
+        log!("settings", "ignored {}", f.id);
+        self.settings.ignored.insert(f.id.clone());
+        self.save_settings();
+        self.ui.expanded.remove(&f.id);
+        self.toast("Ignored. You'll find it at the end of Home.", true);
+    }
+
+    fn show_again(&mut self, f: &Finding) {
+        log!("settings", "showing {} again", f.id);
+        self.settings.ignored.remove(&f.id);
+        self.save_settings();
+        self.toast("Back on the plan.", true);
     }
 
     /// Whether the keystone waits above its seat: something that matters is still open.
@@ -188,7 +217,7 @@ impl App {
         }
         self.update_note(ui);
         ui.add_space(S6);
-        self.plan_list(ui, &plan.todos, &safe);
+        self.plan_list(ui, &plan.todos, &plan.ignored, &safe);
         self.schedule_offer(ui);
     }
 
@@ -267,11 +296,12 @@ impl App {
         }
     }
 
-    /// One card holding the whole plan, grouped by level, then what was checked and found fine.
-    fn plan_list(&mut self, ui: &mut Ui, todos: &[(Finding, bool)], safe_ids: &[&'static str]) {
+    /// One card holding the whole plan, grouped by level, then what was checked and found fine,
+    /// then what the person ignored.
+    fn plan_list(&mut self, ui: &mut Ui, todos: &[(Finding, bool)], ignored: &[Finding], safe_ids: &[&'static str]) {
         let p = pal(ui.ctx());
         let fine: Vec<Finding> = self.findings.iter().filter(|f| f.level == Level::AllGood && !f.id.ends_with("-clear")).cloned().collect();
-        if todos.is_empty() && fine.is_empty() {
+        if todos.is_empty() && fine.is_empty() && ignored.is_empty() {
             return;
         }
         egui::Frame::new()
@@ -303,6 +333,7 @@ impl App {
                     if !first {
                         rule(ui);
                     }
+                    first = false;
                     let open = self.ui.expanded.contains("all-good");
                     if group_head(ui, Level::AllGood.name(), fine.len(), Some(open)) {
                         if open {
@@ -327,13 +358,74 @@ impl App {
                         }
                     }
                 }
+                if !ignored.is_empty() {
+                    if !first {
+                        rule(ui);
+                    }
+                    let open = self.ui.expanded.contains(IGNORED);
+                    if group_head(ui, "Ignored", ignored.len(), Some(open)) {
+                        if open {
+                            self.ui.expanded.remove(IGNORED);
+                        } else {
+                            self.ui.expanded.insert(IGNORED.into());
+                        }
+                    }
+                    if open {
+                        for (i, f) in ignored.iter().enumerate() {
+                            if i > 0 {
+                                rule(ui);
+                            }
+                            self.ignored_row(ui, f);
+                        }
+                    }
+                }
             });
+    }
+
+    /// An ignored to-do: what it is, quietly, and the button that puts it back on the plan.
+    fn ignored_row(&mut self, ui: &mut Ui, f: &Finding) {
+        let avail = ui.available_width();
+        let compact = avail < COMPACT;
+        let indent = 20.0 + ui.spacing().item_spacing.x + S4;
+        let text_w = if compact { avail - indent } else { (avail - indent - 140.0).max(160.0) };
+        let (title, summary, h) = row_text(ui, f, text_w);
+        let text = |ui: &mut Ui| {
+            // Muted whatever its level: it's set aside.
+            mark(ui, f.area, Level::NiceToHave, false);
+            ui.add_space(S4);
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(title);
+                if !f.summary.is_empty() {
+                    ui.label(summary);
+                }
+            });
+        };
+        let mut back = false;
+        if compact {
+            ui.add_space(S3);
+            ui.horizontal(text);
+            ui.add_space(S2);
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                back = named(widgets::secondary(ui, "Show again"), &format!("Show again: {}", f.title)).clicked();
+            });
+            ui.add_space(S3);
+        } else {
+            ui.allocate_ui_with_layout(egui::vec2(avail, h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                back = named(widgets::secondary(ui, "Show again"), &format!("Show again: {}", f.title)).clicked();
+                ui.add_space(S4);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), text);
+            });
+        }
+        if back {
+            self.show_again(f);
+        }
     }
 
     /// One to-do: its area's icon (a tick once it's done), what it is, and one button. "Fix it for me"
     /// when one change does it; "Walk me through it" opens the steps in place.
     fn todo_row(&mut self, ui: &mut Ui, f: &Finding, done: bool, safe_ids: &[&'static str]) {
-        let p = pal(ui.ctx());
         let fixes = fixes_of(f);
         let leftovers = f.id == LEFTOVERS;
         let copy = fixes.is_empty() && f.actions.contains(&Action::CopyFiles);
@@ -346,23 +438,12 @@ impl App {
         let compact = avail < COMPACT;
         // The mark, the gap the layout puts after it, and the space before the words.
         let indent = 20.0 + ui.spacing().item_spacing.x + S4;
-        let action_w = 230.0;
+        let action_w = 300.0;
         let text_w = if compact { avail - indent } else { (avail - indent - action_w).max(160.0) };
-        let title = egui::WidgetText::from(RichText::new(&f.title).family(theme::semibold())).into_galley(
-            ui,
-            Some(egui::TextWrapMode::Wrap),
-            text_w,
-            egui::TextStyle::Body,
-        );
-        let summary = egui::WidgetText::from(RichText::new(&f.summary).small().color(p.muted)).into_galley(
-            ui,
-            Some(egui::TextWrapMode::Wrap),
-            text_w,
-            egui::TextStyle::Small,
-        );
-        let h = (title.size().y + 2.0 + summary.size().y).max(32.0) + 2.0 * S3;
+        let (title, summary, h) = row_text(ui, f, text_w);
         let mut toggle = false;
         let mut clear = false;
+        let mut ignore = false;
         let chevron = more && (one_fix || done);
         let text = |ui: &mut Ui| {
             mark(ui, f.area, f.level, done);
@@ -386,6 +467,10 @@ impl App {
                     ui.add_space(S1);
                     toggle |= widgets::chevron(ui, open).clicked();
                 }
+                if !done {
+                    ui.add_space(S1);
+                    ignore = ignore_button(ui, &f.title);
+                }
             });
             ui.add_space(S3);
         } else {
@@ -397,6 +482,10 @@ impl App {
                 let (t, c) = self.todo_action(ui, f, &fixes, done, open, true);
                 toggle |= t;
                 clear = c;
+                if !done {
+                    ui.add_space(S1);
+                    ignore = ignore_button(ui, &f.title);
+                }
                 ui.add_space(S4);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), text);
             });
@@ -410,6 +499,10 @@ impl App {
         }
         if clear {
             self.open_fixes(vec![run::Item::clean(safe_ids.to_vec(), f.title.clone())], Page::Home);
+        }
+        if ignore {
+            self.ignore(f);
+            return;
         }
         if open && more {
             ui.horizontal(|ui| {
@@ -476,6 +569,31 @@ impl App {
         }
         (toggle, clear)
     }
+}
+
+/// A to-do's title and summary laid out `w` wide, and the height of the row around them.
+fn row_text(ui: &Ui, f: &Finding, w: f32) -> (Arc<egui::Galley>, Arc<egui::Galley>, f32) {
+    let wrap = Some(egui::TextWrapMode::Wrap);
+    let title = egui::WidgetText::from(RichText::new(&f.title).family(theme::semibold())).into_galley(ui, wrap, w, egui::TextStyle::Body);
+    let summary = egui::WidgetText::from(RichText::new(&f.summary).small().color(pal(ui.ctx()).muted)).into_galley(ui, wrap, w, egui::TextStyle::Small);
+    let h = (title.size().y + 2.0 + summary.size().y).max(32.0) + 2.0 * S3;
+    (title, summary, h)
+}
+
+/// The quiet button that takes a to-do off the plan, muted until the pointer is on it.
+fn ignore_button(ui: &mut Ui, title: &str) -> bool {
+    ui.scope(|ui| {
+        ui.visuals_mut().widgets.inactive.fg_stroke.color = pal(ui.ctx()).muted;
+        let r = widgets::subtle_text(ui, "Ignore").on_hover_text("Take it off the plan. It waits at the end of Home.");
+        named(r, &format!("Ignore: {title}")).clicked()
+    })
+    .inner
+}
+
+/// A button that every row repeats, named with its to-do for a screen reader.
+fn named(r: egui::Response, name: &str) -> egui::Response {
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    r
 }
 
 /// The fixes a to-do offers.
@@ -555,6 +673,21 @@ mod tests {
         assert_eq!(got.total(), 5);
         assert!(got.raised());
         assert!(!p(0, 0, 3, 1).raised(), "improvements alone don't hold the keystone up");
+    }
+
+    fn todo(id: &str, level: Level) -> (Finding, bool) {
+        (Finding::new(id, Area::Security, level, id), false)
+    }
+
+    #[test]
+    fn ignored_to_dos_move_out_of_the_plan() {
+        let todos = vec![todo("remote", Level::WorthDoing), todo("crashes", Level::DoFirst), todo("camera", Level::WorthDoing)];
+        let ignored = BTreeSet::from(["remote".to_string(), "crashes".to_string(), "gone-since".to_string()]);
+        let (kept, set_aside) = split_ignored(todos, &ignored);
+        assert_eq!(kept.iter().map(|(f, _)| f.id.as_str()).collect::<Vec<_>>(), ["camera"]);
+        // In the plan's order, and an id the check no longer finds is simply left out.
+        assert_eq!(set_aside.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["remote", "crashes"]);
+        assert_eq!(progress(kept.iter().map(|(f, d)| (f.level, *d))), p(0, 1, 0, 0));
     }
 
     #[test]

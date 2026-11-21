@@ -11,7 +11,10 @@ use eframe::egui::{self, RichText, Stroke, Ui};
 impl App {
     /// The offer waits until nothing is left that Bootmend could fix, or the person has already used a fix.
     fn schedule_offer_due(&self) -> bool {
-        let fixable = self.findings.iter().any(|f| f.level != Level::AllGood && f.actions.iter().any(|a| matches!(a, Action::Fix(_))));
+        let fixable = self
+            .findings
+            .iter()
+            .any(|f| f.level != Level::AllGood && !self.settings.ignored.contains(&f.id) && f.actions.iter().any(|a| matches!(a, Action::Fix(_))));
         !self.settings.schedule_asked && self.settings.schedule == Every::Off && (!fixable || !self.history.is_empty())
     }
 
