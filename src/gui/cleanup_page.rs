@@ -450,3 +450,23 @@ fn row(
     });
     changed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cleanup::How;
+
+    fn item(admin: bool, user_only: bool) -> Item {
+        let how = How::Files { roots: vec![], only: None };
+        Item { id: "x", title: "x", why: "", tradeoff: None, group: Group::Safe, admin, user_only, close_first: None, how, bytes: Some(1), files: 1 }
+    }
+
+    #[test]
+    fn each_window_clears_only_what_it_safely_can() {
+        assert_eq!(blocked(&item(false, true), true), Some(cleanup::NOT_AS_ADMIN), "the administrator window leaves user-only items alone");
+        assert_eq!(blocked(&item(false, true), false), None);
+        assert!(blocked(&item(true, false), false).is_some(), "a normal window can't clear what needs administrator rights");
+        assert_eq!(blocked(&item(true, false), true), None);
+        assert_eq!(blocked(&item(false, false), true), None);
+    }
+}
