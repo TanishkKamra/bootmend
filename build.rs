@@ -16,6 +16,11 @@ fn main() {
     // started in, where a downloaded DLL of the same name could sit beside it.
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+        // That rule doesn't reach the DLLs those DLLs need: opengl32.dll needs glu32.dll, which
+        // Windows would look for beside the exe first. Loading opengl32.dll only when asked lets
+        // main load it from System32, with everything it needs, before anything else does.
+        println!("cargo:rustc-link-arg-bins=/DELAYLOAD:opengl32.dll");
+        println!("cargo:rustc-link-arg-bins=delayimp.lib");
     }
     println!("cargo:rerun-if-changed=assets/bootmend.manifest");
     println!("cargo:rerun-if-changed=assets/bootmend.ico");

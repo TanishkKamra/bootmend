@@ -234,6 +234,16 @@ pub fn guard_redirections() -> windows::core::Result<()> {
     unsafe { SetProcessMitigationPolicy(ProcessRedirectionTrustPolicy, &enforce as *const u32 as *const core::ffi::c_void, 4) }
 }
 
+/// Loads opengl32.dll, and the DLLs it needs, from System32 only. bootmend.exe loads it late (see
+/// build.rs) so this runs first; otherwise a glu32.dll beside the exe, such as one downloaded to
+/// the same folder, would be loaded with it. Also stops glutin loading the DLL its variable names.
+pub fn load_opengl() -> windows::core::Result<()> {
+    use windows::Win32::System::LibraryLoader::{LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
+    std::env::remove_var("GLUTIN_WGL_OPENGL_DLL");
+    // SAFETY: a constant name. The DLL stays loaded for as long as Bootmend runs.
+    unsafe { LoadLibraryExW(windows::core::w!("opengl32.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.map(|_| ())
+}
+
 /// Removes the administrator window's temporary folder as Bootmend closes.
 pub fn remove_tmp() {
     if let Some(Ok(d)) = ADMIN_TMP.get() {
@@ -317,6 +327,24 @@ mod tests {
         assert_eq!(modules.len(), 2, "{modules:?}");
         assert!(modules.iter().all(|m| m.ends_with(r"\Modules") && !m.contains("Documents")), "{modules:?}");
         assert!(get("PATH").split(';').all(|d| d.to_lowercase().starts_with(&windows_dir().to_string_lossy().to_lowercase())), "{}", get("PATH"));
+    }
+
+    #[test]
+    fn opengl_and_what_it_needs_come_from_system32() {
+        use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+        std::env::set_var("GLUTIN_WGL_OPENGL_DLL", r"C:\elsewhere\opengl32.dll");
+        load_opengl().unwrap();
+        assert!(std::env::var_os("GLUTIN_WGL_OPENGL_DLL").is_none(), "glutin would load the DLL the variable names");
+        let system32 = windows_dir().join("System32").to_string_lossy().to_lowercase();
+        for dll in [windows::core::w!("opengl32.dll"), windows::core::w!("glu32.dll")] {
+            // SAFETY: a constant name; the handle isn't kept.
+            let m = unsafe { GetModuleHandleW(dll) }.expect("loaded");
+            let mut buf = [0u16; 512];
+            // SAFETY: `buf` is a writable buffer of the length given.
+            let n = unsafe { GetModuleFileNameW(Some(m), &mut buf) } as usize;
+            let path = String::from_utf16_lossy(&buf[..n]).to_lowercase();
+            assert!(path.starts_with(&format!(r"{system32}\")), "{path}");
+        }
     }
 
     /// Changes how this test process follows junctions, so it runs on its own.
