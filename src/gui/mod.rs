@@ -2,6 +2,7 @@
 
 mod cleanup_page;
 mod copy_dialog;
+pub mod crash_summary;
 mod home;
 mod live_page;
 mod mark;
@@ -375,6 +376,9 @@ enum Shot {
     Details,
     /// The copy dialog choosing a drive (0), copying (1) and done (2).
     Copy(u8),
+    /// The Crashes page after reading the crash files: on its own (0), with what they say (1),
+    /// and with how to fix the crashes (2).
+    CrashFiles(u8),
 }
 
 /// Where the logo was last drawn, and its flight from there when it changes hands between Home
@@ -490,6 +494,10 @@ pub struct App {
     motion_read: Option<Instant>,
     /// The early-version notice is open. It opens at each launch until "Don't show again".
     early_notice: bool,
+    /// What reading the crash files found, shown once when it finishes.
+    crash_summary: Option<crash_summary::Summary>,
+    /// How to stop the crashes, open when the person asks.
+    crash_fix: Option<crash_summary::Plan>,
     /// A newer Bootmend the update check found.
     update: Option<crate::update::Version>,
     /// An update check finished this session, so Settings can say this is the newest version.
@@ -558,6 +566,8 @@ impl App {
             accent_read: None,
             motion_read: None,
             early_notice: false,
+            crash_summary: None,
+            crash_fix: None,
             update: None,
             update_known: false,
             update_hidden: false,
@@ -576,6 +586,8 @@ impl App {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
             queue.extend([Shot::Dialog, Shot::Early, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
+            // Last, because they swap in sample crash files for the shots that follow.
+            queue.extend([Shot::CrashFiles(0), Shot::CrashFiles(1), Shot::CrashFiles(2)]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         } else if resume {
             app.resume();
@@ -1211,16 +1223,23 @@ impl App {
                 self.spawn(ctx, || Job::Upgrades(collect::winget::check().map_err(|e| format!("{e:#}"))));
             }
             Pending::AnalyzeDumps => {
+                let Some(cdb) = collect::dumps::cdb_path() else {
+                    self.toast("Microsoft's debugger isn't installed.", false);
+                    return;
+                };
+                // Files already read stay read, so trying again only reads the ones that failed.
                 let files: Vec<String> = self
                     .snap
                     .as_ref()
-                    .map(|s| crate::util::J::a(&s.health, "minidumps").into_iter().filter_map(|d| crate::util::J::s(d, "Path")).collect())
+                    .map(|s| {
+                        let listed = crate::util::J::a(&s.health, "minidumps").into_iter().filter_map(|d| crate::util::J::s(d, "Path"));
+                        listed.take(10).filter(|f| !s.dumps.iter().any(|d| &d.file == f)).collect()
+                    })
                     .unwrap_or_default();
                 self.busy.insert("dumps".into());
                 self.spawn(ctx, move || {
-                    let Some(cdb) = collect::dumps::cdb_path() else { return Job::Dumps(vec![], vec!["Microsoft's debugger isn't installed.".into()]) };
                     let (mut ok, mut errs) = (vec![], vec![]);
-                    for f in files.iter().take(10) {
+                    for f in &files {
                         match collect::dumps::analyze(&cdb, std::path::Path::new(f)) {
                             Ok(a) => ok.push(a),
                             Err(e) => errs.push(format!("{e:#}")),
@@ -1426,14 +1445,16 @@ impl App {
                 Job::Dumps(found, errs) => {
                     log!("action", "read {}, {} couldn't be read", rules::plural(found.len(), "crash file", "crash files"), errs.len());
                     self.busy.remove("dumps");
-                    let n = found.len();
-                    if !found.is_empty() {
-                        self.update_snapshot(|s| s.dumps = found);
-                    }
-                    if errs.is_empty() {
-                        self.toast(format!("Read {}.", rules::plural(n, "crash file", "crash files")), true);
-                    } else {
-                        self.toast(format!("Read {}. {}", rules::plural(n, "crash file", "crash files"), errs.join(" ")), n > 0);
+                    let unread = errs.len();
+                    self.update_snapshot(|s| {
+                        s.dumps.extend(found);
+                        // Newest first, as the dates sort ("2026-11-20 21:01").
+                        s.dumps.sort_by(|a, b| b.date.cmp(&a.date));
+                        s.dumps_unread = unread;
+                    });
+                    // The popup says how it went wherever the person is, so no toast as well.
+                    if let Some(s) = self.snap.as_ref().filter(|s| !s.dumps.is_empty() || unread > 0) {
+                        self.crash_summary = Some(crash_summary::summarize(&s.dumps, unread));
                     }
                 }
                 Job::Saved(r) => {
@@ -1876,6 +1897,7 @@ impl App {
                 Some(Shot::Fixing) => "fixing".to_string(),
                 Some(Shot::Details) => "fixing-details".to_string(),
                 Some(Shot::Copy(n)) => format!("copy-{}", ["pick", "copying", "done"][usize::from(*n).min(2)]),
+                Some(Shot::CrashFiles(n)) => format!("crash-files-{}", ["read", "said", "fix"][usize::from(*n).min(2)]),
                 _ => "welcome".to_string(),
             };
             let file = m.dir.join(if m.part == 0 { format!("{name}.png") } else { format!("{name}-{}.png", m.part + 1) });
@@ -1893,6 +1915,10 @@ impl App {
                 }
                 if matches!(m.queue.first(), Some(Shot::Copy(_))) {
                     self.copy = None;
+                }
+                if matches!(m.queue.first(), Some(Shot::CrashFiles(_))) {
+                    self.crash_summary = None;
+                    self.crash_fix = None;
                 }
                 if matches!(m.queue.first(), Some(Shot::Queue | Shot::Fixing | Shot::Details)) {
                     self.run = None;
@@ -1916,9 +1942,21 @@ impl App {
                 let page = match target {
                     Shot::View(p) => Some(p),
                     Shot::Menu | Shot::Early | Shot::Queue | Shot::Fixing | Shot::Details | Shot::Copy(_) => Some(Page::Home),
-                    Shot::Dialog => Some(Page::Crashes),
+                    Shot::Dialog | Shot::CrashFiles(_) => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
+                if let (Shot::CrashFiles(n), Some(s)) = (target, &self.snap) {
+                    if s.dumps.is_empty() {
+                        self.snap = Some(Arc::new(crash_summary::sample(s)));
+                    }
+                    let s = self.snap.clone();
+                    if n == 1 && self.crash_summary.is_none() {
+                        self.crash_summary = s.as_ref().map(|s| crash_summary::summarize(&s.dumps, s.dumps_unread));
+                    }
+                    if n == 2 && self.crash_fix.is_none() {
+                        self.crash_fix = s.as_ref().and_then(|s| crash_summary::plan(&s.dumps));
+                    }
+                }
                 if self.run.is_none() {
                     let stage = if matches!(target, Shot::Queue) { run::Stage::Choose } else { run::Stage::Running };
                     if matches!(target, Shot::Queue | Shot::Fixing | Shot::Details) {
@@ -2078,6 +2116,8 @@ impl eframe::App for App {
         }
         self.auto_update_check(&ctx);
         self.early_notice(&ctx);
+        self.crash_summary_dialog(&ctx);
+        self.crash_fix_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.copy_dialog(&ctx);
         self.toasts_ui(&ctx);

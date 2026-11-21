@@ -25,6 +25,8 @@ pub struct Snapshot {
     pub drives: Vec<DriveHealth>,
     pub extensions: Vec<Extension>,
     pub dumps: Vec<DumpAnalysis>,
+    /// Crash files the last read couldn't read.
+    pub dumps_unread: usize,
     /// `None` until the person asks Bootmend to check for app updates (it uses the internet).
     pub upgrades: Option<Vec<AppUpgrade>>,
     pub scans: Vec<ScanResult>,
@@ -90,6 +92,13 @@ pub struct DumpAnalysis {
     pub process: Option<String>,
     pub bucket: Option<String>,
     pub note: Option<String>,
+}
+
+impl DumpAnalysis {
+    /// The driver file the crash points at, such as `nvlddmkm.sys`.
+    pub fn driver_file(&self) -> Option<String> {
+        self.image.clone().or_else(|| self.module.as_ref().map(|m| format!("{m}.sys")))
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
