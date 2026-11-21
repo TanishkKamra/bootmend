@@ -83,6 +83,17 @@ cargo clippy --all-targets
 
 Tests that change the PC (cleaning, Task Scheduler, notifications, the live connection test) are marked `#[ignore]`. Run them on purpose with `cargo test -- --ignored`.
 
+## Release
+
+Releases are built and signed on GitHub, never on a personal PC.
+
+1. Raise `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, and merge to `main`.
+2. Tag that commit and push the tag, for example `git tag v0.1.1` and `git push origin v0.1.1`.
+3. The Release workflow tests, builds and signs `bootmend.exe`, then opens a draft release with the exe, its signature and its SHA-256.
+4. Add the notes and publish the draft. Installed copies offer the update at their next daily check.
+
+The signing key lives only in the `BOOTMEND_SIGNING_KEY` Actions secret, and its public half is `PUBLIC_KEY` in `src/update.rs`. The signer refuses a key that doesn't match. Running the workflow by hand is a rehearsal: it signs, but makes no release.
+
 ## Design
 
 See [DESIGN.md](DESIGN.md) for the palette, type, spacing, components and the reasoning behind them.

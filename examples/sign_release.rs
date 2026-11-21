@@ -43,12 +43,28 @@ fn sign(exe: &str, version: &str) -> Result<(), String> {
         return Err(format!("{version} isn't a version like 0.1.1"));
     }
     let secret = std::env::var("BOOTMEND_SIGNING_KEY").map_err(|_| "BOOTMEND_SIGNING_KEY isn't set".to_string())?;
-    let sk = minisign::SecretKeyBox::from_string(&secret).and_then(|b| b.into_secret_key(None)).map_err(|e| format!("the signing key: {e}"))?;
+    let sk = minisign::SecretKeyBox::from_string(&secret).and_then(|b| b.into_unencrypted_secret_key()).map_err(|e| format!("the signing key: {e}"))?;
     let data = std::fs::File::open(exe).map_err(|e| format!("{exe}: {e}"))?;
     let comment = format!("bootmend {version}");
-    let sig = minisign::sign(None, &sk, data, Some(&comment), Some("Bootmend release signature")).map_err(|e| e.to_string())?;
+    let sig = minisign::sign(None, &sk, data, Some(&comment), Some("Bootmend release signature")).map_err(|e| e.to_string())?.into_string();
+    // Check it the way installed copies will, with the key built into the app, so a wrong secret
+    // fails here instead of in everyone's update.
+    accepted(exe, &sig, &comment)?;
     let out = format!("{exe}.minisig");
-    std::fs::write(&out, sig.into_string()).map_err(|e| format!("{out}: {e}"))?;
+    std::fs::write(&out, sig).map_err(|e| format!("{out}: {e}"))?;
     println!("Signed {exe} as {comment}");
+    Ok(())
+}
+
+fn accepted(exe: &str, sig: &str, comment: &str) -> Result<(), String> {
+    let src = include_str!("../src/update.rs");
+    let key = src.split("const PUBLIC_KEY: &str = \"").nth(1).and_then(|s| s.split('"').next()).ok_or("PUBLIC_KEY isn't in src/update.rs")?;
+    let key = minisign_verify::PublicKey::from_base64(key).map_err(|e| format!("PUBLIC_KEY in src/update.rs: {e}"))?;
+    let sig = minisign_verify::Signature::decode(sig).map_err(|e| e.to_string())?;
+    let bin = std::fs::read(exe).map_err(|e| format!("{exe}: {e}"))?;
+    key.verify(&bin, &sig, false).map_err(|_| "the signing key doesn't match PUBLIC_KEY in src/update.rs, so installed copies would refuse this release")?;
+    if sig.trusted_comment() != comment {
+        return Err(format!("the signature says {:?}, not {comment:?}", sig.trusted_comment()));
+    }
     Ok(())
 }
