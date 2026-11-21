@@ -64,6 +64,7 @@ pub enum Kind {
     Network,
     Storage,
     Defender,
+    Sandbox,
     AntiCheat,
     Usb,
     Audio,
@@ -82,6 +83,7 @@ pub fn driver_info(module: &str) -> Option<(Kind, &'static str)> {
         "tcpip" | "ndis" | "netio" => (Network, "Windows networking (often the network adapter driver)"),
         "storport" | "stornvme" | "storahci" | "iastorac" | "iastora" | "iastorvd" => (Storage, "Storage driver"),
         "wdfilter" | "wdboot" => (Defender, "Microsoft Defender"),
+        "bfs" => (Sandbox, "Windows app sandbox (part of Windows that Store apps use)"),
         "bedaisy" | "easyanticheat" | "vgk" | "faceit" => (AntiCheat, "Game anti-cheat driver"),
         "usbxhci" | "ucx01000" | "usbhub3" => (Usb, "USB driver"),
         "hdaudbus" | "portcls" | "ks" => (Audio, "Audio driver"),
@@ -166,6 +168,16 @@ mod tests {
         assert_eq!(a.note.as_deref(), Some("NVIDIA graphics driver"));
         let k = parse_analyze("BUGCHECK_CODE:  50\n\nMODULE_NAME: nt\n\nIMAGE_NAME:  ntkrnlmp.exe\n");
         assert!(k.note.is_some_and(|n| n.starts_with("Windows core")), "kernel crashes need a note too");
+    }
+
+    #[test]
+    fn known_drivers_have_plain_names() {
+        assert_eq!(driver_info("nvlddmkm.sys"), Some((Kind::Graphics, "NVIDIA graphics driver")));
+        // The Brokering File System, which crash files name by its file or its module.
+        for name in ["bfs.sys", "BFS.SYS", "bfs"] {
+            assert_eq!(driver_info(name), Some((Kind::Sandbox, "Windows app sandbox (part of Windows that Store apps use)")), "{name}");
+        }
+        assert_eq!(driver_info("xyzdrv.sys"), None);
     }
 
     #[test]

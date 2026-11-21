@@ -249,6 +249,10 @@ fn driver_steps(info: Option<(Kind, &str)>, file: &str) -> Vec<Step> {
             windows_update("Install Windows updates. They keep Microsoft Defender up to date."),
             step("If you have another antivirus program as well, update it or uninstall it."),
         ],
+        Some((Kind::Sandbox, _)) => vec![
+            windows_update("Install Windows updates. Microsoft fixes problems in its own files through them."),
+            step("If the crashes began after you installed a program, uninstall it and see if they stop."),
+        ],
         Some((Kind::Core, _)) | None => vec![
             step(format!("Search the web for {file} to find which program or device it belongs to.")),
             step("Update that program, or the device's driver from its maker's website. If you don't need the program, uninstall it."),
@@ -472,10 +476,9 @@ mod tests {
         let s = summarize(&read, 1);
         assert_eq!(s.title, "What the crash files say");
         assert_eq!(s.lead, "Bootmend read 4 of the 5 crash files. One couldn't be read. It may be damaged.");
-        // Known drivers come before one Bootmend can't name when they crashed as often.
         assert_eq!(
             s.groups,
-            [group("Windows core", "ntkrnlmp.exe", 2), group("Game anti-cheat driver", "vgk.sys", 1), group("A driver Bootmend doesn't know", "bfs.sys", 1)]
+            [group("Windows core", "ntkrnlmp.exe", 2), group("Windows app sandbox", "bfs.sys", 1), group("Game anti-cheat driver", "vgk.sys", 1)]
         );
         assert_eq!(s.more, 0);
         assert_eq!(
@@ -490,6 +493,12 @@ mod tests {
         assert_eq!(s.lead, "Bootmend read 4 crash files.");
         assert_eq!(s.groups[0], group("NVIDIA graphics driver", "nvlddmkm.sys", 3));
         assert_eq!(s.verdict.as_deref(), Some("nvlddmkm.sys was in 3 of the 4 crashes, so it's the likeliest cause."));
+    }
+
+    #[test]
+    fn known_drivers_come_before_one_bootmend_cant_name_when_they_crashed_as_often() {
+        let s = summarize(&[dump("xyzdrv.sys"), dump("vgk.sys")], 0);
+        assert_eq!(s.groups, [group("Game anti-cheat driver", "vgk.sys", 1), group("A driver Bootmend doesn't know", "xyzdrv.sys", 1)]);
     }
 
     #[test]
@@ -599,15 +608,23 @@ mod tests {
 
     #[test]
     fn a_driver_bootmend_doesnt_know_is_looked_up() {
+        let p = plan(&[dump("xyzdrv.sys"), dump("xyzdrv.sys")]).unwrap();
+        assert_eq!(p.cause, "xyzdrv.sys, a driver Bootmend doesn't know");
+        assert_eq!(texts(&p)[0], "Search the web for xyzdrv.sys to find which program or device it belongs to.");
+        assert!(opens(&p, "ms-settings:windowsupdate"));
+    }
+
+    #[test]
+    fn the_windows_app_sandbox_is_mended_by_windows_updates() {
         let p = plan(&[dump("bfs.sys"), dump("bfs.sys")]).unwrap();
-        assert_eq!(p.cause, "bfs.sys, a driver Bootmend doesn't know");
-        assert_eq!(texts(&p)[0], "Search the web for bfs.sys to find which program or device it belongs to.");
+        assert_eq!(p.cause, "Windows app sandbox (bfs.sys)");
+        assert_eq!(texts(&p)[0], "Install Windows updates. Microsoft fixes problems in its own files through them.");
         assert!(opens(&p, "ms-settings:windowsupdate"));
     }
 
     #[test]
     fn every_kind_of_driver_has_steps() {
-        for f in ["nvlddmkm.sys", "tcpip.sys", "stornvme.sys", "wdfilter.sys", "vgk.sys", "usbxhci.sys", "portcls.sys", "bfs.sys"] {
+        for f in ["nvlddmkm.sys", "tcpip.sys", "stornvme.sys", "wdfilter.sys", "bfs.sys", "vgk.sys", "usbxhci.sys", "portcls.sys", "xyzdrv.sys"] {
             let p = plan(&[dump(f), dump(f)]).unwrap();
             assert!((2..=4).contains(&p.steps.len()), "{f}: {:?}", texts(&p));
             assert!(p.cause.contains(f), "{f}: {}", p.cause);
