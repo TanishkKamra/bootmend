@@ -796,7 +796,12 @@ impl App {
                             if blocked { r.on_hover_text("Changing this one needs administrator rights. Restart Bootmend as administrator first.") } else { r };
                         clicked = r.clicked();
                     }
-                    ui.label(if on { "On" } else { "Off" });
+                    if busy && self.busy.contains("fix:restore") {
+                        // Saving the restore point is most of the wait, so the row says so.
+                        ui.label(RichText::new("Saving a restore point first, up to a minute").color(p.muted));
+                    } else {
+                        ui.label(if on { "On" } else { "Off" });
+                    }
                     ui.add_space(S3);
                     two_lines(ui, &shown, &s(it, "Command"), &format!("{}\n{}", s(it, "Scope"), s(it, "Command")));
                     clicked
