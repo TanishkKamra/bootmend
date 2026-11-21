@@ -395,8 +395,6 @@ fn row(
 ) -> bool {
     let p = pal(ui.ctx());
     let mut changed = false;
-    // A square, larger box: the theme's rounded corners otherwise make it look like a radio button.
-    const BOX: f32 = 18.0;
     // In a narrow card the size moves under the name, so the two never overlap.
     let narrow = ui.available_width() < WRAP;
     let (text, color) = match (done, item.bytes) {
@@ -408,18 +406,12 @@ fn row(
     };
     let size = RichText::new(text).color(color).family(theme::semibold());
     ui.horizontal(|ui| {
-        ui.spacing_mut().icon_width = BOX;
-        ui.spacing_mut().icon_width_inner = 10.0;
-        let ws = &mut ui.visuals_mut().widgets;
-        for w in [&mut ws.inactive, &mut ws.hovered, &mut ws.active, &mut ws.noninteractive] {
-            w.corner_radius = egui::CornerRadius::same(theme::CONTROL_RADIUS);
-        }
-        changed = ui.add_enabled(enabled, egui::Checkbox::new(on, RichText::new(item.title).family(theme::semibold()))).changed();
+        changed = widgets::checkbox(ui, on, enabled, RichText::new(item.title).family(theme::semibold())).changed();
         if !narrow {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(size.clone()));
         }
     });
-    let indent = BOX + ui.spacing().icon_spacing;
+    let indent = widgets::CHECKBOX + S2;
     ui.horizontal(|ui| {
         ui.add_space(indent);
         ui.vertical(|ui| {
