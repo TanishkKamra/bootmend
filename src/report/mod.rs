@@ -29,6 +29,19 @@ fn edge() -> Option<PathBuf> {
     crate::sys::program_files().into_iter().map(|b| b.join(r"Microsoft\Edge\Application\msedge.exe")).find(|p| p.is_file())
 }
 
+/// A file:/// link to `path` that Edge opens. Anything a link treats specially, such as a space,
+/// "#" or "%" in a folder name, is written as %XX, so it stays part of the name.
+fn file_url(path: &Path) -> String {
+    let mut url = String::from("file:///");
+    for b in path.to_string_lossy().replace('\\', "/").bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => url.push(b as char),
+            _ => url.push_str(&format!("%{b:02X}")),
+        }
+    }
+    url
+}
+
 /// Render the HTML report to PDF with Microsoft Edge in headless mode.
 pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
     let edge = edge().ok_or_else(|| {
@@ -40,7 +53,7 @@ pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
     let html = tmp.join(format!("report-{}.html", s.id));
     save_html(s, hide_personal, &html).inspect_err(|e| log!("report", "PDF report failed: {e:#}"))?;
     let profile = tmp.join("edge-print-profile");
-    let url = format!("file:///{}", html.to_string_lossy().replace('\\', "/"));
+    let url = file_url(&html);
     let r = run_hidden(
         &edge.to_string_lossy(),
         &[
@@ -75,4 +88,15 @@ pub fn write_pdf(s: &Snapshot, hide_personal: bool, out: &Path) -> Result<()> {
 
 pub fn default_name(s: &Snapshot, ext: &str) -> String {
     format!("bootmend-{}-{}.{ext}", s.host.replace(|c: char| !c.is_ascii_alphanumeric(), "-"), s.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_link_keeps_spaces_hashes_and_percent_signs_as_part_of_the_name() {
+        let url = file_url(Path::new("C:\\Users\\Jo #1\\100% done\\r\u{e9}port.html"));
+        assert_eq!(url, "file:///C:/Users/Jo%20%231/100%25%20done/r%C3%A9port.html");
+    }
 }

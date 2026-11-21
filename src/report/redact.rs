@@ -83,6 +83,10 @@ pub fn redact(s: &Snapshot) -> Snapshot {
             }
         }
     }
+    // So are the other administrators' names. The list keeps its length, so the advice about them still shows.
+    if let Some(Value::Array(names)) = v.pointer_mut("/security/dailyAccount/OtherAdmins") {
+        names.iter_mut().for_each(|n| *n = Value::String(HIDDEN.into()));
+    }
     let mut out: Snapshot = serde_json::from_value(v).unwrap_or_default();
     out.host = "This PC".into();
     // Browser profile names are often a person's name.
@@ -111,6 +115,14 @@ mod tests {
         assert_eq!(r.host, "This PC");
         assert_eq!(r.extensions[0].profile, HIDDEN);
         assert_eq!(r.extensions[0].name, "uBlock");
+    }
+
+    #[test]
+    fn other_administrators_names_are_hidden_but_still_counted() {
+        let s = Snapshot { security: json!({"dailyAccount": {"Name": "PC\\sam", "Admin": true, "OtherAdmins": ["Helper", "Grandad"]}}), ..Default::default() };
+        let r = redact(&s);
+        assert_eq!(r.security["dailyAccount"]["OtherAdmins"], json!([HIDDEN, HIDDEN]));
+        assert_eq!(r.security["dailyAccount"]["Admin"], true);
     }
 
     #[test]
