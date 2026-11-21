@@ -94,7 +94,7 @@ Releases are built and signed on GitHub, never on a personal PC.
 3. The Release workflow tests, builds and signs `bootmend.exe`, then opens a draft release with the exe, its signature and its SHA-256.
 4. Add the notes and publish the draft. Installed copies offer the update at their next daily check.
 
-The signing key lives only in the `BOOTMEND_SIGNING_KEY` Actions secret, and its public half is `PUBLIC_KEY` in `src/update.rs`. The signer refuses a key that doesn't match. Running the workflow by hand is a rehearsal: it signs, but makes no release.
+The build runs on Windows and never sees the signing key. A separate Linux job signs the exe with Ubuntu's `minisign`, then checks the signature against `PUBLIC_KEY` in `src/update.rs` before drafting the release. The secret key is `BOOTMEND_SIGNING_KEY` in the `release` environment, which only `v*` tags can use. Running the workflow by hand is a rehearsal: it builds and signs with a throwaway key, and makes no release.
 
 ## Design
 

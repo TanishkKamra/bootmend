@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The public half of Bootmend's release signing key. The secret half lives only in the release
-/// workflow's encrypted secrets.
+/// workflow's "release" environment, which only version tags can use.
 const PUBLIC_KEY: &str = "RWTydMpxLepe5WOTSewxS1IiOxN889ygXhIEBVyedug0Jc3thANAWypQ";
 const REPO: &str = env!("CARGO_PKG_REPOSITORY");
 const EXE: &str = "bootmend.exe";

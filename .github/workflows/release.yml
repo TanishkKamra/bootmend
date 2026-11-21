@@ -1,9 +1,16 @@
 name: Release
 
-# Pushing a version tag such as v0.1.1 tests, builds and signs bootmend.exe and opens a draft
-# release with it. Installed copies only see a release once the draft is published by hand.
-# Running the workflow by hand does everything except the release, as a rehearsal, and keeps the
-# signed files as a workflow artifact for a week.
+# Pushing a version tag such as v0.1.1 tests and builds bootmend.exe on Windows, signs it on a
+# fresh Linux runner, and opens a draft release with it. Installed copies only see a release once
+# the draft is published by hand.
+#
+# The build runs the project's code and its dependencies, so it never sees the signing key. Only
+# the signing job does, through the "release" environment, which only v* tags may use. The
+# signing job runs nothing from the repository: Ubuntu's own minisign signs the exe.
+#
+# Running the workflow by hand is a rehearsal of all of it except the release. The signing job
+# then uses the "rehearsal" environment, which holds no key, and signs with a throwaway key the
+# build made for that run. The files are kept as a workflow artifact for a week.
 on:
   push:
     tags: ["v*"]
@@ -16,16 +23,16 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-defaults:
-  run:
-    shell: pwsh
-
 jobs:
-  release:
+  build:
     runs-on: windows-2025
     timeout-minutes: 45
-    permissions:
-      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha256: ${{ steps.sum.outputs.sha256 }}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,6 +53,7 @@ jobs:
         run: |
           $v = (cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json).packages[0].version
           if ($LASTEXITCODE -or -not $v) { throw "Couldn't read the version from Cargo.toml." }
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "Version $v isn't three plain numbers." }
           if ($env:EVENT -eq 'push' -and $env:TAG -ne "v$v") { throw "The tag $env:TAG doesn't match version $v in Cargo.toml." }
           "version=$v" >> $env:GITHUB_OUTPUT
 
@@ -61,31 +69,130 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
-      - name: Build the signer
-        run: cargo build --release --locked --example sign_release
-
-      # The only step that sees the key, and it runs nothing but the signer built above. The
-      # signer refuses a key that doesn't match PUBLIC_KEY in src/update.rs.
-      - name: Sign
-        env:
-          BOOTMEND_SIGNING_KEY: ${{ secrets.BOOTMEND_SIGNING_KEY }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: target/release/examples/sign_release.exe sign target/release/bootmend.exe $env:VERSION
-
       - name: Checksum
         id: sum
         run: |
           $h = (Get-FileHash target/release/bootmend.exe -Algorithm SHA256).Hash.ToLower()
           "sha256=$h" >> $env:GITHUB_OUTPUT
-          "SHA-256 of bootmend.exe: ``$h``" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Keep the unsigned files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned
+          path: |
+            target/release/bootmend.exe
+            THIRD-PARTY-NOTICES.txt
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Make a throwaway key for the rehearsal
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          New-Item -ItemType Directory rehearsal-key | Out-Null
+          $pk = cargo run --release --locked --example sign_release -- new-key rehearsal-key/throwaway.key
+          if ($LASTEXITCODE -or -not $pk) { throw "Couldn't make the throwaway key." }
+          Set-Content -NoNewline rehearsal-key/throwaway.pub $pk
+
+      - name: Hand the throwaway key to the signing job
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rehearsal-key
+          path: rehearsal-key/
+          retention-days: 1
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: ${{ github.event_name == 'push' && 'release' || 'rehearsal' }}
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+    steps:
+      - name: Install minisign
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends minisign
+          minisign -v
+
+      - name: Get the unsigned files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned
+          path: out
+
+      - name: Check it's the exe the build made
+        run: echo "$SHA256  out/target/release/bootmend.exe" | sha256sum --check --strict
+
+      - name: Get Bootmend's public key
+        if: github.event_name == 'push'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: src/update.rs
+          sparse-checkout-cone-mode: false
+          path: repo
+
+      - name: Get the throwaway key
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rehearsal-key
+          path: rehearsal-key
+
+      # The only step that sees the release key. Installed copies check the exe against the
+      # public key built into them, and the signed comment against the version they asked for.
+      - name: Sign
+        env:
+          BOOTMEND_SIGNING_KEY: ${{ github.event_name == 'push' && secrets.BOOTMEND_SIGNING_KEY || '' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/signing.key"
+          if [ "$EVENT" = push ]; then
+            if [ -z "$BOOTMEND_SIGNING_KEY" ]; then echo "The release environment has no signing key."; exit 1; fi
+            printf '%s\n' "$BOOTMEND_SIGNING_KEY" > "$key"
+          else
+            cp rehearsal-key/throwaway.key "$key"
+          fi
+          exe=out/target/release/bootmend.exe
+          status=0
+          minisign -S -s "$key" -m "$exe" -x "$exe.minisig" -t "bootmend $VERSION" -c "Bootmend release signature" < /dev/null || status=$?
+          rm -f "$key"
+          exit $status
+
+      - name: Check the signature as installed copies will
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = push ]; then
+            pk=$(sed -n 's/^const PUBLIC_KEY: &str = "\([A-Za-z0-9+/=]*\)";$/\1/p' repo/src/update.rs)
+          else
+            pk=$(cat rehearsal-key/throwaway.pub)
+          fi
+          if [ -z "$pk" ]; then echo "Couldn't read the public key."; exit 1; fi
+          exe=out/target/release/bootmend.exe
+          minisign -V -P "$pk" -m "$exe" -x "$exe.minisig"
+          # Installed copies only accept prehashed ("ED") signatures.
+          if [ "$(sed -n 2p "$exe.minisig" | base64 -d | head -c 2)" != ED ]; then echo "The signature isn't prehashed."; exit 1; fi
+          comment=$(sed -n 3p "$exe.minisig")
+          if [ "$comment" != "trusted comment: bootmend $VERSION" ]; then echo "The signature says \"$comment\"."; exit 1; fi
+          echo "SHA-256 of bootmend.exe: \`$SHA256\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep the signed files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: bootmend-${{ steps.version.outputs.version }}
+          name: bootmend-${{ env.VERSION }}${{ github.event_name == 'workflow_dispatch' && '-rehearsal' || '' }}
           path: |
-            target/release/bootmend.exe
-            target/release/bootmend.exe.minisig
+            out/target/release/bootmend.exe
+            out/target/release/bootmend.exe.minisig
           retention-days: 7
           if-no-files-found: error
 
@@ -95,9 +202,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-          VERSION: ${{ steps.version.outputs.version }}
-          SHA256: ${{ steps.sum.outputs.sha256 }}
         run: >-
-          gh release create $env:TAG --draft --verify-tag --title "Bootmend $env:VERSION"
-          --notes "SHA-256 of bootmend.exe: $env:SHA256"
-          target/release/bootmend.exe target/release/bootmend.exe.minisig THIRD-PARTY-NOTICES.txt
+          gh release create "$TAG" --draft --verify-tag --title "Bootmend $VERSION"
+          --notes "SHA-256 of bootmend.exe: $SHA256"
+          out/target/release/bootmend.exe out/target/release/bootmend.exe.minisig out/THIRD-PARTY-NOTICES.txt
