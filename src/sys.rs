@@ -370,7 +370,8 @@ mod tests {
         std::fs::create_dir(&parent).unwrap();
         let dir = private_dir(&parent).unwrap();
         let d = dir.to_string_lossy().to_string();
-        // Tests run without administrator rights, like any other app the user starts.
+        // On a PC tests run without administrator rights, like any other app the user starts; on
+        // GitHub's runners they have them.
         let planted = std::fs::write(dir.join("run.ps1"), "x");
         let listed = std::fs::read_dir(&dir).map(|_| ());
         let sddl = powershell(&format!("(Get-Acl -LiteralPath {}).Sddl", ps_quote(&d)), Duration::from_secs(60)).unwrap().stdout;
@@ -378,8 +379,12 @@ mod tests {
         let reset = run_hidden("icacls.exe", &[&d, "/reset"], Duration::from_secs(30)).unwrap();
         assert_eq!(reset.code, Some(0), "{}", reset.stdout);
         std::fs::remove_dir_all(&parent).unwrap();
-        assert_eq!(planted.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
-        assert_eq!(listed.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
         assert!(sddl.trim().ends_with("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"), "{sddl}");
+        if elevated() {
+            assert!(sddl.trim().starts_with("O:BA"), "an administrator window's folder belongs to Administrators: {sddl}");
+        } else {
+            assert_eq!(planted.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(listed.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        }
     }
 }
