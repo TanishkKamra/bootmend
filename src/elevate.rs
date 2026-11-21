@@ -60,6 +60,8 @@ pub fn others_can_change(exe: &Path) -> bool {
 }
 
 fn others_can_change_or_err(exe: &Path) -> Result<bool> {
+    // Where the exe really is: through a junction, the folder above it would be the wrong one.
+    let exe: &Path = &std::fs::canonicalize(exe).with_context(|| format!("finding where {} really is", exe.display()))?;
     // Adding, changing or deleting files, or changing who may.
     const CHANGE: u32 = 0x2 | 0x4 | 0x40 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000;
     // Deleting or renaming what's in a folder, or changing who may.
@@ -282,6 +284,31 @@ mod tests {
         assert_eq!(grant.code, Some(0), "{}", grant.stdout);
         assert!(!before, "the user's own temp folder was taken for a shared one");
         assert!(after, "a folder everyone can change was taken for a private one");
+    }
+
+    #[test]
+    fn a_folder_reached_through_a_junction_is_judged_by_where_it_really_is() {
+        let base = std::env::temp_dir().join(format!("bootmend-real-{:x}", crate::util::unique()));
+        let (shared, mine) = (base.join("shared"), base.join("mine"));
+        let real = shared.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&mine).unwrap();
+        let me = format!("*{}:(OI)(CI)F", current_user().unwrap());
+        let b = base.to_string_lossy().to_string();
+        let own = run_hidden("icacls.exe", &[&b, "/inheritance:r", "/grant:r", &me, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], Duration::from_secs(30))
+            .unwrap();
+        // Everyone in the Users group may replace what's in `shared`, such as the folder the exe is in.
+        let grant = run_hidden("icacls.exe", &[&shared.to_string_lossy(), "/grant", "*S-1-5-32-545:(F)"], Duration::from_secs(30)).unwrap();
+        std::fs::write(real.join("bootmend.exe"), "x").unwrap();
+        let link = mine.join("link");
+        let made = run_hidden("cmd.exe", &["/c", "mklink", "/J", &link.to_string_lossy(), &real.to_string_lossy()], Duration::from_secs(30)).unwrap();
+        let direct = others_can_change(&real.join("bootmend.exe"));
+        let through = others_can_change(&link.join("bootmend.exe"));
+        let _ = std::fs::remove_dir(&link);
+        std::fs::remove_dir_all(&base).unwrap();
+        assert_eq!((own.code, grant.code, made.code), (Some(0), Some(0), Some(0)), "{} {} {}", own.stdout, grant.stdout, made.stdout);
+        assert!(direct, "the real folder's parent lets other accounts in");
+        assert!(through, "a junction hid where the exe really is");
     }
 
     #[test]
