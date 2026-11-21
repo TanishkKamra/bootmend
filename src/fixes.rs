@@ -273,7 +273,9 @@ impl Fix {
             }
             Fix::DisableFirewallRule { name, .. } => {
                 let n = ps_quote(name);
-                (format!("Disable-NetFirewallRule -Name {n}"), format!("Enable-NetFirewallRule -Name {n}"))
+                // -Name treats [ ] * ? as wildcards, so the rule is matched exactly instead.
+                let rule = format!("Get-NetFirewallRule | Where-Object Name -CEQ {n}");
+                (format!("{rule} | Disable-NetFirewallRule"), format!("{rule} | Enable-NetFirewallRule"))
             }
             Fix::ServiceManual { name, .. } => {
                 let n = ps_quote(name);

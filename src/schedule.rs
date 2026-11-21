@@ -49,7 +49,9 @@ pub fn hour_label(hour: u8) -> String {
     format!("{:02}:00", if hour < 24 { hour } else { NOON })
 }
 
+/// Escapes XML's special characters and drops the control characters XML 1.0 can't hold.
 fn xml_escape(s: &str) -> String {
+    let s: String = s.chars().filter(|&c| matches!(c, '\t' | '\n' | '\r') || (c >= ' ' && !matches!(c, '\u{FFFE}' | '\u{FFFF}'))).collect();
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
@@ -245,6 +247,11 @@ mod tests {
 
     fn f(id: &str, level: Level) -> Finding {
         Finding::new(id, Area::Security, level, format!("Title {id}"))
+    }
+
+    #[test]
+    fn xml_drops_characters_xml_cannot_hold() {
+        assert_eq!(xml_escape("a\u{1}b\u{1b}c\td<\"&'\u{FFFF}"), "abc\td&lt;&quot;&amp;&apos;");
     }
 
     fn task_exists(name: &str) -> String {
