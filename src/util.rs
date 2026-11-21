@@ -245,9 +245,19 @@ fn unique() -> u128 {
     t ^ N.fetch_add(1, Ordering::Relaxed) as u128
 }
 
-/// Quote a value for a single-quoted PowerShell string literal.
+/// Quote a value for a single-quoted PowerShell string literal. PowerShell also ends these strings
+/// at the curly single quotes, so those are doubled too, as its own escaping does.
 pub fn ps_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 /// Open a URL, settings URI or folder with the shell (no console window).
@@ -377,6 +387,24 @@ mod tests {
         assert!(version_lt("24.08", "24.09"));
         assert!(!version_lt("25.01", "24.09"));
         assert!(version_lt("6.0.28", "6.0.36"));
+    }
+
+    #[test]
+    fn ps_quote_doubles_every_quote_powershell_ends_a_string_at() {
+        for q in ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            assert_eq!(ps_quote(&format!("a{q}b")), format!("'a{q}{q}b'"));
+        }
+    }
+
+    #[test]
+    #[ignore = "starts PowerShell; run with --ignored"]
+    fn quoted_values_stay_text_in_powershell() {
+        for s in ["it's", "O\u{2019}Neil", "x\u{2019}+$(Write-Output pwned)+\u{2019}", "\u{2018}a\u{201A}b\u{201B}", "$env:USERNAME `n ;& |", "line1\nline2"] {
+            // Compared as code points, so the console's code page can't blur the result.
+            let out = powershell(&format!("$s = {}\n[string]::Join(',', [int[]][char[]]$s)", ps_quote(s)), Duration::from_secs(60)).unwrap();
+            let want: Vec<String> = s.encode_utf16().map(|u| u.to_string()).collect();
+            assert_eq!(out.stdout.trim(), want.join(","), "{s:?}: {}", out.stderr);
+        }
     }
 
     #[test]
