@@ -1131,15 +1131,14 @@ impl App {
                     action,
                 }
             }
-            Pending::DeleteData => Confirm {
-                title: "Delete everything Bootmend saved?".into(),
-                body: vec![
-                    "This removes all saved checks, the undo history and settings from this PC. Changes you already made to Windows stay as they are.".into(),
-                    "This can't be undone.".into(),
-                ],
-                yes: "Delete".into(),
-                action,
-            },
+            Pending::DeleteData => {
+                let mut body = vec!["This removes all saved checks, the undo history and settings from this PC. Changes you already made to Windows stay as they are.".into()];
+                if !self.elevated && fixes::admin_records_kept() {
+                    body.push("Undo records for changes made as administrator stay until you do this from an administrator window.".into());
+                }
+                body.push("This can't be undone.".into());
+                Confirm { title: "Delete everything Bootmend saved?".into(), body, yes: "Delete".into(), action }
+            }
         };
         log!("dialog", "shown: {}", c.title);
         self.confirm = Some(c);

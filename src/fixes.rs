@@ -597,6 +597,27 @@ pub fn forget_changes() -> Result<()> {
     Ok(())
 }
 
+/// Whether records of changes made as administrator are kept. Only an administrator window can
+/// remove them.
+pub fn admin_records_kept() -> bool {
+    key_exists(windows::Win32::System::Registry::HKEY_LOCAL_MACHINE, r"SOFTWARE\Bootmend")
+}
+
+/// Whether a registry key is there. One that can't be opened counts as there, since it may be.
+fn key_exists(root: windows::Win32::System::Registry::HKEY, key: &str) -> bool {
+    use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, HKEY, KEY_READ};
+    let mut h = HKEY::default();
+    // SAFETY: a predefined root key, a string Windows only reads, and a handle closed below.
+    let r = unsafe { RegOpenKeyExW(root, &windows::core::HSTRING::from(key), None, KEY_READ, &mut h) };
+    if r.is_ok() {
+        // SAFETY: the key was opened above and isn't used again.
+        let _ = unsafe { RegCloseKey(h) };
+        return true;
+    }
+    r != ERROR_FILE_NOT_FOUND
+}
+
 /// Deletes a key and everything in it. A key that isn't there is already gone.
 fn delete_key(root: windows::Win32::System::Registry::HKEY, key: &str) -> Result<()> {
     use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
@@ -1323,6 +1344,13 @@ mod tests {
     }
 
     /// Parses every apply and undo script with PowerShell's own parser. Nothing runs.
+    #[test]
+    fn a_registry_key_is_found_only_when_it_is_there() {
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        assert!(key_exists(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"));
+        assert!(!key_exists(HKEY_LOCAL_MACHINE, r"SOFTWARE\Bootmend test key that is never made"));
+    }
+
     #[test]
     #[ignore = "starts PowerShell; run with --ignored"]
     fn every_fix_script_parses() {

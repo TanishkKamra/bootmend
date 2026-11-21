@@ -1900,7 +1900,7 @@ fn privacy_page(ui: &mut Ui) {
     });
     section(ui, "What it keeps, and where");
     card(ui, |ui| {
-        ui.add(egui::Label::new("Each check is saved as a file in your user folder (AppData\\Local\\Bootmend), so it can show what changed next time. The undo history lives there too. Nothing else is stored. Settings can open the folder or delete it all.").wrap());
+        ui.add(egui::Label::new("Each check is saved as a file in your user folder (AppData\\Local\\Bootmend), so it can show what changed next time. The undo history lives there too. When a fix changes a setting, Windows' registry keeps a copy of the old one, so Undo can put it back. Nothing else is stored. Settings can open the folder or delete it all.").wrap());
     });
     ui.add_space(S5);
 }
