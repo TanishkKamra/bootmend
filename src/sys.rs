@@ -182,10 +182,11 @@ pub fn tmp_dir() -> Result<PathBuf> {
     if !elevated() {
         return crate::util::data_dir("tmp");
     }
-    ADMIN_TMP.get_or_init(|| admin_tmp().map_err(|e| format!("{e:#}"))).clone().map_err(|e| anyhow!(e))
+    ADMIN_TMP.get_or_init(|| private_dir(&windows_dir().join("Temp")).map_err(|e| format!("{e:#}"))).clone().map_err(|e| anyhow!(e))
 }
 
-fn admin_tmp() -> Result<PathBuf> {
+/// Makes a new folder in `parent` that only SYSTEM and Administrators can use.
+fn private_dir(parent: &Path) -> Result<PathBuf> {
     use windows::Win32::Foundation::{LocalFree, ERROR_ALREADY_EXISTS, HLOCAL};
     use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
@@ -196,10 +197,10 @@ fn admin_tmp() -> Result<PathBuf> {
     unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&HSTRING::from("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"), SDDL_REVISION_1, &mut sd, None) }
         .context("describing who may use Bootmend's temporary folder")?;
     let sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() };
-    let mut made = Err(anyhow!("five temporary folder names were already taken in {}", windows_dir().join("Temp").display()));
+    let mut made = Err(anyhow!("five temporary folder names were already taken in {}", parent.display()));
     for _ in 0..5 {
         // A new name each time: a folder someone else made first is never used.
-        let dir = windows_dir().join("Temp").join(format!("Bootmend-{}-{:x}", std::process::id(), crate::util::unique()));
+        let dir = parent.join(format!("Bootmend-{}-{:x}", std::process::id(), crate::util::unique()));
         // SAFETY: `sa` and the descriptor it points to live until after the call.
         match unsafe { CreateDirectoryW(&HSTRING::from(dir.as_os_str()), Some(&sa)) } {
             Ok(()) => {
@@ -216,7 +217,7 @@ fn admin_tmp() -> Result<PathBuf> {
     // SAFETY: the descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
     unsafe { LocalFree(Some(HLOCAL(sd.0))) };
     if let Ok(d) = &made {
-        log!("app", "temporary files go to {} while Bootmend runs as administrator", d.display());
+        log!("app", "made {}, which only administrators can change", d.display());
     }
     made
 }
@@ -304,5 +305,26 @@ mod tests {
         assert_eq!(modules.len(), 2, "{modules:?}");
         assert!(modules.iter().all(|m| m.ends_with(r"\Modules") && !m.contains("Documents")), "{modules:?}");
         assert!(get("PATH").split(';').all(|d| d.to_lowercase().starts_with(&windows_dir().to_string_lossy().to_lowercase())), "{}", get("PATH"));
+    }
+
+    #[test]
+    fn the_admin_temp_folder_turns_away_everyone_else() {
+        use crate::util::{powershell, ps_quote, run_hidden};
+        use std::time::Duration;
+        let parent = std::env::temp_dir().join(format!("bootmend-private-{}", crate::util::unique()));
+        std::fs::create_dir(&parent).unwrap();
+        let dir = private_dir(&parent).unwrap();
+        let d = dir.to_string_lossy().to_string();
+        // Tests run without administrator rights, like any other app the user starts.
+        let planted = std::fs::write(dir.join("run.ps1"), "x");
+        let listed = std::fs::read_dir(&dir).map(|_| ());
+        let sddl = powershell(&format!("(Get-Acl -LiteralPath {}).Sddl", ps_quote(&d)), Duration::from_secs(60)).unwrap().stdout;
+        // Whoever made a folder may still change who can use it, so the test can tidy up.
+        let reset = run_hidden("icacls.exe", &[&d, "/reset"], Duration::from_secs(30)).unwrap();
+        assert_eq!(reset.code, Some(0), "{}", reset.stdout);
+        std::fs::remove_dir_all(&parent).unwrap();
+        assert_eq!(planted.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(listed.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(sddl.trim().ends_with("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"), "{sddl}");
     }
 }

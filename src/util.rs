@@ -219,7 +219,9 @@ pub fn decode_bytes(b: &[u8]) -> String {
 
 /// Run a PowerShell script (passed as text) hidden, returning stdout.
 pub fn powershell(script: &str, timeout: Duration) -> Result<Output> {
-    let dir = data_dir("tmp")?;
+    // Between writing the script and PowerShell reading it, anything the user runs could swap a
+    // script kept in a folder the user can change. As administrator that would run their code.
+    let dir = crate::sys::tmp_dir()?;
     let file = dir.join(format!("run-{}-{}.ps1", std::process::id(), unique()));
     // UTF-8 with BOM so Windows PowerShell 5.1 reads non-ASCII text correctly.
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
