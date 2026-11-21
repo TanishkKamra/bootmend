@@ -281,6 +281,11 @@ pub fn copy_to(found: &Found, dir: &Path, max_file: Option<u64>, done: &AtomicU6
     if crate::sys::elevated() {
         return Err(anyhow!(NOT_AS_ADMIN));
     }
+    copy_files(found, dir, max_file, done, stop)
+}
+
+/// The copy itself, which the tests run whether or not they have administrator rights.
+fn copy_files(found: &Found, dir: &Path, max_file: Option<u64>, done: &AtomicU64, stop: &AtomicBool) -> Result<Copied> {
     std::fs::create_dir_all(dir).map_err(|e| anyhow!("Bootmend couldn't write to the drive: {e}"))?;
     log!("copy", "copying {} files to {}", found.files.len(), dir.display());
     let mut c = Copied { dir: dir.to_path_buf(), files: 0, bytes: 0, failed: vec![], in_use: vec![], too_big: vec![], stopped: false };
@@ -510,7 +515,7 @@ mod tests {
         assert_eq!(fresh_dir(&usb, now).unwrap(), usb.join("Bootmend copy 2026-11-16 13.42 (2)"), "a second copy that minute gets its own folder");
 
         let done = AtomicU64::new(0);
-        let c = copy_to(&found, &dir, None, &done, &AtomicBool::new(false)).unwrap();
+        let c = copy_files(&found, &dir, None, &done, &AtomicBool::new(false)).unwrap();
         assert_eq!((c.files, c.bytes, c.left(), c.stopped), (2, found.bytes, 0, false));
         assert_eq!(done.load(Ordering::Relaxed), found.bytes);
         let copied = dir.join(r"Documents\Taxes\2025.pdf");
@@ -519,7 +524,7 @@ mod tests {
         assert!(dir.join(r"Desktop\note.txt").is_file());
         assert!(a.is_file(), "the original stays where it was");
 
-        let again = copy_to(&found, &dir, None, &AtomicU64::new(0), &AtomicBool::new(false)).unwrap();
+        let again = copy_files(&found, &dir, None, &AtomicU64::new(0), &AtomicBool::new(false)).unwrap();
         assert_eq!(again.failed.len(), 2, "files already there are never overwritten");
         assert_eq!(std::fs::read(&copied).unwrap().len(), 3 * 1024 * 1024 + 5);
         assert_eq!(parts(&dir), 0, "no half-made file is left behind");
@@ -534,10 +539,25 @@ mod tests {
         std::fs::remove_file(&gone).unwrap();
         let usb = s.0.join("usb");
         let done = AtomicU64::new(0);
-        let c = copy_to(&found, &usb, None, &done, &AtomicBool::new(false)).unwrap();
+        let c = copy_files(&found, &usb, None, &done, &AtomicBool::new(false)).unwrap();
         assert_eq!((c.files, c.failed.clone()), (1, vec![r"Documents\gone.txt".to_string()]));
         assert_eq!(done.load(Ordering::Relaxed), found.bytes, "the bar still reaches the end");
         assert!(!usb.join(r"Documents\gone.txt").exists(), "no half-made file is left behind");
+    }
+
+    #[test]
+    fn only_a_window_without_administrator_rights_copies() {
+        let s = Scratch::new("admin");
+        s.file("docs/a.txt", 10);
+        let found = survey(&folders(&s));
+        let usb = s.0.join("usb");
+        let r = copy_to(&found, &usb, None, &AtomicU64::new(0), &AtomicBool::new(false));
+        if crate::sys::elevated() {
+            assert_eq!(r.unwrap_err().to_string(), NOT_AS_ADMIN);
+            assert!(!usb.exists(), "nothing is written");
+        } else {
+            assert_eq!(r.unwrap().files, 1);
+        }
     }
 
     #[test]
@@ -545,7 +565,7 @@ mod tests {
         let s = Scratch::new("stop");
         s.file("docs/a.txt", 10);
         let found = survey(&folders(&s));
-        let c = copy_to(&found, &s.0.join("usb"), None, &AtomicU64::new(0), &AtomicBool::new(true)).unwrap();
+        let c = copy_files(&found, &s.0.join("usb"), None, &AtomicU64::new(0), &AtomicBool::new(true)).unwrap();
         assert!(c.stopped && c.files == 0 && c.left() == 0);
     }
 
@@ -578,7 +598,7 @@ mod tests {
         let _held = std::fs::File::options().read(true).share_mode(0).open(&mail).unwrap();
         let usb = s.0.join("usb");
         let done = AtomicU64::new(0);
-        let c = copy_to(&found, &usb, Some(20), &done, &AtomicBool::new(false)).unwrap();
+        let c = copy_files(&found, &usb, Some(20), &done, &AtomicBool::new(false)).unwrap();
         assert_eq!(
             (c.files, c.too_big.clone(), c.in_use.clone(), c.failed.len()),
             (1, vec![r"Documents\film.mp4".to_string()], vec![r"Documents\mail.pst".to_string()], 0)
@@ -598,7 +618,7 @@ mod tests {
         for g in &gone {
             std::fs::remove_file(g).unwrap();
         }
-        let e = copy_to(&found, &s.0.join("usb"), None, &AtomicU64::new(0), &AtomicBool::new(false)).unwrap_err().to_string();
+        let e = copy_files(&found, &s.0.join("usb"), None, &AtomicU64::new(0), &AtomicBool::new(false)).unwrap_err().to_string();
         assert_eq!(
             e,
             format!(
