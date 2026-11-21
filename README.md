@@ -91,10 +91,10 @@ Releases are built and signed on GitHub, never on a personal PC.
 
 1. Raise `version` in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, and merge to `main`.
 2. Tag that commit and push the tag, for example `git tag v0.1.1` and `git push origin v0.1.1`.
-3. The Release workflow tests, builds and signs `bootmend.exe`, then opens a draft release with the exe, its signature and its SHA-256.
+3. The Release workflow tests and builds `bootmend.exe`. Approve the signing job when GitHub asks; it signs the exe, then opens a draft release with the exe, its signature and its SHA-256.
 4. Add the notes and publish the draft. Installed copies offer the update at their next daily check.
 
-The build runs on Windows and never sees the signing key. A separate Linux job signs the exe with Ubuntu's `minisign`, then checks the signature against `PUBLIC_KEY` in `src/update.rs` before drafting the release. The secret key is `BOOTMEND_SIGNING_KEY` in the `release` environment, which only `v*` tags can use. Running the workflow by hand is a rehearsal: it builds and signs with a throwaway key, and makes no release.
+The build runs on Windows and never sees the signing key. A separate Linux job signs the exe with Ubuntu's `minisign`, then checks the signature against `PUBLIC_KEY` in `src/update.rs` before drafting the release. The secret key is `BOOTMEND_SIGNING_KEY` in the `release` environment, which only `v*` tags can use, and only once the maintainer approves the run. Running the workflow by hand is a rehearsal: it builds and signs with a throwaway key, and makes no release.
 
 ## Design
 

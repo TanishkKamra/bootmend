@@ -14,7 +14,7 @@ Only the newest release gets fixes. Bootmend offers new versions itself, so stay
 
 ## How updates are protected
 
-- Each release is built and signed by the release workflow on GitHub, not on anyone's PC. The build never sees the signing key: a separate job signs the finished exe, and only version tags can reach the key.
+- Each release is built and signed by the release workflow on GitHub, not on anyone's PC. The build never sees the signing key: a separate job signs the finished exe, and only version tags can reach the key, once the maintainer approves the run.
 - Bootmend installs an update only when the download carries a valid signature from Bootmend's release key and the signature names the version it asked for. A tampered download, or an older release passed off as new, is refused.
 - Updates download over HTTPS only, from this repository's releases.
 
