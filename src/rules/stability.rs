@@ -357,7 +357,6 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
         .why(format!("These were blue-screen crashes. The most common one was {name}: {meaning}"))
         .details(codes.iter().map(|(c, n)| format!("0x{c:X} {}: {}", bugcheck_info(*c).0, plural(*n, "time", "times"))))
         .conf(Confidence::BestGuess);
-        let blamed: Vec<String> = s.dumps.iter().filter_map(|d| d.note.clone()).collect();
         let dates: Vec<NaiveDateTime> = h.a("bugchecks").iter().filter_map(|b| at(&b.s("Date")?)).collect();
         if let Some(d) = driver_suspect(s, &dates) {
             let day = d.date.format("%-d %B");
@@ -366,8 +365,12 @@ pub fn check(s: &Snapshot, f: &mut Vec<Finding>) {
             } else {
                 format!("The crashes began soon after the {} driver was updated on {day}. Going back to the version it had before may stop them.", d.name)
             });
-        } else if let Some(n) = blamed.first() {
-            x = x.step(format!("The crash files point to the {n}. Install the newest version from its maker's website, not through Windows Update."));
+        } else if let Some(p) = crate::gui::crash_summary::plan(&s.dumps) {
+            // The Crashes page's How to fix, so the two never disagree.
+            x.summary.push_str(&format!(" Likeliest cause: {}.", p.cause));
+            for st in p.steps {
+                x = x.step(st.text).acts(st.action);
+            }
         } else if stress {
             x = x.step("These stop codes usually mean the hardware was pushed too hard. If the processor or memory is overclocked, or a memory profile (XMP, EXPO, DOCP) is on, set them back to default in the BIOS and see if the crashes stop.");
         } else if matches!(top, 0x1A | 0x50) {
