@@ -1370,7 +1370,8 @@ mod tests {
         assert!(!out.stdout.contains("BAD "), "{}", out.stdout);
     }
 
-    /// Removes a forced setting from a throwaway policy key under HKCU, then puts it back from the copy.
+    /// Removes a forced setting from a throwaway policy key under HKCU, then puts it back from the
+    /// copy. The copy is kept where changes made as administrator keep theirs, stood in for under HKCU.
     #[test]
     #[ignore = "writes to the registry; run with --ignored"]
     fn browser_policy_fix_and_undo_on_a_scratch_key() {
@@ -1393,12 +1394,27 @@ mod tests {
         };
         let id = format!("selftest-{:x}", crate::util::unique());
         let (apply, undo) = f.scripts(&id);
-        run_ps(&apply).unwrap();
-        assert_eq!(state(), "|1|False", "only the forced settings go");
-        run_ps(&undo).unwrap();
-        assert_eq!(state(), "http://x.example|1|True");
+        let stand_in = format!(r"Software\bootmend-selftest-copies-{:x}", crate::util::unique());
+        let here = |s: &str| {
+            s.replace(r"HKLM\SOFTWARE\Bootmend\Changes", &format!(r"HKCU\{stand_in}"))
+                .replace("LocalMachine", "CurrentUser")
+                .replace(r"SOFTWARE\Bootmend\Changes", &stand_in)
+        };
+        let (apply, undo) = (here(&apply), here(&undo));
+        assert!(!apply.contains("HKLM") && !undo.contains("HKLM") && apply.contains(&stand_in), "{apply}\n{undo}");
+        // Everything is measured first and cleaned up before any assert, so a failure leaves nothing behind.
+        let applied = run_ps(&apply);
+        let removed = state();
+        let undone = applied.is_ok().then(|| run_ps(&undo));
+        let back = state();
+        let copy = powershell(&format!(r"Test-Path 'HKCU:\{stand_in}\{id}'"), Duration::from_secs(60)).unwrap();
         run_ps(r"Remove-Item -Path 'HKCU:\Software\bootmend-selftest' -Recurse").unwrap();
-        assert_copy_gone(&id);
+        run_ps(&format!(r"if (Test-Path 'HKCU:\{stand_in}') {{ Remove-Item -Path 'HKCU:\{stand_in}' -Recurse }}")).unwrap();
+        applied.unwrap();
+        assert_eq!(removed, "|1|False", "only the forced settings go");
+        undone.unwrap().unwrap();
+        assert_eq!(back, "http://x.example|1|True");
+        assert_eq!(copy.stdout.trim(), "False", "the undo removes the change's saved copy");
     }
 
     /// The undo removes the change's saved copy; empty parent keys go too, so the test leaves nothing.
