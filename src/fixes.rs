@@ -272,12 +272,13 @@ impl Fix {
         self.up_to_minutes().map_or(Duration::from_secs(300), |m| Duration::from_secs(u64::from(m) * 60 * 3))
     }
 
-    /// Per-user startup entries can be changed without administrator rights; everything else needs them.
+    /// Per-user startup entries and proxy settings can be changed without administrator rights;
+    /// everything else needs them. That includes a person's own policies key, which they can only read.
     pub fn needs_admin(&self) -> bool {
         match self {
             Fix::DisableStartup { approved_key, .. } | Fix::EnableStartup { approved_key, .. } => starts_ci(approved_key, "HKLM"),
             Fix::TurnOffProxy { winhttp, .. } => !winhttp.is_empty(),
-            Fix::RemoveBrowserPolicies { key, .. } | Fix::RemoveUpdateBlock { key, .. } => starts_ci(key, "HKLM"),
+            Fix::RemoveUpdateBlock { key, .. } => starts_ci(key, "HKLM"),
             _ => true,
         }
     }
@@ -1257,11 +1258,11 @@ mod tests {
             settings: vec!["HomepageLocation".into()],
         };
         let (a, u) = p.scripts("id1");
-        let copy = r"'HKCU\SOFTWARE\Bootmend\Changes\id1\Backup'";
+        let copy = r"'HKLM\SOFTWARE\Bootmend\Changes\id1\Backup'";
         assert!(a.contains(&format!(r"reg.exe copy 'HKCU\SOFTWARE\Policies\Google\Chrome' {copy} /s /f")) && a.contains("'HomepageLocation'"), "{a}");
         assert!(u.contains(&format!(r"reg.exe copy {copy} 'HKCU\SOFTWARE\Policies\Google\Chrome' /s /f")), "the undo copies the same key back: {u}");
-        assert!(u.trim_end().ends_with(r"Remove-Item -LiteralPath 'Registry::HKCU\SOFTWARE\Bootmend\Changes\id1' -Recurse }"), "{u}");
-        assert!(!p.needs_admin());
+        assert!(u.trim_end().ends_with(r"Remove-Item -LiteralPath 'Registry::HKLM\SOFTWARE\Bootmend\Changes\id1' -Recurse }"), "{u}");
+        assert!(p.needs_admin(), "people can only read their own policies key, and its backup must be out of their apps' reach");
         let (a, u) = Fix::SystemManagedPagefile.scripts("id2");
         let copy = r"-LiteralPath 'Registry::HKLM\SOFTWARE\Bootmend\Changes\id2' -Name PagingFiles";
         assert!(a.contains(&format!("Set-ItemProperty {copy}")) && a.contains("AutomaticManagedPagefile = $true"), "{a}");
