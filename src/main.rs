@@ -10,6 +10,7 @@ mod elevate;
 mod fixes;
 mod gui;
 mod live;
+mod ndt7;
 mod nettest;
 mod report;
 mod rules;
