@@ -10,8 +10,9 @@ use super::widgets::{self, icon};
 use super::Page;
 use crate::collect::STEPS;
 use crate::fixes::Fix;
-use crate::rules::Area;
+use crate::rules::{Action, Area, Finding};
 use crate::snapshot::Snapshot;
+use crate::util::J;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use serde::{Deserialize, Serialize};
 
@@ -1244,6 +1245,38 @@ impl Resume {
     pub fn origin(&self) -> Page {
         Page::ALL.iter().copied().find(|p| p.slug() == self.origin).unwrap_or(Page::Home)
     }
+
+    /// The saved fixes that the check-up just run still offers, named as it names them and
+    /// ticked as they were, and how many were left out. The PC may have changed since they were
+    /// picked, and any app the person runs can change the saved queue, so nothing else carries on.
+    pub fn still_offered(&self, findings: &[Finding], snap: &Snapshot) -> (Vec<Item>, usize) {
+        let plan = findings.iter().flat_map(|f| {
+            f.actions.iter().filter_map(move |a| match a {
+                Action::Fix(fx) => Some((fx.clone(), f.title.clone(), f.area)),
+                _ => None,
+            })
+        });
+        // Fixes offered outside the plan keep their own names.
+        let services =
+            snap.software.a("services").into_iter().filter_map(|sv| Some((super::pages::service_fix(sv)?, sv.s("Display").unwrap_or_default(), Area::Speed)));
+        let offered: Vec<(Fix, String, Area)> = plan.chain(services).collect();
+        let mut items = vec![];
+        for ri in &self.items {
+            let Some(f) = &ri.fix else { continue };
+            if let Some((fx, title, area)) = offered.iter().find(|(fx, ..)| fx == f) {
+                let mut it = Item::fix(fx.clone(), title.clone(), *area);
+                it.ticked = ri.ticked;
+                items.push(it);
+            }
+        }
+        let dropped = self.items.iter().filter(|i| i.fix.is_some()).count() - items.len();
+        (items, dropped)
+    }
+
+    /// Whether the leftover files were in the queue, and if so whether they were ticked.
+    pub fn leftovers(&self) -> Option<bool> {
+        self.items.iter().find(|i| i.fix.is_none()).map(|i| i.ticked)
+    }
 }
 
 /// A queue of made-up to-dos for the screenshots: while choosing, or part way through with the
@@ -1490,6 +1523,44 @@ mod tests {
         assert!(back.fresh(1_000 + 600));
         assert!(!back.fresh(1_000 + 601));
         assert!(!back.fresh(999), "a clock that went back isn't trusted");
+    }
+
+    #[test]
+    fn a_picked_up_queue_keeps_only_what_the_new_check_up_offers() {
+        use crate::rules::{Action, Finding, Level};
+        let service = |name: &str| Fix::ServiceManual { name: name.into(), display: "Updater".into() };
+        let mut r = Run::fixes(
+            vec![
+                Item::fix(Fix::EnablePua, "Unwanted apps", Area::Security),
+                Item::fix(Fix::DisableSmb1, "An old, unsafe way of sharing files is on", Area::Security),
+                Item::fix(service("Up"), "Updater", Area::Speed),
+                Item::fix(service("Up"), "Updater", Area::Speed),
+            ],
+            Page::Home,
+            Gate::Saved,
+        );
+        r.items.push(Item::clean(vec!["temp"], "Clear 2 GB of leftover files"));
+        r.toggle(2);
+        let mut saved = Resume::of(&r, Then::Start, 1_000);
+        // An app changed the saved queue to name a service Bootmend never offered.
+        saved.items[3].fix = Some(service("WinDefend"));
+        // Since then, the old way of sharing files was switched off.
+        let plan = [
+            Finding::new("pua", Area::Security, Level::WorthDoing, "Protection from unwanted apps is off").act(Action::Fix(Fix::EnablePua)),
+            Finding::new("trim", Area::Speed, Level::NiceToHave, "Your SSD isn't being kept tidy").act(Action::Fix(Fix::EnableTrim)),
+        ];
+        let services = serde_json::json!({"services": [
+            {"Name": "Up", "Display": "Updater", "StartMode": "Auto"},
+            {"Name": "WinDefend", "Display": "Updater", "StartMode": "Manual"},
+        ]});
+        let snap = Snapshot { software: services, ..Default::default() };
+        let (items, dropped) = saved.still_offered(&plan, &snap);
+        let got: Vec<(&str, bool)> = items.iter().map(|i| (i.title.as_str(), i.ticked)).collect();
+        assert_eq!(got, [("Protection from unwanted apps is off", true), ("Updater", false)], "named as the new check-up names them, ticked as they were");
+        assert_eq!(dropped, 2, "the fix no longer needed, and the one the app changed");
+        assert_eq!(saved.leftovers(), Some(true));
+        saved.items.pop();
+        assert_eq!(saved.leftovers(), None);
     }
 
     #[test]

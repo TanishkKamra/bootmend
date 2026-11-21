@@ -17,6 +17,12 @@ fn s(v: &Value, k: &str) -> String {
     v.s(k).unwrap_or_default()
 }
 
+/// A background service from another maker that starts by itself can be set to start only when
+/// it's needed.
+pub(super) fn service_fix(sv: &Value) -> Option<Fix> {
+    (s(sv, "StartMode") == "Auto").then(|| Fix::ServiceManual { name: s(sv, "Name"), display: s(sv, "Display") })
+}
+
 fn num(v: Option<f64>, unit: &str) -> Option<String> {
     v.map(|x| if (x - x.round()).abs() < 0.05 { format!("{x:.0}{unit}") } else { format!("{x:.1}{unit}") })
 }
@@ -819,15 +825,16 @@ impl App {
             ui.add_space(S2);
             let services = snap.software.a("services");
             for (i, sv) in services.iter().enumerate() {
-                let (name, disp) = (s(sv, "Name"), s(sv, "Display"));
+                let disp = s(sv, "Display");
                 if i > 0 {
                     ui.separator();
                 }
                 row(ui, |ui| {
-                    if s(sv, "StartMode") == "Auto" {
-                        self.fix_button_as(ui, &Fix::ServiceManual { name: name.clone(), display: disp.clone() }, &disp, Area::Speed, false);
-                    } else {
-                        small(ui, "Starts when needed");
+                    match service_fix(sv) {
+                        Some(fx) => self.fix_button_as(ui, &fx, &disp, Area::Speed, false),
+                        None => {
+                            small(ui, "Starts when needed");
+                        }
                     }
                     ui.add_space(S3);
                     two_lines(ui, &disp, &format!("{} · {}", s(sv, "State"), s(sv, "Signer")), &s(sv, "Path"));

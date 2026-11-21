@@ -455,6 +455,8 @@ pub struct App {
     /// A queue picked up after the restart as administrator: what to do next, and whether the
     /// leftover files still need adding (and ticking).
     resume_wait: Option<(run::Then, Option<bool>)>,
+    /// A queue saved before the restart as administrator, waiting for the check-up that runs first.
+    resume_check: Option<run::Resume>,
     taskbar: Option<system::Taskbar>,
     check_error: Option<String>,
     tx: Sender<Job>,
@@ -529,6 +531,7 @@ impl App {
             clock: 0.0,
             page_fade: None,
             resume_wait: None,
+            resume_check: None,
             taskbar: if snap_dir.is_none() { system::Taskbar::new(cc) } else { None },
             check_error: None,
             tx,
@@ -575,7 +578,7 @@ impl App {
             queue.extend([Shot::Dialog, Shot::Early, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         } else if resume {
-            app.resume(&cc.egui_ctx);
+            app.resume();
         }
         app
     }
@@ -715,6 +718,7 @@ impl App {
         let Some(q) = self.run.take() else { return };
         log!("queue", "closed while {:?} ({:?})", q.stage, q.mode);
         self.resume_wait = None;
+        self.resume_check = None;
         self.go(if q.mode == run::Mode::Check { Page::Home } else { q.origin });
         self.page_fade = Some(self.clock);
     }
@@ -819,8 +823,9 @@ impl App {
         }
     }
 
-    /// Picks up the queue saved before the restart as administrator, if it's recent.
-    fn resume(&mut self, ctx: &egui::Context) {
+    /// Picks up the queue saved before the restart as administrator, if it's recent. A check-up
+    /// runs first, and only the fixes it still offers carry on (see `resumed_check`).
+    fn resume(&mut self) {
         let Some(path) = resume_path() else { return };
         let Ok(bytes) = std::fs::read(&path) else { return };
         if let Err(e) = std::fs::remove_file(&path) {
@@ -833,40 +838,37 @@ impl App {
                 return;
             }
         };
-        if !saved.fresh(unix_now()) {
-            return;
-        }
-        let mut items = vec![];
-        let mut leftovers = None;
-        for ri in &saved.items {
-            let Some(f) = &ri.fix else {
-                leftovers = Some(ri.ticked);
-                continue;
-            };
-            // Any app the user runs can change the saved queue, so it only carries fixes the check-up could give.
-            if !f.check() {
-                log!("queue", "left out a saved fix whose details were altered");
-                continue;
-            }
-            let found = self.findings.iter().find(|x| x.actions.iter().any(|a| matches!(a, rules::Action::Fix(y) if y == f)));
-            // A fix offered outside the plan, such as a background service, keeps its own name.
-            let mut it = match found {
-                Some(x) => run::Item::fix(f.clone(), x.title.clone(), x.area),
-                None => run::Item::fix(f.clone(), ri.title.clone(), rules::Area::Speed),
-            };
-            it.ticked = ri.ticked;
-            items.push(it);
-        }
-        if items.is_empty() && leftovers.is_none() {
+        if !saved.fresh(unix_now()) || saved.items.is_empty() {
             return;
         }
         let origin = saved.origin();
-        let gate = self.gate_now();
-        log!("queue", "picked up after restarting as administrator, back to {origin:?}");
+        log!("queue", "picked up after restarting as administrator; checking again before going back to {origin:?}");
         if self.page != origin {
             log!("page", "{:?} -> {origin:?}", self.page);
         }
         self.page = origin;
+        self.start_check();
+        self.resume_check = Some(saved);
+    }
+
+    /// The check-up run before picking up a saved queue is over. The fixes it still offers carry
+    /// on, and anything else is left out with a line saying so.
+    fn resumed_check(&mut self, ctx: &egui::Context, saved: run::Resume) {
+        let Some(snap) = self.snap.clone() else { return };
+        let (items, dropped) = saved.still_offered(&self.findings, &snap);
+        let leftovers = saved.leftovers();
+        log!("queue", "the new check-up still offers {} of the saved fixes, leaving out {dropped}", items.len());
+        if items.is_empty() && leftovers.is_none() {
+            self.toast(if dropped == 1 { "The fix you picked isn't needed now." } else { "The fixes you picked aren't needed now." }, true);
+            return;
+        }
+        match dropped {
+            0 => {}
+            1 => self.toast("One fix you picked isn't needed now, so Bootmend left it out.", true),
+            n => self.toast(format!("{n} fixes you picked aren't needed now, so Bootmend left them out."), true),
+        }
+        let origin = saved.origin();
+        let gate = self.gate_now();
         self.set_mark_kind(mark::Kind::Healing);
         self.run = Some(run::Run::fixes(items, origin, gate));
         self.resume_wait = Some((saved.then, leftovers));
@@ -940,6 +942,11 @@ impl App {
             }
             if ev.rested {
                 q.rested();
+            }
+        }
+        if ev.rested && self.run.as_ref().is_some_and(|q| q.mode == run::Mode::Check && q.stage == run::Stage::Over) {
+            if let Some(saved) = self.resume_check.take() {
+                self.resumed_check(ctx, saved);
             }
         }
         if let Some(tb) = &mut self.taskbar {
@@ -1262,6 +1269,9 @@ impl App {
                 }
                 Progress::Failed(e) => {
                     log!("check", "the check-up didn't finish: {e}");
+                    if self.resume_check.take().is_some() {
+                        log!("queue", "the saved fixes were left out because the check-up didn't finish");
+                    }
                     self.check_rx = None;
                     self.run = None;
                     let reduced = self.mark.reduced;
