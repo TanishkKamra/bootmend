@@ -137,7 +137,7 @@ struct Suspect {
 /// Either way there must be no blue screen in the month before it. Two best guesses go to the
 /// graphics driver, the usual cause; any other tie offers nothing.
 fn driver_suspect(s: &Snapshot, crashes: &[NaiveDateTime]) -> Option<Suspect> {
-    let file = |d: &crate::snapshot::DumpAnalysis| d.image.clone().or_else(|| d.module.as_ref().map(|m| format!("{m}.sys")));
+    let file = crate::snapshot::DumpAnalysis::driver_file;
     // Crash files naming a driver file two updated devices share can't say which device crashed.
     let images: Vec<String> = s.health.a("driverUpdates").iter().filter_map(|u| u.s("Image")).collect();
     if s.dumps.iter().filter_map(file).any(|f| images.iter().filter(|i| i.eq_ignore_ascii_case(&f)).count() > 1) {

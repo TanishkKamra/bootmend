@@ -47,16 +47,24 @@ pub fn bugcheck_info(code: u32) -> (&'static str, &'static str) {
     }
 }
 
+fn bare(module: &str) -> String {
+    module.to_ascii_lowercase().trim_end_matches(".sys").trim_end_matches(".exe").to_string()
+}
+
+/// Windows' own kernel, which crash files name when the real cause left no trace.
+pub fn windows_core(module: &str) -> bool {
+    matches!(bare(module).as_str(), "nt" | "ntoskrnl" | "ntkrnlmp" | "hal")
+}
+
 /// Plain name for the driver files that most often show up in crash reports.
 pub fn module_hint(module: &str) -> Option<&'static str> {
-    let m = module.to_ascii_lowercase();
-    let m = m.trim_end_matches(".sys").trim_end_matches(".exe");
-    Some(match m {
+    let m = bare(module);
+    Some(match m.as_str() {
+        _ if windows_core(&m) => "Windows core (the real cause is often hardware, RAM or a driver that left no trace)",
         "nvlddmkm" => "NVIDIA graphics driver",
         "amdkmdag" | "atikmdag" | "atikmpag" | "amdkmpfd" => "AMD graphics driver",
         "igdkmd64" | "igdkmdn64" | "igdkmdnd64" => "Intel graphics driver",
         "dxgkrnl" | "dxgmms2" | "watchdog" => "Windows graphics system (usually the graphics driver underneath)",
-        "nt" | "ntoskrnl" | "ntkrnlmp" | "hal" => "Windows core (the real cause is often hardware, RAM or a driver that left no trace)",
         "tcpip" | "ndis" | "netio" => "Windows networking (often the network adapter driver)",
         "storport" | "stornvme" | "storahci" | "iastorac" | "iastora" | "iastorvd" => "Storage driver",
         "wdfilter" | "wdboot" => "Microsoft Defender",

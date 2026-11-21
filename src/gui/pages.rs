@@ -287,7 +287,7 @@ impl App {
                             self.go(*pg);
                         }
                     }
-                    Action::AnalyzeDumps => self.dumps_button(ui),
+                    Action::AnalyzeDumps => self.dumps_button(ui, "Read crash files"),
                     Action::Elevate => {
                         if widgets::primary(ui, "Restart as administrator").clicked() {
                             self.ask(Pending::Elevate);
@@ -335,7 +335,7 @@ impl App {
         }
     }
 
-    fn dumps_button(&mut self, ui: &mut Ui) {
+    fn dumps_button(&mut self, ui: &mut Ui, label: &str) {
         let cdb = crate::collect::dumps::cdb_path().is_some();
         let busy = self.busy.contains("dumps");
         if busy {
@@ -344,7 +344,7 @@ impl App {
             return;
         }
         let ok = cdb && self.elevated;
-        let r = widgets::secondary_enabled(ui, "Read crash files", ok);
+        let r = widgets::secondary_enabled(ui, label, ok);
         let r = if !cdb {
             r.on_disabled_hover_text("Needs Microsoft's free Debugging Tools for Windows, part of the Windows SDK.")
         } else if !self.elevated {
@@ -886,12 +886,25 @@ impl App {
                 muted(ui, if snap.elevated { "There are no crash files to read." } else { "Crash files can only be seen as administrator." });
                 return;
             }
-            muted(
-                ui,
-                format!("Windows saved {}. Reading them shows which driver was running when it crashed.", plural(dumps.len(), "crash file", "crash files")),
-            );
-            ui.add_space(S2);
-            ui.horizontal(|ui| self.dumps_button(ui));
+            let tried = !snap.dumps.is_empty() || snap.dumps_unread > 0;
+            if tried {
+                let (ok, line) = super::crash_summary::card_line(snap.dumps.len(), snap.dumps_unread);
+                ui.horizontal(|ui| {
+                    let (ic, fg) = if ok { (icon::CHECK, p.green) } else { (icon::WARN, p.amber) };
+                    ui.add(widgets::Glyph(ico(ic, 16.0).color(fg)));
+                    ui.add(egui::Label::new(line).wrap());
+                });
+            } else {
+                muted(
+                    ui,
+                    format!("Windows saved {}. Reading them shows which driver was running when it crashed.", plural(dumps.len(), "crash file", "crash files")),
+                );
+            }
+            // Once every file is read, reading again would only say the same.
+            if !tried || snap.dumps_unread > 0 || self.busy.contains("dumps") {
+                ui.add_space(S2);
+                ui.horizontal(|ui| self.dumps_button(ui, if tried { "Try again" } else { "Read crash files" }));
+            }
             if !snap.dumps.is_empty() {
                 ui.add_space(S2);
                 let rows: Vec<Vec<String>> = snap
@@ -951,7 +964,6 @@ impl App {
             section(ui, "Services that failed to start this week");
             card(ui, |ui| table(ui, "svc", &["Times", "Message"], &st));
         }
-        let _ = p;
     }
 
     // ---------- Changes ----------
