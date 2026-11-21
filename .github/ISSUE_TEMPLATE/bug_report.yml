@@ -6,6 +6,8 @@ body:
     attributes:
       value: |
         Thanks for telling us. Everything here is public, so please leave out anything private, such as your name, email address or serial numbers.
+
+        Found a security problem? Please don't post it here. Report it privately from the [Security tab](https://github.com/TanishkKamra/bootmend/security) instead.
   - type: textarea
     id: what-happened
     attributes:
