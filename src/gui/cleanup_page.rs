@@ -69,7 +69,16 @@ fn look(elevated: bool) -> Result<Found, String> {
 /// Safe to clear without asking: in the safe group, allowed with these rights, and not held open
 /// by an app.
 fn safe(i: &Item, found: &Found, elevated: bool) -> bool {
-    i.group == Group::Safe && (elevated || !i.admin) && !found.open.contains_key(i.id)
+    i.group == Group::Safe && blocked(i, elevated).is_none() && !found.open.contains_key(i.id)
+}
+
+/// Why an item can't be cleared in this window, if it can't.
+fn blocked(i: &Item, elevated: bool) -> Option<&'static str> {
+    match (i.admin, i.user_only, elevated) {
+        (true, _, false) => Some("Needs administrator rights. Restart Bootmend as administrator to clear this."),
+        (_, true, true) => Some(cleanup::NOT_AS_ADMIN),
+        _ => None,
+    }
 }
 
 impl CleanupView {
@@ -295,9 +304,9 @@ impl App {
                     }
                     let mut on = v.ticked.contains(item.id);
                     let done = v.done.get(item.id);
-                    let needs_admin = item.admin && !elevated;
-                    let enabled = !cleaning && !needs_admin && !matches!(done, Some(Ok(_)));
-                    if row(ui, item, &mut on, enabled, done, v.found.open.get(item.id), needs_admin) {
+                    let blocked = blocked(item, elevated);
+                    let enabled = !cleaning && blocked.is_none() && !matches!(done, Some(Ok(_)));
+                    if row(ui, item, &mut on, enabled, done, v.found.open.get(item.id), blocked) {
                         if on {
                             v.ticked.insert(item.id);
                         } else {
@@ -375,7 +384,15 @@ impl App {
 }
 
 /// One item: a checkbox with the title, its size on the right, and what it is underneath. Returns true when the tick changed.
-fn row(ui: &mut Ui, item: &Item, on: &mut bool, enabled: bool, done: Option<&Result<Cleaned, String>>, open: Option<&Vec<String>>, needs_admin: bool) -> bool {
+fn row(
+    ui: &mut Ui,
+    item: &Item,
+    on: &mut bool,
+    enabled: bool,
+    done: Option<&Result<Cleaned, String>>,
+    open: Option<&Vec<String>>,
+    blocked: Option<&str>,
+) -> bool {
     let p = pal(ui.ctx());
     let mut changed = false;
     // A square, larger box: the theme's rounded corners otherwise make it look like a radio button.
@@ -386,7 +403,7 @@ fn row(ui: &mut Ui, item: &Item, on: &mut bool, enabled: bool, done: Option<&Res
         (Some(Ok(c)), _) => (format!("Cleared {}", size_text(c.bytes)), p.green),
         (Some(Err(_)), _) => ("Not cleared".to_string(), p.red),
         (None, Some(b)) => (size_text(b), p.ink),
-        (None, None) if needs_admin => ("Size unknown".to_string(), p.muted),
+        (None, None) if blocked.is_some() => ("Size unknown".to_string(), p.muted),
         (None, None) => ("Measured while clearing".to_string(), p.muted),
     };
     let size = RichText::new(text).color(color).family(theme::semibold());
@@ -413,8 +430,8 @@ fn row(ui: &mut Ui, item: &Item, on: &mut bool, enabled: bool, done: Option<&Res
             if let Some(t) = item.tradeoff {
                 ui.add(egui::Label::new(RichText::new(format!("The catch: {t}")).color(p.amber)).wrap());
             }
-            if needs_admin {
-                small(ui, "Needs administrator rights. Restart Bootmend as administrator to clear this.");
+            if let Some(why) = blocked {
+                small(ui, why);
             }
             if let (Some(apps), Some((name, _))) = (open, &item.close_first) {
                 if !apps.is_empty() && done.is_none() {

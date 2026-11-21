@@ -222,6 +222,18 @@ fn private_dir(parent: &Path) -> Result<PathBuf> {
     made
 }
 
+/// Tells Windows not to follow junctions made by anyone without administrator rights, for the rest
+/// of this run. Used as administrator, so a folder of the user's swapped for a junction can't send
+/// Bootmend into Windows' own folders. Windows 11 22H2 and later have it; elsewhere this fails and
+/// the checks made before each change still apply.
+pub fn guard_redirections() -> windows::core::Result<()> {
+    use windows::Win32::System::Threading::{ProcessRedirectionTrustPolicy, SetProcessMitigationPolicy};
+    // PROCESS_MITIGATION_REDIRECTION_TRUST_POLICY is a single set of flags: bit 0 turns it on.
+    let enforce: u32 = 1;
+    // SAFETY: `enforce` is the four bytes the policy reads, and outlives the call.
+    unsafe { SetProcessMitigationPolicy(ProcessRedirectionTrustPolicy, &enforce as *const u32 as *const core::ffi::c_void, 4) }
+}
+
 /// Removes the administrator window's temporary folder as Bootmend closes.
 pub fn remove_tmp() {
     if let Some(Ok(d)) = ADMIN_TMP.get() {
@@ -305,6 +317,17 @@ mod tests {
         assert_eq!(modules.len(), 2, "{modules:?}");
         assert!(modules.iter().all(|m| m.ends_with(r"\Modules") && !m.contains("Documents")), "{modules:?}");
         assert!(get("PATH").split(';').all(|d| d.to_lowercase().starts_with(&windows_dir().to_string_lossy().to_lowercase())), "{}", get("PATH"));
+    }
+
+    /// Changes how this test process follows junctions, so it runs on its own.
+    #[test]
+    #[ignore = "changes the test process; run alone with --ignored --exact"]
+    fn junctions_made_without_administrator_rights_are_refused() {
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessMitigationPolicy, ProcessRedirectionTrustPolicy};
+        guard_redirections().unwrap();
+        let mut flags = 0u32;
+        unsafe { GetProcessMitigationPolicy(GetCurrentProcess(), ProcessRedirectionTrustPolicy, &mut flags as *mut u32 as *mut core::ffi::c_void, 4) }.unwrap();
+        assert_eq!(flags & 1, 1, "{flags:#x}");
     }
 
     #[test]

@@ -633,6 +633,10 @@ impl App {
         let p = pal(ui.ctx());
         section(ui, "App updates");
         card(ui, |ui| {
+            if self.elevated {
+                muted(ui, crate::collect::winget::NOT_AS_ADMIN);
+                return;
+            }
             if !crate::collect::winget::available() {
                 muted(ui, "Update checks use winget, Windows' own app installer, which isn't available on this PC. Install \"App Installer\" from the Microsoft Store to turn this on.");
                 return;

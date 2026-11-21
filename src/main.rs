@@ -168,6 +168,8 @@ fn headless(out: PathBuf, pdf: bool, hide: bool) -> Result<()> {
 }
 
 fn main() {
+    // First, before Bootmend touches any folder as administrator.
+    let guarded = elevate::is_elevated().then(sys::guard_redirections);
     // The move only runs while the new folder doesn't exist yet, and starting the log can create it.
     let moved = move_from_old_name();
     log::init();
@@ -189,6 +191,11 @@ fn main() {
     };
     let admin = if elevate::is_elevated() { " as administrator" } else { "" };
     log!("app", "Bootmend {} started{admin} for {mode}", env!("CARGO_PKG_VERSION"));
+    match guarded {
+        Some(Ok(())) => log!("app", "Windows won't follow junctions made without administrator rights"),
+        Some(Err(e)) => log!("app", "this Windows can't refuse junctions made without administrator rights: {e}"),
+        None => {}
+    }
     after_move(moved);
     if args.scheduled {
         scheduled();

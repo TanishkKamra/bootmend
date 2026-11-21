@@ -26,7 +26,7 @@ impl Settings {
 /// one notification per new version.
 pub fn update_in_background() -> anyhow::Result<()> {
     let mut s = load_settings();
-    if !s.privacy_ack || !s.update_due() {
+    if !s.privacy_ack || !s.update_due() || crate::sys::elevated() {
         return Ok(());
     }
     s.update_checked = Some(today());
@@ -61,7 +61,7 @@ impl App {
     /// The once-a-day check when Bootmend opens. It waits until the welcome, which mentions it,
     /// has been answered.
     pub(super) fn auto_update_check(&mut self, ctx: &egui::Context) {
-        if self.update_looked || self.snap_mode.is_some() || !self.settings.privacy_ack {
+        if self.update_looked || self.snap_mode.is_some() || !self.settings.privacy_ack || self.elevated {
             return;
         }
         self.update_looked = true;
@@ -71,7 +71,7 @@ impl App {
     }
 
     fn check_for_update(&mut self, ctx: &egui::Context, manual: bool) {
-        if !self.busy.insert("update-check".into()) {
+        if self.elevated || !self.busy.insert("update-check".into()) {
             return;
         }
         log!("action", "{}", if manual { "check for a new Bootmend" } else { "the daily check for a new Bootmend" });
@@ -174,6 +174,7 @@ impl App {
 
     fn update_words(&self) -> String {
         match self.update {
+            _ if self.elevated => update::NOT_AS_ADMIN.into(),
             _ if self.busy.contains("update") => "Downloading the new version and checking its signature…".into(),
             _ if self.busy.contains("update-check") => "Checking for a new version…".into(),
             Some(v) => format!("Bootmend {v} is ready to install."),
@@ -188,7 +189,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let words = self.update_words();
         let (checking, updating, ready) = (self.busy.contains("update-check"), self.busy.contains("update"), self.can_update());
-        let (on, found) = (self.settings.auto_update, self.update);
+        let (on, found, elevated) = (self.settings.auto_update, self.update, self.elevated);
         let (mut flip, mut check, mut install, mut notes) = (false, false, false, false);
         card(ui, |ui| {
             let name = "Check for updates automatically";
@@ -199,6 +200,9 @@ impl App {
             });
             ui.separator();
             stacked(ui, &format!("Bootmend {}", env!("CARGO_PKG_VERSION")), &words, |ui| {
+                if elevated {
+                    return;
+                }
                 if found.is_some() {
                     install = widgets::primary_enabled(ui, "Update now", ready && !updating).clicked();
                     notes = widgets::icon_button(ui, icon::OPEN, "What's new", true).clicked();

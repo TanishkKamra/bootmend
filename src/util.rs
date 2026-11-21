@@ -257,27 +257,34 @@ pub fn ps_quote(s: &str) -> String {
     out
 }
 
-/// Open a URL, settings URI or folder with the shell (no console window).
-/// Starts a program by name with arguments. Windows finds installed apps such as chrome.exe on its own.
-pub fn shell_run(program: &str, params: &str) -> Result<()> {
+/// Asks the shell to open `file`. As administrator the desktop's shell is asked instead, so what
+/// opens runs as the signed-in user: the user's apps can change which program opens a link,
+/// folder or file type, and that program shouldn't get administrator rights.
+fn shell_execute(file: &str, params: &str) -> bool {
     use windows::core::HSTRING;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let r = unsafe { ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(program), &HSTRING::from(params), None, SW_SHOWNORMAL) };
-    if r.0 as isize > 32 {
+    if crate::sys::elevated() {
+        return crate::elevate::open_as_user(file, params, SW_SHOWNORMAL.0).inspect_err(|e| log!("app", "{e:#}")).is_ok();
+    }
+    // SAFETY: the strings live for the call.
+    let r = unsafe { ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(file), &HSTRING::from(params), None, SW_SHOWNORMAL) };
+    // ShellExecute returns a value > 32 on success.
+    r.0 as isize > 32
+}
+
+/// Starts a program by name with arguments. Windows finds installed apps such as chrome.exe on its own.
+pub fn shell_run(program: &str, params: &str) -> Result<()> {
+    if shell_execute(program, params) {
         Ok(())
     } else {
         Err(anyhow!("Windows could not start {program}"))
     }
 }
 
+/// Opens a URL, settings URI, folder or file with the shell (no console window).
 pub fn shell_open(target: &str) -> Result<()> {
-    use windows::core::HSTRING;
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let r = unsafe { ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL) };
-    // ShellExecute returns a value > 32 on success.
-    if r.0 as isize > 32 {
+    if shell_execute(target, "") {
         Ok(())
     } else {
         Err(anyhow!("Windows could not open {target}"))

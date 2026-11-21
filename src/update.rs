@@ -204,8 +204,15 @@ fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// Updates wait for a normal window: as administrator, the new version would start with full
+/// rights from a folder the user's own apps can change.
+pub const NOT_AS_ADMIN: &str = "Bootmend checks for updates when it isn't running as administrator.";
+
 /// Asks GitHub for the newest release and returns its version if it's newer than this one.
 pub fn check() -> Result<Option<Version>> {
+    if crate::sys::elevated() {
+        bail!(NOT_AS_ADMIN);
+    }
     let dir = crate::util::data_dir("update")?;
     let sig = fetch(&latest_url(SIG), &dir.join(SIG), MAX_SIG, 20)?;
     let found = newer_than(Version::current(), &String::from_utf8_lossy(&sig))?;
@@ -222,7 +229,16 @@ pub fn install(v: Version) -> Result<PathBuf> {
     if v <= Version::current() {
         bail!("Bootmend {v} isn't newer than this version");
     }
+    if crate::sys::elevated() {
+        bail!(NOT_AS_ADMIN);
+    }
     let exe = std::env::current_exe().context("finding Bootmend's own file")?;
+    if crate::elevate::others_can_change(&exe) {
+        bail!(
+            "Bootmend can't update itself in this folder, because other accounts on this PC can change files in it. Move {} to your Downloads folder, then try again.",
+            crate::elevate::exe_name(&exe)
+        );
+    }
     let dir = crate::util::data_dir("update")?;
     let sig = fetch(&file_url(v, SIG), &dir.join(SIG), MAX_SIG, 30)?;
     let bin = fetch(&file_url(v, EXE), &dir.join(EXE), MAX_EXE, 600)?;

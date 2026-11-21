@@ -37,6 +37,9 @@ pub struct Item {
     pub tradeoff: Option<&'static str>,
     pub group: Group,
     pub admin: bool,
+    /// Cleared only from a normal window. As administrator it would start a coding tool, or move
+    /// files in Downloads, which the user's own apps can swap for something else.
+    pub user_only: bool,
     /// Process names (without ".exe") that must be closed first, and the app's name to show.
     pub close_first: Option<(&'static str, Vec<&'static str>)>,
     pub how: How,
@@ -106,6 +109,63 @@ fn is_link(m: &Metadata) -> bool {
     m.file_type().is_symlink() || m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
+/// Opens `path` without asking for read or write access. `flags` can add FILE_FLAG_OPEN_REPARSE_POINT,
+/// which opens a link or junction itself rather than what it points to.
+fn open_entry(path: &Path, access: u32, flags: u32) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
+    // Backup semantics let a folder be opened like a file.
+    std::fs::OpenOptions::new()
+        .access_mode(access)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | flags)
+        .open(path)
+}
+
+/// Reads a path from Windows into a growing buffer; `get` returns the length written, or the
+/// size needed when the buffer is too small, or 0 on failure.
+fn read_path(mut get: impl FnMut(&mut [u16]) -> u32) -> Option<String> {
+    let mut buf = vec![0u16; 512];
+    loop {
+        match get(&mut buf) as usize {
+            0 => return None,
+            n if n < buf.len() => return Some(String::from_utf16_lossy(&buf[..n]).to_lowercase()),
+            n => buf.resize(n, 0),
+        }
+    }
+}
+
+/// Where an open file or folder really is, with links followed and short names written out,
+/// lowercased, such as `\\?\c:\users\sam\appdata\local\temp`.
+fn real_path(f: &std::fs::File) -> Option<String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, GETFINALPATHNAMEBYHANDLE_FLAGS, VOLUME_NAME_DOS};
+    // SAFETY: the handle stays open while `f` lives, and the buffer is writable.
+    read_path(|buf| unsafe {
+        GetFinalPathNameByHandleW(HANDLE(f.as_raw_handle()), buf, GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0))
+    })
+}
+
+/// Where a root really is, so every file can be checked against it before it's deleted. As
+/// administrator a root reached through a link or junction is left alone, because the user or an
+/// app they ran could have pointed it at a Windows folder.
+fn real_root(root: &Path, admin: bool) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{GetLongPathNameW, FILE_READ_ATTRIBUTES};
+    let real = real_path(&open_entry(root, FILE_READ_ATTRIBUTES.0, 0).ok()?)?;
+    if admin {
+        // The path as written, with short names written out but no link followed.
+        let wide = windows::core::HSTRING::from(root.as_os_str());
+        // SAFETY: `wide` lives for the call, and the buffer is writable.
+        let named = read_path(|buf| unsafe { GetLongPathNameW(&wide, Some(buf)) })?;
+        if real.strip_prefix(r"\\?\") != Some(named.trim_end_matches('\\')) {
+            log!("cleanup", "left {} alone: it leads to another folder", root.display());
+            return None;
+        }
+    }
+    Some(real)
+}
+
 /// Every eligible file under the roots, with its size.
 fn eligible(roots: &[(PathBuf, u64)], only: Option<&str>, now: SystemTime) -> Vec<(PathBuf, u64)> {
     fn walk(dir: &Path, days: u64, only: Option<&str>, now: SystemTime, out: &mut Vec<(PathBuf, u64)>) {
@@ -143,18 +203,54 @@ pub fn measure_files(roots: &[(PathBuf, u64)], only: Option<&str>, now: SystemTi
 /// Delete eligible files. Files an app is using are skipped and counted. Folders that became
 /// empty because of this are removed; folders that were already empty, and the roots, stay.
 pub fn clean_files(roots: &[(PathBuf, u64)], only: Option<&str>, now: SystemTime) -> Cleaned {
+    delete_found(roots, eligible(roots, only, now), crate::sys::elevated())
+}
+
+/// Deletes a file, or a folder if it's empty, once it's checked to be inside one of `homes`
+/// (from `real_root`). What was opened is what gets deleted, so a folder on the way swapped for a
+/// junction after the check can't send the delete somewhere else. `Ok(false)`: left alone, because
+/// it now leads outside.
+fn delete_inside(path: &Path, homes: &[&str], folder: bool) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    };
+    // A link or junction at the end of the path is opened, and deleted, itself.
+    let f = open_entry(path, (DELETE | FILE_READ_ATTRIBUTES).0, FILE_FLAG_OPEN_REPARSE_POINT.0)?;
+    let real = real_path(&f).ok_or_else(|| std::io::Error::other("Windows didn't say where it is"))?;
+    // A root folder itself stays; a root that is a single file can go.
+    if !homes.iter().any(|h| real.starts_with(&format!("{h}\\")) || (!folder && real == *h)) {
+        log!("cleanup", "left {} alone: it leads outside the folder being cleared", path.display());
+        return Ok(false);
+    }
+    let gone = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let size = std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32;
+    // SAFETY: the handle is open while `f` lives, and `gone` outlives the call.
+    unsafe { SetFileInformationByHandle(HANDLE(f.as_raw_handle()), FileDispositionInfo, &gone as *const _ as *const core::ffi::c_void, size) }
+        .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+    Ok(true)
+}
+
+fn delete_found(roots: &[(PathBuf, u64)], found: Vec<(PathBuf, u64)>, admin: bool) -> Cleaned {
+    let real: Vec<(&Path, String)> = roots.iter().filter_map(|(r, _)| Some((r.as_path(), real_root(r, admin)?))).collect();
+    let homes = |p: &Path| -> Vec<&str> { real.iter().filter(|(r, _)| p.starts_with(r)).map(|(_, h)| h.as_str()).collect() };
     let mut c = Cleaned::default();
     let mut emptied: HashSet<PathBuf> = HashSet::new();
-    for (p, n) in eligible(roots, only, now) {
-        match std::fs::remove_file(&p) {
-            Ok(()) => {
+    for (p, n) in found {
+        let h = homes(&p);
+        if h.is_empty() {
+            continue;
+        }
+        match delete_inside(&p, &h, false) {
+            Ok(true) => {
                 c.bytes += n;
                 if let Some(parent) = p.parent() {
                     emptied.insert(parent.to_path_buf());
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => c.skipped += 1,
+            Ok(false) | Err(_) => c.skipped += 1,
         }
     }
     let keep: HashSet<&PathBuf> = roots.iter().map(|(r, _)| r).collect();
@@ -162,11 +258,11 @@ pub fn clean_files(roots: &[(PathBuf, u64)], only: Option<&str>, now: SystemTime
     let mut dirs: Vec<PathBuf> = emptied.into_iter().collect();
     while let Some(d) = dirs.iter().max_by_key(|d| d.components().count()).cloned() {
         dirs.retain(|x| x != &d);
-        let inside_a_root = roots.iter().any(|(r, _)| d.starts_with(r));
-        if keep.contains(&d) || !inside_a_root {
+        let h = homes(&d);
+        if keep.contains(&d) || h.is_empty() {
             continue;
         }
-        if std::fs::remove_dir(&d).is_ok() {
+        if matches!(delete_inside(&d, &h, true), Ok(true)) {
             if let Some(parent) = d.parent() {
                 if !dirs.iter().any(|x| x == parent) {
                     dirs.push(parent.to_path_buf());
@@ -244,7 +340,7 @@ pub fn catalog(p: &Places, elevated: bool, now: SystemTime) -> Vec<Item> {
     let mut files = |id, title, why, tradeoff, group, admin, close_first: Option<(&'static str, Vec<&'static str>)>, roots: Vec<(PathBuf, u64)>, only| {
         let roots = existing(roots);
         if !roots.is_empty() {
-            items.push(Item { id, title, why, tradeoff, group, admin, close_first, how: How::Files { roots, only }, bytes: None, files: 0 });
+            items.push(Item { id, title, why, tradeoff, group, admin, user_only: false, close_first, how: How::Files { roots, only }, bytes: None, files: 0 });
         }
     };
 
@@ -411,6 +507,7 @@ pub fn catalog(p: &Places, elevated: bool, now: SystemTime) -> Vec<Item> {
             tradeoff,
             group,
             admin: false,
+            user_only: true,
             close_first: None,
             how: How::Command { program: "cmd", args: a, measure: vec![folder] },
             bytes: None,
@@ -428,6 +525,7 @@ pub fn catalog(p: &Places, elevated: bool, now: SystemTime) -> Vec<Item> {
             tradeoff: None,
             group: Group::Safe,
             admin: false,
+            user_only: true,
             close_first: None,
             files: 0,
             how: How::Recycle(installers),
@@ -445,6 +543,7 @@ pub fn catalog(p: &Places, elevated: bool, now: SystemTime) -> Vec<Item> {
                 tradeoff: None,
                 group: Group::Safe,
                 admin: true,
+                user_only: false,
                 close_first: None,
                 how: How::Command {
                     program: "powershell.exe",
@@ -462,6 +561,7 @@ pub fn catalog(p: &Places, elevated: bool, now: SystemTime) -> Vec<Item> {
             tradeoff: Some("Takes 5 to 15 minutes, and updates that were replaced can no longer be uninstalled."),
             group: Group::Choice,
             admin: true,
+            user_only: false,
             close_first: None,
             how: How::Dism,
             bytes: None,
@@ -596,8 +696,15 @@ pub fn empty_recycle_bin() -> Result<()> {
     r
 }
 
+/// Shown, and returned, for an item that is only cleared from a normal window.
+pub const NOT_AS_ADMIN: &str = "Open Bootmend normally to clear this.";
+
 /// Clear one item. Apps listed in `close_first` must be closed; the caller checks with `running`.
 pub fn clean(item: &Item, system_drive: &Path) -> Result<Cleaned> {
+    if item.user_only && crate::sys::elevated() {
+        log!("cleanup", "left \"{}\" alone: it's only cleared from a normal window", item.title);
+        return Err(anyhow!(NOT_AS_ADMIN));
+    }
     log!("cleanup", "cleaning \"{}\"", item.title);
     let t0 = Instant::now();
     let r = clean_item(item, system_drive);
@@ -716,6 +823,52 @@ mod tests {
         assert!(!d.join("sub").exists(), "emptied folders go too");
         assert!(d.exists(), "the root folder itself stays");
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Makes `link` a junction to `target`. Junctions need no administrator rights.
+    fn junction(link: &Path, target: &Path) {
+        let out =
+            crate::util::run_hidden("cmd.exe", &["/c", "mklink", "/J", &link.to_string_lossy(), &target.to_string_lossy()], Duration::from_secs(30)).unwrap();
+        assert_eq!(out.code, Some(0), "{}{}", out.stdout, out.stderr);
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_junction_after_listing_is_not_followed() {
+        let d = scratch("swap");
+        let root = d.join("cache");
+        file(&root.join(r"a\old.tmp"), 100, 10);
+        file(&d.join(r"elsewhere\old.tmp"), 100, 10);
+        let roots = vec![(root.clone(), 0)];
+        let found = eligible(&roots, None, SystemTime::now());
+        assert_eq!(found.len(), 1);
+        // Between listing and deleting, the folder becomes a junction to one outside the cache.
+        fs::remove_dir_all(root.join("a")).unwrap();
+        junction(&root.join("a"), &d.join("elsewhere"));
+        let c = delete_found(&roots, found, false);
+        let kept = d.join(r"elsewhere\old.tmp").exists();
+        let junction_kept = fs::symlink_metadata(root.join("a")).is_ok();
+        if junction_kept {
+            fs::remove_dir(root.join("a")).unwrap();
+        }
+        fs::remove_dir_all(&d).unwrap();
+        assert!(kept, "a file outside the cache was deleted");
+        assert_eq!(c, Cleaned { bytes: 0, skipped: 1 });
+        // Nothing was deleted inside the junction, so the junction itself wasn't emptied either.
+        assert!(junction_kept);
+    }
+
+    #[test]
+    fn as_administrator_a_root_reached_through_a_junction_is_left_alone() {
+        let d = scratch("rootlink");
+        file(&d.join(r"real\old.tmp"), 100, 10);
+        junction(&d.join("link"), &d.join("real"));
+        let plain = real_root(&d.join("real"), true);
+        let (as_user, as_admin) = (real_root(&d.join("link"), false), real_root(&d.join("link"), true));
+        fs::remove_dir(d.join("link")).unwrap();
+        fs::remove_dir_all(&d).unwrap();
+        assert!(plain.as_deref().is_some_and(|p| p.ends_with(r"\real")), "{plain:?}");
+        assert_eq!(as_user, plain);
+        assert_eq!(as_admin, None);
     }
 
     #[test]
