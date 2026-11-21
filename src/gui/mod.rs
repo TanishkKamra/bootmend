@@ -677,6 +677,8 @@ impl App {
         std::thread::spawn(move || collect::collect(tx));
         self.check_rx = Some(rx);
         self.check_error = None;
+        // A queue waiting for the check-up after the restart is picked up only by that one.
+        self.resume_check = None;
         self.force_welcome = false;
         self.ui.nav_open = false;
         self.run = Some(run::Run::check(self.page, self.snap.is_none()));
@@ -854,7 +856,10 @@ impl App {
     /// The check-up run before picking up a saved queue is over. The fixes it still offers carry
     /// on, and anything else is left out with a line saying so.
     fn resumed_check(&mut self, ctx: &egui::Context, saved: run::Resume) {
-        let Some(snap) = self.snap.clone() else { return };
+        let Some(snap) = self.snap.clone() else {
+            log!("queue", "the saved fixes were left out because the check-up left no result");
+            return;
+        };
         let (items, dropped) = saved.still_offered(&self.findings, &snap);
         let leftovers = saved.leftovers();
         log!("queue", "the new check-up still offers {} of the saved fixes, leaving out {dropped}", items.len());
