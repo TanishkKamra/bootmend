@@ -123,6 +123,12 @@ const STARTUP_APPROVED: [&str; 5] = [
 pub const UPDATE_POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate";
 
 /// Said when a fix read back from a file isn't one the check-up would give.
+/// Stops a change to the person's own settings in an administrator window that runs as another
+/// account, as it does when someone else typed their password: HKCU there is that account's.
+const SAME_PERSON: &str = r#"$u = (Get-CimInstance Win32_ComputerSystem).UserName; $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+if ($u -and $u -ne $me) { throw "Bootmend is running as $me, not $u, so it would change the wrong person's settings." }
+"#;
+
 const APPLY_CHANGED: &str = "Bootmend didn't make this change, because its details were altered after it was set up.";
 /// Said when a History entry, or the record kept for a change made as administrator, was altered.
 const UNDO_CHANGED: &str = "Bootmend can't undo this, because its record was altered. A restore point can still take the PC back.";
@@ -337,7 +343,19 @@ impl Fix {
             let s = ps_quote(&format!("Registry::{store}"));
             undo = format!("{undo}\nif (Test-Path -LiteralPath {s}) {{ Remove-Item -LiteralPath {s} -Recurse }}");
         }
+        if self.needs_admin() && self.changes_own_settings() {
+            (apply, undo) = (format!("{SAME_PERSON}{apply}"), format!("{SAME_PERSON}{undo}"));
+        }
         (apply, undo)
+    }
+
+    /// Whether the change is to the person's own settings, under HKCU.
+    fn changes_own_settings(&self) -> bool {
+        match self {
+            Fix::RemoveBrowserPolicies { key, .. } => starts_ci(key, "HKCU"),
+            Fix::TurnOffProxy { enabled, pac, .. } => *enabled || !pac.is_empty(),
+            _ => false,
+        }
     }
 
     /// The change itself and its reverse. `store` is where saved copies go.
@@ -1344,7 +1362,31 @@ mod tests {
         ]
     }
 
-    /// Parses every apply and undo script with PowerShell's own parser. Nothing runs.
+    /// An administrator window opened with another account's password runs as that account, so
+    /// HKCU there is theirs. A change to the person's own settings from it stops before anything.
+    #[test]
+    fn a_change_to_your_own_settings_checks_whose_window_it_is() {
+        let policies = |key: &str| Fix::RemoveBrowserPolicies { browser: "Chrome".into(), key: key.into(), settings: vec!["HomepageLocation".into()] };
+        let proxy = |enabled: bool| Fix::TurnOffProxy { enabled, pac: String::new(), winhttp: "10.0.0.1:3128".into() };
+        for fx in [policies(r"HKCU\SOFTWARE\Policies\Google\Chrome"), proxy(true)] {
+            let (a, u) = fx.scripts("x");
+            assert!(a.starts_with(SAME_PERSON) && u.starts_with(SAME_PERSON), "{fx:?}: checked before anything is recorded or changed");
+        }
+        for fx in [policies(r"HKLM\SOFTWARE\Policies\Google\Chrome"), proxy(false), Fix::EnablePua] {
+            let (a, u) = fx.scripts("x");
+            assert!(!a.contains(SAME_PERSON) && !u.contains(SAME_PERSON), "{fx:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "starts PowerShell; run with --ignored"]
+    fn only_the_signed_in_person_passes_the_account_check() {
+        assert!(run_ps(SAME_PERSON).is_ok(), "this window runs as the person signed in");
+        let other = SAME_PERSON.replace("[Security.Principal.WindowsIdentity]::GetCurrent().Name", r"'PC\someone-else'");
+        let e = run_ps(&other).unwrap_err().to_string();
+        assert!(e.starts_with(r"Bootmend is running as PC\someone-else, not "), "{e}");
+    }
+
     #[test]
     fn a_registry_key_is_found_only_when_it_is_there() {
         use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
@@ -1352,6 +1394,7 @@ mod tests {
         assert!(!key_exists(HKEY_LOCAL_MACHINE, r"SOFTWARE\Bootmend test key that is never made"));
     }
 
+    /// Parses every apply and undo script with PowerShell's own parser. Nothing runs.
     #[test]
     #[ignore = "starts PowerShell; run with --ignored"]
     fn every_fix_script_parses() {
