@@ -67,14 +67,22 @@ impl Drop for Handle {
 /// Ask the NVMe driver for the health log of `\\.\PhysicalDriveN`.
 pub fn read_nvme_health(disk: i64) -> Result<NvmeHealth> {
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Foundation::GENERIC_READ;
     use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
-    use windows::Win32::System::IO::DeviceIoControl;
 
     let path = HSTRING::from(format!(r"\\.\PhysicalDrive{disk}"));
-    let open = |access: u32| unsafe { CreateFileW(&path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) };
-    // Read/write access needs administrator; zero access works for many drivers without it.
-    let h = Handle(open(GENERIC_READ.0 | GENERIC_WRITE.0).or_else(|_| open(0))?);
+    let ask = |access: u32| -> Result<NvmeHealth> {
+        let h = unsafe { CreateFileW(&path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }?;
+        query_nvme_health(&Handle(h))
+    };
+    // Zero access is enough for this query and needs no administrator rights; read access is the
+    // fallback. Never write access: Windows Security's controlled folder access blocks any app
+    // that opens a whole drive for writing, and warns the person about it.
+    ask(0).or_else(|_| ask(GENERIC_READ.0))
+}
+
+fn query_nvme_health(h: &Handle) -> Result<NvmeHealth> {
+    use windows::Win32::System::IO::DeviceIoControl;
 
     let mut buf = vec![0u8; HEADER + PROTO + 512];
     let put = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
@@ -160,7 +168,8 @@ pub fn instance_matches(instance: &str, model: &str) -> bool {
     })
 }
 
-pub fn drive_health(storage: &Value) -> Vec<DriveHealth> {
+/// Each drive's health counters, telling `on` each drive's model as it's read.
+pub fn drive_health(storage: &Value, on: &dyn Fn(&str)) -> Vec<DriveHealth> {
     let ata = storage.a("ataSmart");
     let predict = storage.a("failurePredict");
     storage
@@ -168,6 +177,7 @@ pub fn drive_health(storage: &Value) -> Vec<DriveHealth> {
         .into_iter()
         .map(|d| {
             let model = d.s("Model").unwrap_or_else(|| "Unknown drive".into());
+            on(&model);
             let bus = d.s("Bus").unwrap_or_default();
             let media = d.s("Media").unwrap_or_default();
             let kind = match (bus.as_str(), media.as_str()) {
@@ -240,6 +250,15 @@ pub fn drive_health(storage: &Value) -> Vec<DriveHealth> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reads this PC's NVMe health log the way a check-up does. Set `BOOTMEND_NVME_DISK` to the
+    /// drive's number from `Get-PhysicalDisk`.
+    #[test]
+    #[ignore = "reads this PC's drive"]
+    fn reads_this_pcs_nvme_health() {
+        let disk = std::env::var("BOOTMEND_NVME_DISK").ok().and_then(|d| d.parse().ok()).unwrap_or(0);
+        println!("{:#?}", read_nvme_health(disk).unwrap());
+    }
 
     #[test]
     fn nvme_health_log_is_parsed() {

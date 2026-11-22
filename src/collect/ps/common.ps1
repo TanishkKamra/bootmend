@@ -14,6 +14,8 @@ function Sig($p) {
   if ($s.Status -eq 'Valid') { ($s.SignerCertificate.Subject -replace '^CN=("?)([^,"]+).*', '$2') } else { "UNSIGNED ($($s.Status))" }
 }
 function Try-Section($name, [scriptblock]$block) {
+  # Said as it starts, past the pipeline, so Bootmend can show what is being read right now.
+  [Console]::Out.WriteLine("##part $name")
   try { & $block } catch { $Errors.Add("${name}: $($_.Exception.Message)") }
 }
 function Emit { $R.errors = @($Errors); $R | ConvertTo-Json -Depth 7 -Compress }

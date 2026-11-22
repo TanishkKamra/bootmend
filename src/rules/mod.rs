@@ -293,10 +293,13 @@ mod tests {
     #[test]
     fn single_memory_stick_is_noticed() {
         let mut s = base();
-        s.system["memory"] = json!({"TotalGB": 16, "Slots": 4, "Sticks": [{"SizeGB": 16, "SpeedMTs": 3200, "ConfiguredMTs": 2133}]});
+        s.system["memory"] = json!({"TotalGB": 16, "Slots": 4, "Sticks": [
+            {"SizeGB": 16, "SpeedMTs": 3200, "ConfiguredMTs": 2133, "Maker": "Unknown", "Part": "CMK16GX4M1E3200C16"}
+        ]});
         s.system["device"]["ChassisTypes"] = json!([3]);
         let f = evaluate(&s);
-        assert!(f.iter().any(|x| x.id == "ram-single-channel"));
+        let one = f.iter().find(|x| x.id == "ram-single-channel").expect("one stick noticed");
+        assert!(one.details.contains(&"Current stick: Corsair CMK16GX4M1E3200C16".to_string()), "the maker comes from the part number: {:?}", one.details);
         assert!(f.iter().any(|x| x.id == "ram-slow"));
     }
 
@@ -1237,7 +1240,7 @@ mod tests {
                 "folderDrives": folders
             });
             s.storage["disks"][failing as usize]["Health"] = json!("Warning");
-            s.drives = crate::collect::smart::drive_health(&s.storage);
+            s.drives = crate::collect::smart::drive_health(&s.storage, &|_| {});
             let f = evaluate(&s);
             let x = f.iter().find(|x| x.id == format!("drive-failing-{failing}")).expect("a failing drive");
             x.actions.contains(&Action::CopyFiles)
@@ -1263,7 +1266,7 @@ mod tests {
                 "disks": [{"Number": 0, "Model": model, "Bus": "SATA", "Media": "SSD", "Health": health}],
                 "ataSmart": [{"Instance": format!(r"SCSI\Disk&Ven_&Prod_{model}\4&1"), "Data": table}]
             });
-            s.drives = crate::collect::smart::drive_health(&s.storage);
+            s.drives = crate::collect::smart::drive_health(&s.storage, &|_| {});
             let f = evaluate(&s);
             (level_of(&f, "drive-failing-0"), s.drives[0].pending)
         };

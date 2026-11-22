@@ -181,20 +181,25 @@ pub fn render(snap: &Snapshot, hidden: bool) -> String {
             ("Most supported", opt_num(mem.f("MaxSupportedGB"), " GB")),
         ],
     );
+    if mem.i("Slots").is_some() || mem.f("MaxSupportedGB").is_some() {
+        let _ = write!(o, "<p class=muted>{}</p>", esc(crate::rules::upgrades::MEMORY_SOURCE));
+    }
+    let sticks = mem.a("Sticks");
     table(
         &mut o,
         "Memory sticks",
         &["Slot", "Size", "Type", "Rated", "Running at", "Maker", "Part"],
-        mem.a("Sticks")
+        sticks
             .iter()
-            .map(|m| {
+            .zip(crate::rules::upgrades::slot_names(&sticks))
+            .map(|(m, slot)| {
                 vec![
-                    s(m, "Slot"),
+                    slot,
                     opt_num(m.f("SizeGB"), " GB").unwrap_or_default(),
                     s(m, "Type"),
                     opt_num(m.f("SpeedMTs"), " MT/s").unwrap_or_default(),
                     opt_num(m.f("ConfiguredMTs"), " MT/s").unwrap_or_default(),
-                    s(m, "Maker"),
+                    crate::rules::upgrades::stick_maker(m),
                     s(m, "Part"),
                 ]
             })

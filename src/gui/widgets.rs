@@ -325,32 +325,52 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool, enabled: bool, label: impl Into<egui
     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *on, galley.text()));
     if ui.is_rect_visible(rect) {
         let b = egui::Rect::from_min_size(egui::pos2(rect.left(), rect.center().y - CHECKBOX / 2.0), egui::Vec2::splat(CHECKBOX));
-        let (down, over) = (enabled && r.is_pointer_button_down_on(), enabled && r.hovered());
-        let radius = CornerRadius::same(CONTROL_RADIUS);
-        let painter = ui.painter();
-        if *on {
-            // Windows lightens the accent under the pointer and a little more while pressed.
-            let fill = match (enabled, down, over) {
-                (false, ..) => p.accent_soft,
-                (_, true, _) => p.accent.gamma_multiply(0.8),
-                (_, _, true) => p.accent.gamma_multiply(0.9),
-                _ => p.accent,
-            };
-            painter.rect_filled(b, radius, fill);
-            paint_tick(painter, b, if enabled { p.on_accent } else { p.control });
-        } else {
-            let (fill, edge) = match (enabled, down, over) {
-                (false, ..) => (p.surface2, p.line),
-                (_, true, _) => (p.surface2, p.muted),
-                (_, _, true) => (p.surface2, p.control),
-                _ => (p.surface, p.control),
-            };
-            painter.rect(b, radius, fill, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
-        }
+        paint_box(ui, b, *on, enabled, &r);
         let text_at = egui::pos2(b.right() + S2, rect.center().y - galley.size().y / 2.0);
-        painter.galley(text_at, galley, if enabled { p.ink } else { p.muted });
+        ui.painter().galley(text_at, galley, if enabled { p.ink } else { p.muted });
     }
     r
+}
+
+/// `checkbox`'s box alone, for a row whose words sit apart from it. `name` is what a screen
+/// reader says for it.
+pub fn tick_box(ui: &mut Ui, on: &mut bool, name: &str) -> Response {
+    let (b, mut r) = ui.allocate_exact_size(egui::Vec2::splat(CHECKBOX), Sense::click());
+    if r.clicked() {
+        *on = !*on;
+        r.mark_changed();
+    }
+    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, name));
+    if ui.is_rect_visible(b) {
+        paint_box(ui, b, *on, true, &r);
+    }
+    r
+}
+
+fn paint_box(ui: &Ui, b: egui::Rect, on: bool, enabled: bool, r: &Response) {
+    let p = pal(ui.ctx());
+    let (down, over) = (enabled && r.is_pointer_button_down_on(), enabled && r.hovered());
+    let radius = CornerRadius::same(CONTROL_RADIUS);
+    let painter = ui.painter();
+    if on {
+        // Windows lightens the accent under the pointer and a little more while pressed.
+        let fill = match (enabled, down, over) {
+            (false, ..) => p.accent_soft,
+            (_, true, _) => p.accent.gamma_multiply(0.8),
+            (_, _, true) => p.accent.gamma_multiply(0.9),
+            _ => p.accent,
+        };
+        painter.rect_filled(b, radius, fill);
+        paint_tick(painter, b, if enabled { p.on_accent } else { p.control });
+    } else {
+        let (fill, edge) = match (enabled, down, over) {
+            (false, ..) => (p.surface2, p.line),
+            (_, true, _) => (p.surface2, p.muted),
+            (_, _, true) => (p.surface2, p.control),
+            _ => (p.surface, p.control),
+        };
+        painter.rect(b, radius, fill, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+    }
 }
 
 fn ring_id(id: egui::Id) -> egui::Id {

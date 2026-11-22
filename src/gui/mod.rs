@@ -241,6 +241,8 @@ pub enum Job {
     /// One box of the queue finished: its index, the result, how long it took in ms, and what
     /// clearing did when it was the leftover files.
     Worked(usize, Result<(), String>, f32, Option<Vec<(&'static str, Result<crate::cleanup::Cleaned, String>)>>),
+    /// The box at this index moved on to a new part of its work, in these words.
+    Part(usize, String),
     /// System Restore was turned on so a restore point could be saved.
     TurnedOn(Result<(), String>),
     Points(Result<Vec<fixes::RestorePoint>, String>),
@@ -264,6 +266,8 @@ struct Settings {
     schedule_asked: bool,
     /// Buttons, links and switches take the Windows accent colour instead of cobalt.
     use_windows_accent: bool,
+    /// Light, dark, or the mode Windows uses.
+    theme: ThemeChoice,
     /// "Don't show again" was pressed on the early-version notice.
     early_notice_off: bool,
     /// "Don't ask again" was ticked when agreeing to M-Lab's speed test.
@@ -288,6 +292,7 @@ impl Default for Settings {
             schedule_hour: crate::schedule::NOON,
             schedule_asked: false,
             use_windows_accent: false,
+            theme: ThemeChoice::System,
             early_notice_off: false,
             speed_test_ok: false,
             auto_update: true,
@@ -309,6 +314,40 @@ fn ended<T>(r: &Result<T, String>) -> String {
     match r {
         Ok(_) => "worked".into(),
         Err(e) => format!("failed: {e}"),
+    }
+}
+
+/// The theme picked in Settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    const ALL: [ThemeChoice; 3] = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark];
+
+    fn label(self) -> &'static str {
+        match self {
+            ThemeChoice::System => "Match Windows",
+            ThemeChoice::Light => "Light",
+            ThemeChoice::Dark => "Dark",
+        }
+    }
+
+    /// Puts the choice into effect: Bootmend's colours, and the window's title bar and Mica
+    /// backdrop, which would otherwise stay in Windows' mode.
+    fn apply(self, ctx: &egui::Context) {
+        let (pref, window) = match self {
+            ThemeChoice::System => (egui::ThemePreference::System, egui::SystemTheme::SystemDefault),
+            ThemeChoice::Light => (egui::ThemePreference::Light, egui::SystemTheme::Light),
+            ThemeChoice::Dark => (egui::ThemePreference::Dark, egui::SystemTheme::Dark),
+        };
+        ctx.set_theme(pref);
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(window));
     }
 }
 
@@ -347,6 +386,9 @@ pub struct UiState {
     /// Where the logo goes this frame, and who asked for it.
     pub mark_slot: Option<(Slot, egui::Rect)>,
     pub expanded: HashSet<String>,
+    /// The boxes on Home the person ticked or unticked, away from how they started. A new check
+    /// starts them afresh.
+    pub picks: HashMap<String, bool>,
     pub search: String,
     pub hide_personal: bool,
     pub banner_closed: bool,
@@ -385,6 +427,8 @@ enum Shot {
     Queue,
     Fixing,
     Details,
+    /// A check-up part way through with its details open.
+    CheckDetails,
     /// The copy dialog choosing a drive (0), copying (1) and done (2).
     Copy(u8),
     /// The Crashes page after reading the crash files: on its own (0), with what they say (1),
@@ -528,6 +572,8 @@ impl App {
     /// `resume` picks up the queue saved before restarting as administrator.
     pub fn new(cc: &eframe::CreationContext, snap_dir: Option<PathBuf>, mica: bool, resume: bool) -> Self {
         theme::apply(&cc.egui_ctx);
+        let settings = load_settings();
+        settings.theme.apply(&cc.egui_ctx);
         let mica = mica
             && match system::apply_mica(cc) {
                 Ok(()) => true,
@@ -563,7 +609,7 @@ impl App {
             confirm: None,
             toasts: vec![],
             history: fixes::history(),
-            settings: load_settings(),
+            settings,
             ui: UiState { hide_personal: true, ..Default::default() },
             elevated: crate::elevate::is_elevated(),
             restore_saved: false,
@@ -594,20 +640,35 @@ impl App {
             app.set_snapshot(s);
         }
         app.mark.set_lift(if app.raised() { 1.0 } else { 0.0 }, true);
-        // Not again when Bootmend restarts as administrator to carry on with a fix.
-        app.early_notice = !app.settings.early_notice_off && snap_dir.is_none() && !resume;
+        let recheck = snap_dir.is_none() && !resume && check_on_start(app.elevated, app.snap.as_ref().map(|s| s.elevated));
+        // Not again when Bootmend restarts as administrator to carry on with a fix or read more.
+        app.early_notice = !app.settings.early_notice_off && snap_dir.is_none() && !resume && !recheck;
         if snap_dir.is_none() {
             app.note_new_version();
         }
         if let Some(dir) = snap_dir {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
-            queue.extend([Shot::Dialog, Shot::Early, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
+            queue.extend([
+                Shot::Dialog,
+                Shot::Early,
+                Shot::Menu,
+                Shot::Queue,
+                Shot::Fixing,
+                Shot::Details,
+                Shot::CheckDetails,
+                Shot::Copy(0),
+                Shot::Copy(1),
+                Shot::Copy(2),
+            ]);
             // Last, because they swap in sample crash files for the shots that follow.
             queue.extend([Shot::CrashFiles(0), Shot::CrashFiles(1), Shot::CrashFiles(2)]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         } else if resume {
             app.resume();
+        } else if recheck {
+            log!("check", "now running as administrator, so checking again to read what the last check-up couldn't");
+            app.start_check();
         }
         app
     }
@@ -620,6 +681,7 @@ impl App {
 
     fn set_snapshot(&mut self, s: Snapshot) {
         self.findings = rules::evaluate(&s);
+        self.ui.picks.clear();
         match snapshot::previous(&s.host, &s.id) {
             Some(prev) => {
                 self.changes = diff::diff(&prev, &s);
@@ -678,6 +740,14 @@ impl App {
             log!("window", "Windows animation effects are now {}", if on { "on" } else { "off" });
             theme::set_motion(ctx, on);
         }
+    }
+
+    fn set_theme_choice(&mut self, ctx: &egui::Context, choice: ThemeChoice) {
+        log!("settings", "theme set to {}", choice.label());
+        self.settings.theme = choice;
+        self.save_settings();
+        choice.apply(ctx);
+        ctx.request_repaint();
     }
 
     fn set_accent_sync(&mut self, ctx: &egui::Context, on: bool) {
@@ -783,12 +853,18 @@ impl App {
                 if matches!(work, run::Work::Step(_)) {
                     continue;
                 }
+                // A closed window has nobody left to tell; the loop below stops on that.
+                let say = |text: String| {
+                    if tx.send(Job::Part(i, text)).is_ok() {
+                        ctx.request_repaint();
+                    }
+                };
                 log!("queue", "{title}: started");
                 // A panic inside one box ends that box, not the queue, which would wait for it forever.
                 let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &work {
-                    run::Work::Fix(f) => (fixes::apply(f, &title).map_err(|e| format!("{e:#}")), None),
+                    run::Work::Fix(f) => (fixes::apply_live(f, &title, &say).map_err(|e| format!("{e:#}")), None),
                     _ => {
-                        let out = cleanup_page::clean_items(&items, |_| {});
+                        let out = cleanup_page::clean_items(&items, |n| say(run::clearing(items[n].title)));
                         let errs: Vec<String> = out.iter().filter_map(|(_, r)| r.as_ref().err().cloned()).collect();
                         (if errs.is_empty() { Ok(()) } else { Err(errs.join(" ")) }, Some(out))
                     }
@@ -1096,7 +1172,7 @@ impl App {
             Pending::Elevate => Confirm {
                 title: "Restart as administrator?".into(),
                 body: vec![
-                    "Windows will ask for permission, then Bootmend opens again with access to a few more details: Windows Security's skip list, crash files and some drive health data.".into(),
+                    "Windows will ask for permission, then Bootmend opens again and checks your PC with access to a few more details: Windows Security's skip list, crash files and some drive health data.".into(),
                     "Administrator rights are used for reading. Fixes still wait for you.".into(),
                 ],
                 yes: "Restart".into(),
@@ -1304,6 +1380,11 @@ impl App {
         let msgs = self.check_rx.as_ref().map(drain_check).unwrap_or_default();
         for m in msgs {
             match m {
+                Progress::Doing { key, text } => {
+                    if let Some(q) = &mut self.run {
+                        q.on_check_part(key, text);
+                    }
+                }
                 Progress::StepDone { key, ok } => {
                     if let Some(q) = &mut self.run {
                         q.on_step(key, ok);
@@ -1395,6 +1476,11 @@ impl App {
                             }
                             self.toast(format!("Couldn't turn System Restore on: {e}"), false);
                         }
+                    }
+                }
+                Job::Part(i, text) => {
+                    if let Some(q) = &mut self.run {
+                        q.on_fix_part(i, text);
                     }
                 }
                 Job::Worked(i, r, ms, cleaned) => {
@@ -1942,6 +2028,7 @@ impl App {
                 Some(Shot::Queue) => "queue".to_string(),
                 Some(Shot::Fixing) => "fixing".to_string(),
                 Some(Shot::Details) => "fixing-details".to_string(),
+                Some(Shot::CheckDetails) => "checking-details".to_string(),
                 Some(Shot::Copy(n)) => format!("copy-{}", ["pick", "copying", "done"][usize::from(*n).min(2)]),
                 Some(Shot::CrashFiles(n)) => format!("crash-files-{}", ["read", "said", "fix"][usize::from(*n).min(2)]),
                 _ => "welcome".to_string(),
@@ -1966,7 +2053,7 @@ impl App {
                     self.crash_summary = None;
                     self.crash_fix = None;
                 }
-                if matches!(m.queue.first(), Some(Shot::Queue | Shot::Fixing | Shot::Details)) {
+                if matches!(m.queue.first(), Some(Shot::Queue | Shot::Fixing | Shot::Details | Shot::CheckDetails)) {
                     self.run = None;
                 }
                 m.queue.remove(0);
@@ -1987,7 +2074,7 @@ impl App {
                 self.ui.nav_open = matches!(target, Shot::Menu);
                 let page = match target {
                     Shot::View(p) => Some(p),
-                    Shot::Menu | Shot::Early | Shot::Queue | Shot::Fixing | Shot::Details | Shot::Copy(_) => Some(Page::Home),
+                    Shot::Menu | Shot::Early | Shot::Queue | Shot::Fixing | Shot::Details | Shot::CheckDetails | Shot::Copy(_) => Some(Page::Home),
                     Shot::Dialog | Shot::CrashFiles(_) => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
@@ -2014,6 +2101,16 @@ impl App {
                                 self.mark.set(q.p);
                                 self.mark.step(16.0);
                             }
+                        }
+                        self.run = Some(q);
+                    }
+                    if matches!(target, Shot::CheckDetails) {
+                        let q = run::sample_check();
+                        self.mark = mark::Mark::new(mark::Kind::Stones, 1.0);
+                        self.mark.start();
+                        for _ in 0..90 {
+                            self.mark.set(q.p);
+                            self.mark.step(16.0);
                         }
                         self.run = Some(q);
                     }
@@ -2171,6 +2268,13 @@ impl eframe::App for App {
     }
 }
 
+/// Whether to check again as soon as Bootmend opens: it now has administrator rights the last
+/// check-up didn't, so it can read what that one couldn't. Without this, restarting as
+/// administrator shows the same check-up and looks like it did nothing.
+fn check_on_start(elevated: bool, last_elevated: Option<bool>) -> bool {
+    elevated && last_elevated == Some(false)
+}
+
 /// Everything the check has sent since the last frame. The check hangs up as soon as it has
 /// sent its result, so a hang-up only means it crashed when no result came first.
 fn drain_check(rx: &Receiver<Progress>) -> Vec<Progress> {
@@ -2196,7 +2300,26 @@ fn drain_check(rx: &Receiver<Progress>) -> Vec<Progress> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Page, Place};
+    use super::{egui, Page, Place, Settings, ThemeChoice};
+
+    /// Settings saved before the theme choice existed keep following Windows.
+    #[test]
+    fn the_theme_choice_is_saved_and_takes_effect() {
+        let old: Settings = serde_json::from_str(r#"{"privacy_ack": true}"#).unwrap();
+        assert_eq!(old.theme, ThemeChoice::System);
+        let saved = serde_json::to_string(&Settings { theme: ThemeChoice::Dark, ..Default::default() }).unwrap();
+        assert!(saved.contains(r#""theme":"dark""#), "{saved}");
+        assert_eq!(serde_json::from_str::<Settings>(&saved).unwrap().theme, ThemeChoice::Dark);
+        let ctx = egui::Context::default();
+        for (c, want) in [
+            (ThemeChoice::Light, egui::ThemePreference::Light),
+            (ThemeChoice::Dark, egui::ThemePreference::Dark),
+            (ThemeChoice::System, egui::ThemePreference::System),
+        ] {
+            c.apply(&ctx);
+            assert_eq!(ctx.options(|o| o.theme_preference), want);
+        }
+    }
 
     #[test]
     fn report_a_problem_opens_the_bug_form_with_the_version() {
@@ -2218,6 +2341,15 @@ mod tests {
         let msgs = drain_check(&rx);
         assert_eq!(msgs.len(), 2, "nothing comes after the result");
         assert!(matches!(msgs[1], Progress::Finished(_)));
+    }
+
+    #[test]
+    fn restarting_as_administrator_checks_again_to_read_what_was_hidden() {
+        use super::check_on_start;
+        assert!(check_on_start(true, Some(false)), "the last check-up couldn't read the admin-only details");
+        assert!(!check_on_start(true, Some(true)), "the last check-up already had administrator rights");
+        assert!(!check_on_start(false, Some(false)), "still without administrator rights, a new check reads no more");
+        assert!(!check_on_start(true, None), "the first run starts at the welcome screen");
     }
 
     #[test]

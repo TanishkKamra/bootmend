@@ -41,6 +41,36 @@ pub fn ram_maker(reported: Option<&str>, part: &str) -> Option<String> {
     codes.iter().find(|(c, _)| p.starts_with(c)).map(|(_, m)| m.to_string())
 }
 
+/// A stick's maker as `ram_maker` reads it, or nothing rather than "Unknown".
+pub fn stick_maker(m: &serde_json::Value) -> String {
+    ram_maker(m.s("Maker").as_deref(), &m.s("Part").unwrap_or_default()).unwrap_or_default()
+}
+
+/// Where the slot count and the most memory come from, said under them: some boards copy their
+/// maker's generic numbers, such as 4 slots on a board with 2, and Windows passes them on.
+pub const MEMORY_SOURCE: &str =
+    "The slot count and the most memory the board supports come from the board's own report. Some boards report more slots than they really have.";
+
+/// Each stick's slot as Windows names it, with its channel added when two share a name: some
+/// boards call both sticks "DIMM 1", one on each channel.
+pub fn slot_names(sticks: &[&serde_json::Value]) -> Vec<String> {
+    let slot = |m: &serde_json::Value| m.s("Slot").unwrap_or_default();
+    sticks
+        .iter()
+        .map(|m| {
+            let name = slot(m);
+            let bank = m.s("Bank").unwrap_or_default();
+            if name.is_empty() || bank.is_empty() || sticks.iter().filter(|o| slot(o) == name).count() < 2 {
+                return name;
+            }
+            match bank.to_ascii_uppercase().find("CHANNEL").map(|i| bank[i + "CHANNEL".len()..].trim()) {
+                Some(c) if !c.is_empty() => format!("{name}, channel {c}"),
+                _ => format!("{name}, {bank}"),
+            }
+        })
+        .collect()
+}
+
 /// Upgrades in order of how much difference they make, biggest first.
 pub fn upgrades(s: &Snapshot) -> Vec<Upgrade> {
     let mut out = vec![];
@@ -88,7 +118,9 @@ pub fn upgrades(s: &Snapshot) -> Vec<Upgrade> {
         get.push(if mem.i("Slots").is_none_or(|n| n < 1) {
             "Bootmend couldn't read how many memory slots this PC has, so check its manual before buying.".into()
         } else if free > 0 {
-            format!("Free memory slots: {free} of {slots}. Adding a stick the same size as the one you have keeps both channels working.")
+            format!(
+                "Free memory slots: {free} of {slots}, as the board reports it. Adding a stick the same size as the one you have keeps both channels working."
+            )
         } else {
             format!("All {slots} slots are full, so replace the sticks with a matching pair, such as 2 × 8 GB.")
         });
@@ -110,7 +142,7 @@ pub fn upgrades(s: &Snapshot) -> Vec<Upgrade> {
             let maker = ram_maker(m.s("Maker").as_deref(), &part).map(|m| format!("{m} ")).unwrap_or_default();
             get.push(format!("Same model if you can find it: {maker}{part}"));
         }
-        get.push(format!("Free memory slots: {free} of {slots}"));
+        get.push(format!("Free memory slots: {free} of {slots}, as the board reports it"));
         if laptop {
             get.push(soldered_note.into());
         }
@@ -192,6 +224,9 @@ mod tests {
         assert_eq!(ram_maker(None, "F4-3200C16-8GVKB").as_deref(), Some("G.Skill"));
         assert_eq!(ram_maker(Some("Kingston"), "KF432C16BB/8").as_deref(), Some("Kingston"));
         assert_eq!(ram_maker(Some("Unknown"), "XYZ123"), None);
+        assert_eq!(stick_maker(&json!({"Maker": "Unknown", "Part": "CT8G4DFRA32A.M4FE"})), "Crucial");
+        assert_eq!(stick_maker(&json!({"Maker": "Unknown", "Part": "XYZ123"})), "", "no \"Unknown\" on show");
+        assert_eq!(stick_maker(&json!({})), "");
     }
 
     #[test]
@@ -228,6 +263,27 @@ mod tests {
         assert!(ids.contains(&"ram-more") && ids.contains(&"bigger-drive") && ids.contains(&"battery"), "{ids:?}");
         let ram = upgrades(&s).into_iter().find(|u| u.id == "ram-more").unwrap();
         assert!(ram.get.join(" ").contains("laptop"), "SODIMM means a laptop: {:?}", ram.get);
+    }
+
+    #[test]
+    fn sticks_sharing_a_slot_name_are_told_apart_by_channel() {
+        let names = |v: serde_json::Value| slot_names(&v.as_array().unwrap().iter().collect::<Vec<_>>());
+        let amd = json!([{"Slot": "DIMM 1", "Bank": "P0 CHANNEL A"}, {"Slot": "DIMM 1", "Bank": "P0 CHANNEL B"}]);
+        assert_eq!(names(amd), ["DIMM 1, channel A", "DIMM 1, channel B"]);
+        let intel = json!([{"Slot": "ChannelA-DIMM0", "Bank": "BANK 0"}, {"Slot": "ChannelB-DIMM0", "Bank": "BANK 2"}]);
+        assert_eq!(names(intel), ["ChannelA-DIMM0", "ChannelB-DIMM0"], "names that differ stay as they are");
+        let banks = json!([{"Slot": "DIMM 0", "Bank": "BANK 0"}, {"Slot": "DIMM 0", "Bank": "BANK 1"}]);
+        assert_eq!(names(banks), ["DIMM 0, BANK 0", "DIMM 0, BANK 1"]);
+        let bare = json!([{"Slot": "DIMM 0"}, {"Slot": "DIMM 0", "Bank": ""}]);
+        assert_eq!(names(bare), ["DIMM 0", "DIMM 0"], "nothing to add");
+    }
+
+    #[test]
+    fn free_slots_say_the_board_counted_them() {
+        let mut s = pc();
+        s.system["memory"] = json!({"TotalGB": 4, "Slots": 4, "Sticks": [{"SizeGB": 2, "Type": "DDR4"}, {"SizeGB": 2, "Type": "DDR4"}]});
+        let ram = upgrades(&s).into_iter().find(|u| u.id == "ram-more").unwrap();
+        assert!(ram.get.iter().any(|g| g.starts_with("Free memory slots: 2 of 4, as the board reports it.")), "{:?}", ram.get);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Opt-in fixes. Every fix shows what it will do, asks first, and stores an undo step.
 
-use crate::util::{data_dir, powershell, ps_quote};
+use crate::util::{data_dir, powershell_live, ps_quote};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -258,8 +258,8 @@ impl Fix {
         !matches!(self, Fix::RepairWindowsFiles | Fix::RollBackDriver { .. })
     }
 
-    /// Whether "Fix the safe ones for me" may include it. Going back to an older driver is a
-    /// judgement call that can't be undone, so it's only offered on its own to-do.
+    /// Whether its box on Home may start ticked. Going back to an older driver is a judgement
+    /// call that can't be undone, so it waits for the person to tick it.
     pub fn safe(&self) -> bool {
         !matches!(self, Fix::RollBackDriver { .. })
     }
@@ -513,10 +513,13 @@ impl Fix {
             // nothing, so Windows' own health record has the last word. 3010 asks for a restart.
             Fix::RepairWindowsFiles => (
                 format!(
-                    r#"{NATIVE}$c = Native {{ DISM.exe /Online /Cleanup-Image /RestoreHealth }}
+                    r#"{NATIVE}[Console]::Out.WriteLine('##part dism')
+$c = Native {{ DISM.exe /Online /Cleanup-Image /RestoreHealth }}
 if ($c -in -2146498529, -2146498298, -2146498283) {{ throw "Windows couldn't download fresh copies of its files. Check the internet connection, then try again." }}
 if ($c -ne 0 -and $c -ne 3010) {{ throw ("Windows couldn't repair its files (error 0x{{0:X8}})" -f $c) }}
+[Console]::Out.WriteLine('##part sfc')
 $null = Native {{ sfc.exe /scannow }}
+[Console]::Out.WriteLine('##part health')
 if ("$((Repair-WindowsImage -Online -CheckHealth).ImageHealthState)" -ne 'Healthy') {{ throw "Windows repaired what it could, but some of its files are still damaged." }}"#
                 ),
                 String::new(),
@@ -707,9 +710,14 @@ fn run_ps(body: &str) -> Result<()> {
 
 /// Runs `body` and returns what it printed, or the reason it stopped.
 fn ps_output(body: &str, timeout: Duration) -> Result<String> {
+    ps_output_live(body, timeout, &mut |_| {})
+}
+
+/// `ps_output`, telling `on_part` each `##part <name>` line the script writes, as it writes it.
+fn ps_output_live(body: &str, timeout: Duration, on_part: &mut dyn FnMut(&str)) -> Result<String> {
     let script =
         format!("$ErrorActionPreference = 'Stop'\ntry {{\n{body}\n'BOOTMEND-OK'\n}} catch {{ Write-Output ('BOOTMEND-ERR ' + $_.Exception.Message); exit 1 }}");
-    let out = powershell(&script, timeout)?;
+    let out = powershell_live(&script, timeout, on_part)?;
     if out.stdout.contains("BOOTMEND-OK") {
         return Ok(out.stdout);
     }
@@ -725,7 +733,36 @@ fn ps_output(body: &str, timeout: Duration) -> Result<String> {
 
 /// Apply a fix and record how to undo it.
 pub fn apply(fix: &Fix, title: &str) -> Result<()> {
-    apply_with(fix, title, history_for_change("a fix")?, &mut |h| save_history(h), &|s| ps_output(s, fix.timeout()).map(|_| ()))
+    apply_live(fix, title, &|_| {})
+}
+
+/// `apply`, telling `say` each thing it starts on, in words for the details panel.
+/// What the details panel says while a fix notes how to undo itself.
+pub const NOTING: &str = "Noting how to undo it in History";
+
+pub fn apply_live(fix: &Fix, title: &str, say: &dyn Fn(String)) -> Result<()> {
+    if fix.undoable() {
+        say(NOTING.into());
+    }
+    let run = |s: &str| {
+        say(fix.doing());
+        let mut part = |name: &str| match part_line(name) {
+            Some(text) => say(text.into()),
+            None => log!("fix", "no words for the part {name}"),
+        };
+        ps_output_live(s, fix.timeout(), &mut part).map(|_| ())
+    };
+    apply_with(fix, title, history_for_change("a fix")?, &mut |h| save_history(h), &run)
+}
+
+/// What each part of a longer fix is doing, by its name in the script.
+fn part_line(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "dism" => "Getting fresh copies of Windows' files from Microsoft",
+        "sfc" => "Putting back Windows' damaged files",
+        "health" => "Making sure Windows' files are healthy now",
+        _ => return None,
+    })
 }
 
 type Save<'a> = &'a mut dyn FnMut(&[HistoryEntry]) -> Result<()>;
@@ -841,6 +878,7 @@ fn undo_with(index: usize, mut h: Vec<HistoryEntry>, save: Save, run: Run) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::powershell;
     use std::cell::Cell;
 
     fn steam() -> Fix {

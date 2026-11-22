@@ -2,7 +2,7 @@
 
 use super::theme::{self, pal, S1, S2, S3, S4, S5};
 use super::widgets::{self, card, ico, icon, kv, muted, section, small, table};
-use super::{run, App, Page, Pending};
+use super::{run, App, Page, Pending, ThemeChoice};
 use crate::diff::Kind as ChangeKind;
 use crate::fixes::Fix;
 use crate::rules::{plural, Action, Area, Finding};
@@ -1413,6 +1413,22 @@ impl App {
         let p = pal(ui.ctx());
         section(ui, "Appearance");
         card(ui, |ui| {
+            let now = self.settings.theme;
+            let picked = stacked(ui, "Theme", "Match Windows follows the light or dark mode set in Windows.", |ui| {
+                let mut picked = None;
+                ui.horizontal_wrapped(|ui| {
+                    for c in ThemeChoice::ALL {
+                        if ui.add(egui::Button::new(c.label()).selected(now == c)).clicked() && now != c {
+                            picked = Some(c);
+                        }
+                    }
+                });
+                picked
+            });
+            if let Some(c) = picked {
+                self.set_theme_choice(ui.ctx(), c);
+            }
+            ui.separator();
             let on = self.settings.use_windows_accent;
             let name = "Use my Windows accent colour";
             let flip = setting(ui, name, "Buttons, links and switches take the accent colour you chose in Windows.", |ui| {
@@ -1439,7 +1455,7 @@ impl App {
                 });
             }
             ui.separator();
-            setting(ui, "Mode and transparency effects", "Bootmend follows the light or dark mode and the transparency effects set in Windows.", |ui| {
+            setting(ui, "Transparency effects", "Bootmend follows the transparency effects set in Windows.", |ui| {
                 if widgets::icon_button(ui, icon::OPEN, "Colour settings", true).clicked() {
                     log!("action", "opening ms-settings:colors");
                     if let Err(e) = shell_open("ms-settings:colors") {
@@ -1601,17 +1617,23 @@ fn this_pc(ui: &mut Ui, snap: &Snapshot) {
                 ("Most the board supports", num(mem.f("MaxSupportedGB"), " GB")),
             ],
         );
+        if mem.i("Slots").is_some() || mem.f("MaxSupportedGB").is_some() {
+            ui.add_space(S1);
+            small(ui, crate::rules::upgrades::MEMORY_SOURCE);
+        }
         ui.add_space(S2);
+        let slots = crate::rules::upgrades::slot_names(&sticks);
         let rows: Vec<Vec<String>> = sticks
             .iter()
-            .map(|m| {
+            .zip(slots)
+            .map(|(m, slot)| {
                 vec![
-                    s(m, "Slot"),
+                    slot,
                     num(m.f("SizeGB"), " GB").unwrap_or_default(),
                     s(m, "Type"),
                     num(m.f("SpeedMTs"), " MT/s").unwrap_or_default(),
                     num(m.f("ConfiguredMTs"), " MT/s").unwrap_or_default(),
-                    format!("{} {}", s(m, "Maker"), s(m, "Part")),
+                    format!("{} {}", crate::rules::upgrades::stick_maker(m), s(m, "Part")).trim().to_string(),
                 ]
             })
             .collect();

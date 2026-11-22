@@ -6,7 +6,7 @@ pub mod smart;
 pub mod winget;
 
 use crate::snapshot::{Snapshot, FORMAT_VERSION};
-use crate::util::{powershell, ps_quote, J};
+use crate::util::{powershell_live, ps_quote, J};
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::sync::mpsc::Sender;
@@ -34,7 +34,15 @@ pub const STEPS: [Step; 8] = [
 ];
 
 pub enum Progress {
-    StepDone { key: &'static str, ok: bool },
+    /// A step has started on one of its parts, said in words for the details panel.
+    Doing {
+        key: &'static str,
+        text: String,
+    },
+    StepDone {
+        key: &'static str,
+        ok: bool,
+    },
     Finished(Box<Snapshot>),
     Failed(String),
 }
@@ -44,11 +52,64 @@ fn send(tx: &Sender<Progress>, p: Progress) {
     let _ = tx.send(p);
 }
 
-/// Run one embedded PowerShell section and parse its JSON.
-pub fn run_section(key: &str, body: &str, timeout: Duration) -> Result<Value> {
+/// What each part of the check-up is doing, by its name in the scripts.
+pub fn part_line(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "device" => "Reading the PC's model, TPM and Secure Boot",
+        "os" => "Reading the Windows version and licence",
+        "cpu" => "Reading the processor",
+        "memory" => "Reading the memory",
+        "gpu" => "Reading the graphics card",
+        "displays" => "Reading the screens",
+        "directx" => "Asking DirectX about the graphics",
+        "battery" => "Reading the battery report",
+        "power" => "Reading the power plan",
+        "hardware" => "Listing sound, camera and other devices",
+        "winupdate" => "Reading Windows Update's history",
+        "recovery" => "Checking Windows Recovery",
+        "profile" => "Checking your user profile loaded properly",
+        "disks" => "Listing the drives",
+        "volumes" => "Measuring free space on each drive",
+        "folderDrives" => "Finding which drive holds your folders",
+        "ataSmart" => "Reading the drives' health tables",
+        "trim" => "Checking how Windows looks after SSDs",
+        "diskErrors" => "Reading drive errors from the last 90 days",
+        "backup" => "Checking OneDrive's backup",
+        "folders" => "Measuring big folders like Downloads",
+        "adapters" => "Looking at the network adapters",
+        "wifi" => "Reading the Wi-Fi connection",
+        "proxy" => "Checking the proxy settings",
+        "staticDns" => "Checking the DNS settings",
+        "listening" => "Listing apps that accept network connections",
+        "vpn" => "Looking for VPN and virtual adapters",
+        "defender" => "Asking Windows Security for its settings",
+        "firewall" => "Checking the firewall and its openings",
+        "access" => "Checking remote access settings",
+        "browserPolicies" => "Looking for browser settings set by a policy",
+        "dailyAccount" => "Checking whether your account is an administrator",
+        "drivers" => "Checking that drivers are signed",
+        "deviceAccess" => "Reading which apps used the camera or microphone",
+        "restore" => "Checking System Restore",
+        "apps" => "Listing installed apps",
+        "startup" => "Looking at what starts with Windows",
+        "services" => "Going through background services",
+        "tasks" => "Going through scheduled tasks",
+        "perf" => "Reading how long the PC has been on",
+        "crashControl" => "Checking how Windows saves crash details",
+        "stability" => "Reading crashes from the last 90 days",
+        "driverUpdates" => "Looking at recent driver changes",
+        "imageHealth" => "Asking Windows if its own files are damaged",
+        "boot" => "Reading how long Windows takes to start",
+        _ => return None,
+    })
+}
+
+/// Run one embedded PowerShell section and parse its JSON. `on_part` hears each part's name
+/// as the section starts on it.
+pub fn run_section(key: &str, body: &str, timeout: Duration, on_part: &mut dyn FnMut(&str)) -> Result<Value> {
     let tmp = crate::sys::tmp_dir()?;
     let script = format!("$env:BOOTMEND_TMP = {}\n{}\n{}", ps_quote(&tmp.to_string_lossy()), COMMON, body);
-    let out = powershell(&script, timeout)?;
+    let out = powershell_live(&script, timeout, on_part)?;
     if out.timed_out {
         return Err(anyhow!("{key} took too long and was stopped"));
     }
@@ -94,7 +155,11 @@ fn collect_inner(tx: &Sender<Progress>) -> Result<Snapshot> {
                 let tx = tx.clone();
                 sc.spawn(move || {
                     let t = std::time::Instant::now();
-                    let r = run_section(st.key, body, Duration::from_secs(st.timeout_s));
+                    let mut say = |name: &str| match part_line(name) {
+                        Some(text) => send(&tx, Progress::Doing { key: st.key, text: text.into() }),
+                        None => log!("check", "{}: no words for the part {name}", st.key),
+                    };
+                    let r = run_section(st.key, body, Duration::from_secs(st.timeout_s), &mut say);
                     match &r {
                         Ok(_) => log!("check", "{} done in {:.1} s", st.key, t.elapsed().as_secs_f32()),
                         Err(e) => log!("check", "{} incomplete after {:.1} s: {e:#}", st.key, t.elapsed().as_secs_f32()),
@@ -105,7 +170,7 @@ fn collect_inner(tx: &Sender<Progress>) -> Result<Snapshot> {
             })
             .collect();
         let ext = sc.spawn(|| {
-            let e = extensions::collect();
+            let e = extensions::collect(&|text| send(tx, Progress::Doing { key: "extensions", text }));
             log!("check", "extensions done: {} found", e.len());
             send(tx, Progress::StepDone { key: "extensions", ok: true });
             e
@@ -151,7 +216,8 @@ fn collect_inner(tx: &Sender<Progress>) -> Result<Snapshot> {
         }
     }
 
-    snap.drives = smart::drive_health(&snap.storage);
+    snap.drives =
+        smart::drive_health(&snap.storage, &|model| send(tx, Progress::Doing { key: "drives", text: format!("Reading the health counters of {model}") }));
     log!("check", "drive health read for {} drives", snap.drives.len());
     send(tx, Progress::StepDone { key: "drives", ok: true });
 
@@ -163,4 +229,28 @@ fn collect_inner(tx: &Sender<Progress>) -> Result<Snapshot> {
     }
     crate::snapshot::save(&snap)?;
     Ok(snap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_part_of_the_check_up_has_words_for_the_details_panel() {
+        let names: Vec<&str> =
+            STEPS.iter().filter_map(|s| s.script).flat_map(|s| s.split("Try-Section '").skip(1)).filter_map(|s| s.split('\'').next()).collect();
+        assert!(names.len() > 40, "found the parts: {names:?}");
+        let missing: Vec<&&str> = names.iter().filter(|n| part_line(n).is_none()).collect();
+        assert!(missing.is_empty(), "no words for {missing:?}");
+    }
+
+    #[test]
+    #[ignore = "starts PowerShell; run with --ignored"]
+    fn each_part_is_heard_as_it_starts_and_the_data_still_arrives() {
+        let mut heard = vec![];
+        let body = "Try-Section 'cpu' { $R.a = 1 }\nTry-Section 'os' { $R.b = 2 }\nEmit";
+        let v = run_section("test", body, Duration::from_secs(60), &mut |p| heard.push(p.to_string())).unwrap();
+        assert_eq!(heard, ["cpu", "os"]);
+        assert_eq!((v["a"].as_i64(), v["b"].as_i64()), (Some(1), Some(2)));
+    }
 }

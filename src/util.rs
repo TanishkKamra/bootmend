@@ -107,7 +107,15 @@ pub struct Output {
 }
 
 /// Run a program without flashing a console window, with a hard timeout.
+/// How a script says what it's starting on: a line of its own, `##part <name>`.
+const PART: &[u8] = b"##part ";
+
 pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Output> {
+    run_hidden_live(program, args, timeout, &mut |_| {})
+}
+
+/// `run_hidden`, telling `on_part` each part the program says it's starting, as it starts.
+pub fn run_hidden_live(program: &str, args: &[&str], timeout: Duration, on_part: &mut dyn FnMut(&str)) -> Result<Output> {
     let mut cmd = Command::new(crate::sys::program(program));
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(CREATE_NO_WINDOW);
     crate::sys::prepare(&mut cmd)?;
@@ -116,9 +124,22 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
     // Drain pipes on threads so a chatty child can't block on a full pipe.
     let mut so = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let mut se = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
+    let (part_tx, part_rx) = std::sync::mpsc::channel::<String>();
     let t_out = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        std::io::Read::read_to_end(&mut so, &mut b).map(|_| b)
+        let mut all = Vec::new();
+        let mut r = std::io::BufReader::new(&mut so);
+        loop {
+            let at = all.len();
+            if std::io::BufRead::read_until(&mut r, b'\n', &mut all)? == 0 {
+                return Ok(all);
+            }
+            // PowerShell may start its UTF-8 output with a byte-order mark.
+            let line = &all[at..];
+            if let Some(name) = line.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(line).strip_prefix(PART) {
+                // Only fails once the caller has stopped listening, when nobody needs it.
+                let _ = part_tx.send(String::from_utf8_lossy(name).trim().to_string());
+            }
+        }
     });
     let t_err = std::thread::spawn(move || {
         let mut b = Vec::new();
@@ -127,6 +148,7 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
     let start = Instant::now();
     let mut timed_out = false;
     let status = loop {
+        part_rx.try_iter().for_each(|p| on_part(&p));
         if let Some(st) = child.try_wait()? {
             break Some(st);
         }
@@ -148,6 +170,7 @@ pub fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<Out
         }
     };
     let out = Output { stdout: decode(t_out.join()), stderr: decode(t_err.join()), code: status.and_then(|s| s.code()), timed_out };
+    part_rx.try_iter().for_each(|p| on_part(&p));
     let took = start.elapsed().as_secs_f32();
     let cmd = format!("{program} {}", args.join(" "));
     if timed_out {
@@ -219,6 +242,11 @@ pub fn decode_bytes(b: &[u8]) -> String {
 
 /// Run a PowerShell script (passed as text) hidden, returning stdout.
 pub fn powershell(script: &str, timeout: Duration) -> Result<Output> {
+    powershell_live(script, timeout, &mut |_| {})
+}
+
+/// `powershell`, telling `on_part` each `##part <name>` line the script writes, as it writes it.
+pub fn powershell_live(script: &str, timeout: Duration, on_part: &mut dyn FnMut(&str)) -> Result<Output> {
     // Between writing the script and PowerShell reading it, anything the user runs could swap a
     // script kept in a folder the user can change. As administrator that would run their code.
     let dir = crate::sys::tmp_dir()?;
@@ -228,7 +256,7 @@ pub fn powershell(script: &str, timeout: Duration) -> Result<Output> {
     bytes.extend_from_slice(script.as_bytes());
     std::fs::write(&file, bytes).with_context(|| format!("writing {}", file.display()))?;
     let f = file.to_string_lossy().to_string();
-    let out = run_hidden("powershell.exe", &["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", &f], timeout);
+    let out = run_hidden_live("powershell.exe", &["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", &f], timeout, on_part);
     if let Err(e) = std::fs::remove_file(&file) {
         log!("run", "couldn't remove the temporary script {}: {e}", file.display());
     }
