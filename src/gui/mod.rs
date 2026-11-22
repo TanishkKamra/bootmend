@@ -636,8 +636,9 @@ impl App {
             app.set_snapshot(s);
         }
         app.mark.set_lift(if app.raised() { 1.0 } else { 0.0 }, true);
-        // Not again when Bootmend restarts as administrator to carry on with a fix.
-        app.early_notice = !app.settings.early_notice_off && snap_dir.is_none() && !resume;
+        let recheck = snap_dir.is_none() && !resume && check_on_start(app.elevated, app.snap.as_ref().map(|s| s.elevated));
+        // Not again when Bootmend restarts as administrator to carry on with a fix or read more.
+        app.early_notice = !app.settings.early_notice_off && snap_dir.is_none() && !resume && !recheck;
         if snap_dir.is_none() {
             app.note_new_version();
         }
@@ -650,6 +651,9 @@ impl App {
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
         } else if resume {
             app.resume();
+        } else if recheck {
+            log!("check", "now running as administrator, so checking again to read what the last check-up couldn't");
+            app.start_check();
         }
         app
     }
@@ -1147,7 +1151,7 @@ impl App {
             Pending::Elevate => Confirm {
                 title: "Restart as administrator?".into(),
                 body: vec![
-                    "Windows will ask for permission, then Bootmend opens again with access to a few more details: Windows Security's skip list, crash files and some drive health data.".into(),
+                    "Windows will ask for permission, then Bootmend opens again and checks your PC with access to a few more details: Windows Security's skip list, crash files and some drive health data.".into(),
                     "Administrator rights are used for reading. Fixes still wait for you.".into(),
                 ],
                 yes: "Restart".into(),
@@ -2222,6 +2226,13 @@ impl eframe::App for App {
     }
 }
 
+/// Whether to check again as soon as Bootmend opens: it now has administrator rights the last
+/// check-up didn't, so it can read what that one couldn't. Without this, restarting as
+/// administrator shows the same check-up and looks like it did nothing.
+fn check_on_start(elevated: bool, last_elevated: Option<bool>) -> bool {
+    elevated && last_elevated == Some(false)
+}
+
 /// Everything the check has sent since the last frame. The check hangs up as soon as it has
 /// sent its result, so a hang-up only means it crashed when no result came first.
 fn drain_check(rx: &Receiver<Progress>) -> Vec<Progress> {
@@ -2288,6 +2299,15 @@ mod tests {
         let msgs = drain_check(&rx);
         assert_eq!(msgs.len(), 2, "nothing comes after the result");
         assert!(matches!(msgs[1], Progress::Finished(_)));
+    }
+
+    #[test]
+    fn restarting_as_administrator_checks_again_to_read_what_was_hidden() {
+        use super::check_on_start;
+        assert!(check_on_start(true, Some(false)), "the last check-up couldn't read the admin-only details");
+        assert!(!check_on_start(true, Some(true)), "the last check-up already had administrator rights");
+        assert!(!check_on_start(false, Some(false)), "still without administrator rights, a new check reads no more");
+        assert!(!check_on_start(true, None), "the first run starts at the welcome screen");
     }
 
     #[test]
