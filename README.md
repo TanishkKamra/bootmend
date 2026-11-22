@@ -6,7 +6,7 @@ Bootmend only reads until you press a button, and every change explains itself f
 
 ## Download
 
-Bootmend 0.2.0 is an early version, so expect a few rough edges. Download `bootmend.exe` from the [latest release](https://github.com/TanishkKamra/bootmend/releases/latest). It's a single file with no installer, for Windows 10 and 11 (64-bit).
+Bootmend 0.2.1 is an early version, so expect a few rough edges. Download `bootmend.exe` from the [latest release](https://github.com/TanishkKamra/bootmend/releases/latest). It's a single file with no installer, for Windows 10 and 11 (64-bit).
 
 Bootmend isn't code-signed yet, so the first time you open it Windows may say "Windows protected your PC". Click **More info**, then **Run anyway**. To check your copy is the real one, compare its SHA-256 checksum with the one on the release page. In PowerShell, in the folder you saved it to:
 
