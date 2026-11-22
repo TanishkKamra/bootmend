@@ -235,26 +235,38 @@ fn firefox(profiles: &Path, out: &mut Vec<Extension>) {
     for e in rd.flatten() {
         let Some(v) = read_json(&e.path().join("extensions.json")) else { continue };
         let profile = e.file_name().to_string_lossy().split_once('.').map(|(_, n)| n.to_string()).unwrap_or_default();
-        for a in v.a("addons") {
-            let loc = a.s("location").unwrap_or_default();
-            if a.s("type").as_deref() != Some("extension") || loc.starts_with("app-builtin") || loc.starts_with("app-system") {
-                continue;
-            }
-            let mut perms = a.g("userPermissions").strs("permissions");
-            perms.extend(a.g("userPermissions").strs("origins"));
-            out.push(Extension {
-                browser: "Firefox".into(),
-                profile: profile.clone(),
-                profile_dir: String::new(),
-                id: a.s("id").unwrap_or_default(),
-                name: a.g("defaultLocale").s("name").unwrap_or_else(|| a.s("id").unwrap_or_default()),
-                version: a.s("version").unwrap_or_default(),
-                enabled: a.b("active") == Some(true) && a.b("userDisabled") != Some(true),
-                from_store: a.s("sourceURI").is_some_and(|u| u.contains("addons.mozilla.org")),
-                all_sites: perms.iter().any(|p| ALL_SITES.contains(&p.as_str())),
-                permissions: perms,
-            });
+        firefox_addons(&v, &profile, out);
+    }
+}
+
+/// The extensions Firefox lists in its add-ons page, from a profile's `extensions.json`.
+fn firefox_addons(v: &Value, profile: &str, out: &mut Vec<Extension>) {
+    for a in v.a("addons") {
+        let loc = a.s("location").unwrap_or_default();
+        if a.s("type").as_deref() != Some("extension") || loc.starts_with("app-builtin") || loc.starts_with("app-system") {
+            continue;
         }
+        // Firefox hides its own parts, such as the New Tab page it updates in the profile
+        // folder: marked hidden and signed by Mozilla (signed state 3 or 4). A copy that
+        // another one overrides isn't visible either.
+        let mozillas = matches!(a.i("signedState"), Some(3 | 4));
+        if (a.b("hidden") == Some(true) && mozillas) || a.b("visible") == Some(false) {
+            continue;
+        }
+        let mut perms = a.g("userPermissions").strs("permissions");
+        perms.extend(a.g("userPermissions").strs("origins"));
+        out.push(Extension {
+            browser: "Firefox".into(),
+            profile: profile.into(),
+            profile_dir: String::new(),
+            id: a.s("id").unwrap_or_default(),
+            name: a.g("defaultLocale").s("name").unwrap_or_else(|| a.s("id").unwrap_or_default()),
+            version: a.s("version").unwrap_or_default(),
+            enabled: a.b("active") == Some(true) && a.b("userDisabled") != Some(true),
+            from_store: a.s("sourceURI").is_some_and(|u| u.contains("addons.mozilla.org")),
+            all_sites: perms.iter().any(|p| ALL_SITES.contains(&p.as_str())),
+            permissions: perms,
+        });
     }
 }
 
@@ -283,6 +295,30 @@ mod tests {
         for dir in ["", "Profile ", "Profile 1 --x", "Profile x", "System Profile"] {
             assert!(!profile_dir_ok(dir), "{dir}");
         }
+    }
+
+    /// Shaped like a real `extensions.json`: Firefox's own New Tab page arrives as a hidden,
+    /// Mozilla-signed add-on in the profile folder, and Firefox's add-ons page leaves it out.
+    #[test]
+    fn firefox_lists_only_the_extensions_its_add_ons_page_shows() {
+        let addon = |id: &str, location: &str, hidden: bool, signed: i64, visible: bool| {
+            json!({"id": id, "type": "extension", "location": location, "hidden": hidden, "signedState": signed, "visible": visible,
+                   "active": true, "defaultLocale": {"name": id}})
+        };
+        let v = json!({"addons": [
+            addon("newtab@mozilla.org", "app-profile", true, 4, true),
+            addon("formautofill@mozilla.org", "app-builtin-addons", true, 4, true),
+            addon("uBlock0@raymondhill.net", "app-profile", false, 2, true),
+            addon("old-copy@example.com", "app-global", false, 2, false),
+            // Firefox honours the hidden flag only for its own add-ons.
+            addon("sneaky@example.com", "app-profile", true, 2, true),
+            {"id": "default-theme@mozilla.org", "type": "theme", "location": "app-builtin"},
+        ]});
+        let mut out = vec![];
+        firefox_addons(&v, "default-release", &mut out);
+        let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["uBlock0@raymondhill.net", "sneaky@example.com"]);
+        assert!(out.iter().all(|e| e.browser == "Firefox" && e.profile == "default-release" && e.enabled));
     }
 
     #[test]
