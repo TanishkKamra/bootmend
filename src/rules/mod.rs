@@ -1237,7 +1237,7 @@ mod tests {
                 "folderDrives": folders
             });
             s.storage["disks"][failing as usize]["Health"] = json!("Warning");
-            s.drives = crate::collect::smart::drive_health(&s.storage);
+            s.drives = crate::collect::smart::drive_health(&s.storage, &|_| {});
             let f = evaluate(&s);
             let x = f.iter().find(|x| x.id == format!("drive-failing-{failing}")).expect("a failing drive");
             x.actions.contains(&Action::CopyFiles)
@@ -1263,7 +1263,7 @@ mod tests {
                 "disks": [{"Number": 0, "Model": model, "Bus": "SATA", "Media": "SSD", "Health": health}],
                 "ataSmart": [{"Instance": format!(r"SCSI\Disk&Ven_&Prod_{model}\4&1"), "Data": table}]
             });
-            s.drives = crate::collect::smart::drive_health(&s.storage);
+            s.drives = crate::collect::smart::drive_health(&s.storage, &|_| {});
             let f = evaluate(&s);
             (level_of(&f, "drive-failing-0"), s.drives[0].pending)
         };

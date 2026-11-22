@@ -241,6 +241,8 @@ pub enum Job {
     /// One box of the queue finished: its index, the result, how long it took in ms, and what
     /// clearing did when it was the leftover files.
     Worked(usize, Result<(), String>, f32, Option<Vec<(&'static str, Result<crate::cleanup::Cleaned, String>)>>),
+    /// The box at this index moved on to a new part of its work, in these words.
+    Part(usize, String),
     /// System Restore was turned on so a restore point could be saved.
     TurnedOn(Result<(), String>),
     Points(Result<Vec<fixes::RestorePoint>, String>),
@@ -425,6 +427,8 @@ enum Shot {
     Queue,
     Fixing,
     Details,
+    /// A check-up part way through with its details open.
+    CheckDetails,
     /// The copy dialog choosing a drive (0), copying (1) and done (2).
     Copy(u8),
     /// The Crashes page after reading the crash files: on its own (0), with what they say (1),
@@ -645,7 +649,18 @@ impl App {
         if let Some(dir) = snap_dir {
             let mut queue = vec![Shot::Welcome];
             queue.extend(Page::ALL.iter().map(|p| Shot::View(*p)));
-            queue.extend([Shot::Dialog, Shot::Early, Shot::Menu, Shot::Queue, Shot::Fixing, Shot::Details, Shot::Copy(0), Shot::Copy(1), Shot::Copy(2)]);
+            queue.extend([
+                Shot::Dialog,
+                Shot::Early,
+                Shot::Menu,
+                Shot::Queue,
+                Shot::Fixing,
+                Shot::Details,
+                Shot::CheckDetails,
+                Shot::Copy(0),
+                Shot::Copy(1),
+                Shot::Copy(2),
+            ]);
             // Last, because they swap in sample crash files for the shots that follow.
             queue.extend([Shot::CrashFiles(0), Shot::CrashFiles(1), Shot::CrashFiles(2)]);
             app.snap_mode = Some(SnapMode { dir, queue, frames: 0, asked: false, part: 0, more: false });
@@ -838,12 +853,18 @@ impl App {
                 if matches!(work, run::Work::Step(_)) {
                     continue;
                 }
+                // A closed window has nobody left to tell; the loop below stops on that.
+                let say = |text: String| {
+                    if tx.send(Job::Part(i, text)).is_ok() {
+                        ctx.request_repaint();
+                    }
+                };
                 log!("queue", "{title}: started");
                 // A panic inside one box ends that box, not the queue, which would wait for it forever.
                 let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &work {
-                    run::Work::Fix(f) => (fixes::apply(f, &title).map_err(|e| format!("{e:#}")), None),
+                    run::Work::Fix(f) => (fixes::apply_live(f, &title, &say).map_err(|e| format!("{e:#}")), None),
                     _ => {
-                        let out = cleanup_page::clean_items(&items, |_| {});
+                        let out = cleanup_page::clean_items(&items, |n| say(run::clearing(items[n].title)));
                         let errs: Vec<String> = out.iter().filter_map(|(_, r)| r.as_ref().err().cloned()).collect();
                         (if errs.is_empty() { Ok(()) } else { Err(errs.join(" ")) }, Some(out))
                     }
@@ -1359,6 +1380,11 @@ impl App {
         let msgs = self.check_rx.as_ref().map(drain_check).unwrap_or_default();
         for m in msgs {
             match m {
+                Progress::Doing { key, text } => {
+                    if let Some(q) = &mut self.run {
+                        q.on_check_part(key, text);
+                    }
+                }
                 Progress::StepDone { key, ok } => {
                     if let Some(q) = &mut self.run {
                         q.on_step(key, ok);
@@ -1450,6 +1476,11 @@ impl App {
                             }
                             self.toast(format!("Couldn't turn System Restore on: {e}"), false);
                         }
+                    }
+                }
+                Job::Part(i, text) => {
+                    if let Some(q) = &mut self.run {
+                        q.on_fix_part(i, text);
                     }
                 }
                 Job::Worked(i, r, ms, cleaned) => {
@@ -1997,6 +2028,7 @@ impl App {
                 Some(Shot::Queue) => "queue".to_string(),
                 Some(Shot::Fixing) => "fixing".to_string(),
                 Some(Shot::Details) => "fixing-details".to_string(),
+                Some(Shot::CheckDetails) => "checking-details".to_string(),
                 Some(Shot::Copy(n)) => format!("copy-{}", ["pick", "copying", "done"][usize::from(*n).min(2)]),
                 Some(Shot::CrashFiles(n)) => format!("crash-files-{}", ["read", "said", "fix"][usize::from(*n).min(2)]),
                 _ => "welcome".to_string(),
@@ -2021,7 +2053,7 @@ impl App {
                     self.crash_summary = None;
                     self.crash_fix = None;
                 }
-                if matches!(m.queue.first(), Some(Shot::Queue | Shot::Fixing | Shot::Details)) {
+                if matches!(m.queue.first(), Some(Shot::Queue | Shot::Fixing | Shot::Details | Shot::CheckDetails)) {
                     self.run = None;
                 }
                 m.queue.remove(0);
@@ -2042,7 +2074,7 @@ impl App {
                 self.ui.nav_open = matches!(target, Shot::Menu);
                 let page = match target {
                     Shot::View(p) => Some(p),
-                    Shot::Menu | Shot::Early | Shot::Queue | Shot::Fixing | Shot::Details | Shot::Copy(_) => Some(Page::Home),
+                    Shot::Menu | Shot::Early | Shot::Queue | Shot::Fixing | Shot::Details | Shot::CheckDetails | Shot::Copy(_) => Some(Page::Home),
                     Shot::Dialog | Shot::CrashFiles(_) => Some(Page::Crashes),
                     Shot::Welcome => None,
                 };
@@ -2069,6 +2101,16 @@ impl App {
                                 self.mark.set(q.p);
                                 self.mark.step(16.0);
                             }
+                        }
+                        self.run = Some(q);
+                    }
+                    if matches!(target, Shot::CheckDetails) {
+                        let q = run::sample_check();
+                        self.mark = mark::Mark::new(mark::Kind::Stones, 1.0);
+                        self.mark.start();
+                        for _ in 0..90 {
+                            self.mark.set(q.p);
+                            self.mark.step(16.0);
                         }
                         self.run = Some(q);
                     }

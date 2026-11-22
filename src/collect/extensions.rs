@@ -12,7 +12,8 @@ fn read_json(p: &Path) -> Option<Value> {
     serde_json::from_slice(&b).ok()
 }
 
-pub fn collect() -> Vec<Extension> {
+/// `say` hears each browser as it's looked at.
+pub fn collect(say: &dyn Fn(String)) -> Vec<Extension> {
     let mut out = Vec::new();
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
@@ -23,15 +24,23 @@ pub fn collect() -> Vec<Extension> {
             ("Brave", l.join(r"BraveSoftware\Brave-Browser\User Data")),
             ("Vivaldi", l.join(r"Vivaldi\User Data")),
         ] {
+            if dir.is_dir() {
+                say(format!("Looking at {name}'s extensions"));
+            }
             chromium(name, &dir, &mut out);
         }
     }
     if let Some(r) = &roaming {
         let opera = r.join(r"Opera Software\Opera Stable");
         if opera.join("Extensions").is_dir() {
+            say("Looking at Opera's extensions".into());
             chromium_profile("Opera", "Default", &opera, &mut out);
         }
-        firefox(&r.join(r"Mozilla\Firefox\Profiles"), &mut out);
+        let profiles = r.join(r"Mozilla\Firefox\Profiles");
+        if profiles.is_dir() {
+            say("Looking at Firefox's add-ons".into());
+        }
+        firefox(&profiles, &mut out);
     }
     out.sort_by(|a, b| (&a.browser, a.name.to_lowercase()).cmp(&(&b.browser, b.name.to_lowercase())));
     let mut per: Vec<(&str, usize)> = Vec::new();

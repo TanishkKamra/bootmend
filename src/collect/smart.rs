@@ -168,7 +168,8 @@ pub fn instance_matches(instance: &str, model: &str) -> bool {
     })
 }
 
-pub fn drive_health(storage: &Value) -> Vec<DriveHealth> {
+/// Each drive's health counters, telling `on` each drive's model as it's read.
+pub fn drive_health(storage: &Value, on: &dyn Fn(&str)) -> Vec<DriveHealth> {
     let ata = storage.a("ataSmart");
     let predict = storage.a("failurePredict");
     storage
@@ -176,6 +177,7 @@ pub fn drive_health(storage: &Value) -> Vec<DriveHealth> {
         .into_iter()
         .map(|d| {
             let model = d.s("Model").unwrap_or_else(|| "Unknown drive".into());
+            on(&model);
             let bus = d.s("Bus").unwrap_or_default();
             let media = d.s("Media").unwrap_or_default();
             let kind = match (bus.as_str(), media.as_str()) {

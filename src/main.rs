@@ -107,6 +107,7 @@ fn collect_now() -> Result<snapshot::Snapshot> {
     std::thread::spawn(move || collect::collect(tx));
     loop {
         match rx.recv()? {
+            collect::Progress::Doing { .. } => {}
             collect::Progress::StepDone { key, ok } => eprintln!("{} {key}", if ok { "done" } else { "incomplete" }),
             collect::Progress::Finished(s) => return Ok(*s),
             collect::Progress::Failed(e) => bail!("The check didn't finish: {e}"),

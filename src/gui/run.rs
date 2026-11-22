@@ -281,6 +281,16 @@ struct Line {
     at: f32,
 }
 
+/// One thing the work really did, as the details panel lists it.
+struct Part {
+    /// The box it belongs to.
+    owner: usize,
+    text: String,
+    began: f32,
+    took: Option<f32>,
+    failed: bool,
+}
+
 pub struct Run {
     pub mode: Mode,
     pub stage: Stage,
@@ -310,8 +320,8 @@ pub struct Run {
     below: bool,
     ended: bool,
     rested_at: Option<f32>,
-    /// The boxes in the order they started, for the details panel.
-    order: Vec<usize>,
+    /// What the work really did, in the order it happened, for the details panel.
+    parts: Vec<Part>,
     settle: f32,
     gate_h: f32,
 }
@@ -343,7 +353,7 @@ impl Run {
             below: false,
             ended: false,
             rested_at: None,
-            order: vec![],
+            parts: vec![],
             settle: 0.0,
             gate_h: 96.0,
         };
@@ -455,6 +465,7 @@ impl Run {
 
     /// A fix finished in the background: `ms` is how long it really took.
     pub fn on_result(&mut self, i: usize, r: Result<(), String>, ms: f32) {
+        self.end_parts(Some(i), r.is_err());
         if let Some(it) = self.items.get_mut(i) {
             it.result = Some(r);
             it.took = Some(ms);
@@ -463,6 +474,9 @@ impl Run {
 
     /// A part of the check-up finished.
     pub fn on_step(&mut self, key: &str, ok: bool) {
+        if let Some(i) = self.step_index(key) {
+            self.end_parts(Some(i), !ok);
+        }
         if let Some(it) = self.items.iter_mut().find(|i| matches!(i.work, Work::Step(k) if k == key) && !i.state.resolved()) {
             it.result = Some(if ok { Ok(()) } else { Err(String::new()) });
         }
@@ -471,10 +485,45 @@ impl Run {
     /// The check-up is over. Anything that never reported counts as done.
     pub fn on_finished(&mut self, s: Box<Snapshot>) {
         self.finished = Some(s);
+        self.end_parts(None, false);
         for it in &mut self.items {
             if !it.state.resolved() && it.result.is_none() {
                 it.result = Some(Ok(()));
             }
+        }
+    }
+
+    /// The fix in box `i` moved on to a new part of its work.
+    pub fn on_fix_part(&mut self, i: usize, text: String) {
+        if i < self.items.len() {
+            self.part(i, text);
+        }
+    }
+
+    /// The part of the check-up called `key` moved on to a new part of its work.
+    pub fn on_check_part(&mut self, key: &str, text: String) {
+        if let Some(i) = self.step_index(key) {
+            self.part(i, text);
+        }
+    }
+
+    fn step_index(&self, key: &str) -> Option<usize> {
+        self.items.iter().position(|i| matches!(i.work, Work::Step(k) if k == key))
+    }
+
+    /// A new part ends the one before it from the same box. The check-up's parts run side by
+    /// side, so other boxes' parts carry on.
+    fn part(&mut self, owner: usize, text: String) {
+        self.end_parts(Some(owner), false);
+        self.parts.push(Part { owner, text, began: self.clock, took: None, failed: false });
+    }
+
+    /// Ends the parts still going in box `owner`, or in every box.
+    fn end_parts(&mut self, owner: Option<usize>, failed: bool) {
+        let now = self.clock;
+        for p in self.parts.iter_mut().filter(|p| p.took.is_none() && owner.is_none_or(|o| o == p.owner)) {
+            p.took = Some(now - p.began);
+            p.failed = failed;
         }
     }
 
@@ -612,7 +661,6 @@ impl Run {
                 it.state = State::Now;
                 it.began = now;
                 let line = it.doing.clone();
-                self.order.push(i);
                 self.say(&line);
             }
         }
@@ -625,7 +673,6 @@ impl Run {
             if it.state == State::Wait && t >= FIRST_AT + i as f32 * CHECK_STAGGER {
                 it.state = State::Now;
                 it.began = now;
-                self.order.push(i);
             }
             if it.state == State::Now && now - it.began >= CHECK_MIN_NOW {
                 if let Some(r) = it.result.take() {
@@ -1096,7 +1143,8 @@ impl Run {
         draw(&self.line.text, k, if self.reduced { 0.0 } else { 6.0 * (1.0 - ease_out(k)) });
     }
 
-    /// Inside the open panel: what's been done, in the order it started.
+    /// Inside the open panel: each thing the work really does, as it happens, with how long it
+    /// took. The boxes above already say which to-do is under way, so this goes one level down.
     fn log_ui(&self, ui: &mut Ui, p: &Pal, panel: Rect, alpha: f32) {
         let now = self.clock;
         let inner = panel.shrink2(vec2(S4, S3 + 2.0));
@@ -1107,55 +1155,59 @@ impl Run {
         ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
             ui.multiply_opacity(alpha);
             egui::ScrollArea::vertical().id_salt("run-log").stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
-                for &i in &self.order {
-                    let it = &self.items[i];
-                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+                if self.parts.is_empty() {
+                    ui.label(RichText::new("Getting started").color(p.muted));
+                }
+                for part in &self.parts {
+                    let (row, r) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &part.text));
                     let painter = ui.painter();
-                    let (g, c) = match it.state {
-                        State::Done => (icon::CHECK, p.green),
-                        State::Failed(_) => (icon::WARN, p.amber),
-                        _ => (it.icon, p.accent),
+                    let (g, c, ink) = match (part.took, part.failed) {
+                        (None, _) => (self.items[part.owner].icon, p.accent, p.ink),
+                        (Some(_), false) => (icon::CHECK, p.green, p.muted),
+                        (Some(_), true) => (icon::WARN, p.amber, p.ink),
                     };
                     painter.text(pos2(row.left() + 7.0, row.center().y), Align2::CENTER_CENTER, g, FontId::new(14.0, theme::icons()), c);
-                    let ms = match it.state {
-                        State::Now => now - it.began,
-                        _ => it.took.unwrap_or(0.0),
-                    };
-                    let took = if ms < 60_000.0 { format!("{:.1} s", ms / 1000.0) } else { format!("{} min", (ms / 60_000.0) as u32) };
-                    let time = painter.layout_no_wrap(took, FontId::new(12.0, theme::semibold()), p.muted);
-                    let tx = row.right() - time.size().x - S1;
-                    painter.galley(pos2(tx, row.center().y - time.size().y / 2.0), time, p.muted);
-                    let detail = match (&it.state, self.mode) {
-                        (State::Now, Mode::Fix) => "Working on it".to_string(),
-                        (State::Now, Mode::Check) => "Checking".to_string(),
-                        (State::Failed(e), Mode::Fix) if !e.is_empty() => e.clone(),
-                        (State::Failed(_), _) => "Couldn't finish".to_string(),
-                        (_, Mode::Fix) => it.sub.clone(),
-                        (_, Mode::Check) => "Done".to_string(),
-                    };
+                    let ms = part.took.unwrap_or(now - part.began);
+                    let mut tx = row.right() - S1;
+                    // Parts that pass in a blink get no "0.0 s".
+                    if ms >= 50.0 {
+                        let time = painter.layout_no_wrap(took_text(ms), FontId::new(12.0, theme::semibold()), p.muted);
+                        tx -= time.size().x;
+                        painter.galley(pos2(tx, row.center().y - time.size().y / 2.0), time, p.muted);
+                    }
                     let x0 = row.left() + 22.0;
-                    let avail = (tx - S3 - x0).max(40.0);
-                    let title = egui::WidgetText::from(RichText::new(&it.title).color(p.ink)).into_galley(
+                    let text = egui::WidgetText::from(RichText::new(&part.text).color(ink)).into_galley(
                         ui,
                         Some(egui::TextWrapMode::Truncate),
-                        avail * 0.55,
+                        (tx - S3 - x0).max(40.0),
                         egui::TextStyle::Body,
                     );
-                    let tw = title.size().x;
-                    painter.galley(pos2(x0, row.center().y - title.size().y / 2.0), title, p.ink);
-                    let rest = avail - tw - S2;
-                    if rest > 24.0 && !detail.is_empty() {
-                        let d = egui::WidgetText::from(RichText::new(detail).small().color(p.muted)).into_galley(
-                            ui,
-                            Some(egui::TextWrapMode::Truncate),
-                            rest,
-                            egui::TextStyle::Small,
-                        );
-                        painter.galley(pos2(x0 + tw + S2, row.center().y - d.size().y / 2.0), d, p.muted);
-                    }
+                    painter.galley(pos2(x0, row.center().y - text.size().y / 2.0), text, ink);
                 }
             });
         });
+    }
+}
+
+fn took_text(ms: f32) -> String {
+    if ms < 60_000.0 {
+        format!("{:.1} s", ms / 1000.0)
+    } else {
+        format!("{} min", (ms / 60_000.0) as u32)
+    }
+}
+
+/// What the details panel says while one kind of leftover file is cleared: "Clearing temporary
+/// files", but "Clearing Chrome's cache" and "Clearing Windows Update downloads", with names kept
+/// as they are.
+pub fn clearing(title: &str) -> String {
+    let first = title.split(' ').next().unwrap_or_default();
+    let plain = !first.contains('\'') && first != "Windows" && first.chars().nth(1).is_some_and(char::is_lowercase);
+    let mut chars = title.chars();
+    match (plain, chars.next()) {
+        (true, Some(c)) => format!("Clearing {}{}", c.to_lowercase(), chars.as_str()),
+        _ => format!("Clearing {title}"),
     }
 }
 
@@ -1306,23 +1358,65 @@ pub(super) fn sample(stage: Stage, details: bool) -> Run {
     }
     r.gate = Gate::Saved;
     r.start();
-    for _ in 0..600 {
-        if r.items[0].state == State::Now && r.items[0].result.is_none() {
-            r.on_result(0, Ok(()), 400.0);
+    let steps = |r: &mut Run, n: usize| {
+        for _ in 0..n {
+            r.step(16.0);
         }
+    };
+    r.on_fix_part(0, crate::fixes::NOTING.into());
+    steps(&mut r, 6);
+    r.on_fix_part(0, Fix::EnablePua.doing());
+    steps(&mut r, 40);
+    r.on_result(0, Ok(()), 720.0);
+    r.on_fix_part(1, crate::fixes::NOTING.into());
+    steps(&mut r, 8);
+    r.on_fix_part(1, Fix::DisableSmb1.doing());
+    for _ in 0..600 {
         if r.items[1].state == State::Now {
             break;
         }
         r.step(16.0);
     }
+    steps(&mut r, 40);
+    if details {
+        r.toggle_details();
+        steps(&mut r, 90);
+    }
+    r
+}
+
+/// A check-up part way through with its details open, for the screenshots: some parts done and
+/// a few still going side by side, as they really run.
+pub(super) fn sample_check() -> Run {
+    let mut r = Run::check(Page::Home, false);
+    let parts = [
+        ("system", "device"),
+        ("storage", "disks"),
+        ("network", "adapters"),
+        ("security", "defender"),
+        ("software", "apps"),
+        ("health", "perf"),
+        ("system", "os"),
+        ("storage", "volumes"),
+        ("network", "wifi"),
+        ("health", "stability"),
+        ("system", "cpu"),
+        ("software", "startup"),
+    ];
+    for (n, (key, name)) in parts.into_iter().enumerate() {
+        r.on_check_part(key, crate::collect::part_line(name).unwrap_or(name).to_string());
+        for _ in 0..6 + n % 4 * 5 {
+            r.step(16.0);
+        }
+    }
+    r.on_check_part("extensions", "Looking at Chrome's extensions".into());
+    r.on_step("network", true);
     for _ in 0..40 {
         r.step(16.0);
     }
-    if details {
-        r.toggle_details();
-        for _ in 0..90 {
-            r.step(16.0);
-        }
+    r.toggle_details();
+    for _ in 0..90 {
+        r.step(16.0);
     }
     r
 }
@@ -1456,7 +1550,51 @@ mod tests {
         play(&mut r, |_| Ok(()));
         assert_eq!(r.items[1].state, State::Wait, "never started");
         assert!(r.items[1].left_at.is_some());
-        assert_eq!(r.order, vec![0, 2]);
+    }
+
+    fn open(r: &Run) -> Vec<&str> {
+        r.parts.iter().filter(|p| p.took.is_none()).map(|p| p.text.as_str()).collect()
+    }
+
+    #[test]
+    fn details_follow_each_fix_part_by_part_as_it_really_goes() {
+        let mut r = fixes(2);
+        r.start();
+        r.on_fix_part(0, "Noting".into());
+        r.step(16.0);
+        r.on_fix_part(0, "Turning it on".into());
+        assert_eq!(open(&r), ["Turning it on"], "a new part ends the one before it");
+        assert!(r.parts[0].took.is_some_and(|t| t > 0.0), "and keeps how long it took");
+        r.on_fix_part(9, "Nobody's".into());
+        assert_eq!(r.parts.len(), 2, "a box that isn't there says nothing");
+        r.on_result(0, Ok(()), 500.0);
+        assert!(open(&r).is_empty() && !r.parts[1].failed);
+        r.on_fix_part(1, "Switching it off".into());
+        r.on_result(1, Err("No".into()), 500.0);
+        assert!(r.parts[2].failed, "the part that was going when it failed is marked");
+    }
+
+    #[test]
+    fn details_show_the_check_ups_parts_going_side_by_side() {
+        let mut r = Run::check(Page::Home, false);
+        r.on_check_part("system", "Reading the processor".into());
+        r.on_check_part("storage", "Listing the drives".into());
+        r.on_check_part("nope", "Nothing".into());
+        assert_eq!(open(&r), ["Reading the processor", "Listing the drives"], "parts of other boxes carry on");
+        r.on_step("system", false);
+        assert!(r.parts[0].failed && r.parts[1].took.is_none());
+        r.on_finished(Box::default());
+        assert!(open(&r).is_empty() && !r.parts[1].failed, "the end closes everything still going");
+    }
+
+    #[test]
+    fn clearing_words_keep_names_and_lower_plain_ones() {
+        assert_eq!(clearing("Temporary files"), "Clearing temporary files");
+        assert_eq!(clearing("Old installers in Downloads"), "Clearing old installers in Downloads");
+        assert_eq!(clearing("Chrome's cache"), "Clearing Chrome's cache");
+        assert_eq!(clearing("npm's download cache"), "Clearing npm's download cache");
+        assert_eq!(clearing("Windows Update downloads"), "Clearing Windows Update downloads");
+        assert_eq!(clearing("DNS cache"), "Clearing DNS cache");
     }
 
     #[test]
