@@ -264,6 +264,8 @@ struct Settings {
     schedule_asked: bool,
     /// Buttons, links and switches take the Windows accent colour instead of cobalt.
     use_windows_accent: bool,
+    /// Light, dark, or the mode Windows uses.
+    theme: ThemeChoice,
     /// "Don't show again" was pressed on the early-version notice.
     early_notice_off: bool,
     /// "Don't ask again" was ticked when agreeing to M-Lab's speed test.
@@ -288,6 +290,7 @@ impl Default for Settings {
             schedule_hour: crate::schedule::NOON,
             schedule_asked: false,
             use_windows_accent: false,
+            theme: ThemeChoice::System,
             early_notice_off: false,
             speed_test_ok: false,
             auto_update: true,
@@ -309,6 +312,40 @@ fn ended<T>(r: &Result<T, String>) -> String {
     match r {
         Ok(_) => "worked".into(),
         Err(e) => format!("failed: {e}"),
+    }
+}
+
+/// The theme picked in Settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    const ALL: [ThemeChoice; 3] = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark];
+
+    fn label(self) -> &'static str {
+        match self {
+            ThemeChoice::System => "Match Windows",
+            ThemeChoice::Light => "Light",
+            ThemeChoice::Dark => "Dark",
+        }
+    }
+
+    /// Puts the choice into effect: Bootmend's colours, and the window's title bar and Mica
+    /// backdrop, which would otherwise stay in Windows' mode.
+    fn apply(self, ctx: &egui::Context) {
+        let (pref, window) = match self {
+            ThemeChoice::System => (egui::ThemePreference::System, egui::SystemTheme::SystemDefault),
+            ThemeChoice::Light => (egui::ThemePreference::Light, egui::SystemTheme::Light),
+            ThemeChoice::Dark => (egui::ThemePreference::Dark, egui::SystemTheme::Dark),
+        };
+        ctx.set_theme(pref);
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(window));
     }
 }
 
@@ -528,6 +565,8 @@ impl App {
     /// `resume` picks up the queue saved before restarting as administrator.
     pub fn new(cc: &eframe::CreationContext, snap_dir: Option<PathBuf>, mica: bool, resume: bool) -> Self {
         theme::apply(&cc.egui_ctx);
+        let settings = load_settings();
+        settings.theme.apply(&cc.egui_ctx);
         let mica = mica
             && match system::apply_mica(cc) {
                 Ok(()) => true,
@@ -563,7 +602,7 @@ impl App {
             confirm: None,
             toasts: vec![],
             history: fixes::history(),
-            settings: load_settings(),
+            settings,
             ui: UiState { hide_personal: true, ..Default::default() },
             elevated: crate::elevate::is_elevated(),
             restore_saved: false,
@@ -678,6 +717,14 @@ impl App {
             log!("window", "Windows animation effects are now {}", if on { "on" } else { "off" });
             theme::set_motion(ctx, on);
         }
+    }
+
+    fn set_theme_choice(&mut self, ctx: &egui::Context, choice: ThemeChoice) {
+        log!("settings", "theme set to {}", choice.label());
+        self.settings.theme = choice;
+        self.save_settings();
+        choice.apply(ctx);
+        ctx.request_repaint();
     }
 
     fn set_accent_sync(&mut self, ctx: &egui::Context, on: bool) {
@@ -2196,7 +2243,26 @@ fn drain_check(rx: &Receiver<Progress>) -> Vec<Progress> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Page, Place};
+    use super::{egui, Page, Place, Settings, ThemeChoice};
+
+    /// Settings saved before the theme choice existed keep following Windows.
+    #[test]
+    fn the_theme_choice_is_saved_and_takes_effect() {
+        let old: Settings = serde_json::from_str(r#"{"privacy_ack": true}"#).unwrap();
+        assert_eq!(old.theme, ThemeChoice::System);
+        let saved = serde_json::to_string(&Settings { theme: ThemeChoice::Dark, ..Default::default() }).unwrap();
+        assert!(saved.contains(r#""theme":"dark""#), "{saved}");
+        assert_eq!(serde_json::from_str::<Settings>(&saved).unwrap().theme, ThemeChoice::Dark);
+        let ctx = egui::Context::default();
+        for (c, want) in [
+            (ThemeChoice::Light, egui::ThemePreference::Light),
+            (ThemeChoice::Dark, egui::ThemePreference::Dark),
+            (ThemeChoice::System, egui::ThemePreference::System),
+        ] {
+            c.apply(&ctx);
+            assert_eq!(ctx.options(|o| o.theme_preference), want);
+        }
+    }
 
     #[test]
     fn report_a_problem_opens_the_bug_form_with_the_version() {

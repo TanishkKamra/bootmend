@@ -2,7 +2,7 @@
 
 use super::theme::{self, pal, S1, S2, S3, S4, S5};
 use super::widgets::{self, card, ico, icon, kv, muted, section, small, table};
-use super::{run, App, Page, Pending};
+use super::{run, App, Page, Pending, ThemeChoice};
 use crate::diff::Kind as ChangeKind;
 use crate::fixes::Fix;
 use crate::rules::{plural, Action, Area, Finding};
@@ -1413,6 +1413,22 @@ impl App {
         let p = pal(ui.ctx());
         section(ui, "Appearance");
         card(ui, |ui| {
+            let now = self.settings.theme;
+            let picked = stacked(ui, "Theme", "Match Windows follows the light or dark mode set in Windows.", |ui| {
+                let mut picked = None;
+                ui.horizontal_wrapped(|ui| {
+                    for c in ThemeChoice::ALL {
+                        if ui.add(egui::Button::new(c.label()).selected(now == c)).clicked() && now != c {
+                            picked = Some(c);
+                        }
+                    }
+                });
+                picked
+            });
+            if let Some(c) = picked {
+                self.set_theme_choice(ui.ctx(), c);
+            }
+            ui.separator();
             let on = self.settings.use_windows_accent;
             let name = "Use my Windows accent colour";
             let flip = setting(ui, name, "Buttons, links and switches take the accent colour you chose in Windows.", |ui| {
@@ -1439,7 +1455,7 @@ impl App {
                 });
             }
             ui.separator();
-            setting(ui, "Mode and transparency effects", "Bootmend follows the light or dark mode and the transparency effects set in Windows.", |ui| {
+            setting(ui, "Transparency effects", "Bootmend follows the transparency effects set in Windows.", |ui| {
                 if widgets::icon_button(ui, icon::OPEN, "Colour settings", true).clicked() {
                     log!("action", "opening ms-settings:colors");
                     if let Err(e) = shell_open("ms-settings:colors") {
