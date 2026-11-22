@@ -41,6 +41,11 @@ pub fn ram_maker(reported: Option<&str>, part: &str) -> Option<String> {
     codes.iter().find(|(c, _)| p.starts_with(c)).map(|(_, m)| m.to_string())
 }
 
+/// A stick's maker as `ram_maker` reads it, or nothing rather than "Unknown".
+pub fn stick_maker(m: &serde_json::Value) -> String {
+    ram_maker(m.s("Maker").as_deref(), &m.s("Part").unwrap_or_default()).unwrap_or_default()
+}
+
 /// Where the slot count and the most memory come from, said under them: some boards copy their
 /// maker's generic numbers, such as 4 slots on a board with 2, and Windows passes them on.
 pub const MEMORY_SOURCE: &str =
@@ -219,6 +224,9 @@ mod tests {
         assert_eq!(ram_maker(None, "F4-3200C16-8GVKB").as_deref(), Some("G.Skill"));
         assert_eq!(ram_maker(Some("Kingston"), "KF432C16BB/8").as_deref(), Some("Kingston"));
         assert_eq!(ram_maker(Some("Unknown"), "XYZ123"), None);
+        assert_eq!(stick_maker(&json!({"Maker": "Unknown", "Part": "CT8G4DFRA32A.M4FE"})), "Crucial");
+        assert_eq!(stick_maker(&json!({"Maker": "Unknown", "Part": "XYZ123"})), "", "no \"Unknown\" on show");
+        assert_eq!(stick_maker(&json!({})), "");
     }
 
     #[test]

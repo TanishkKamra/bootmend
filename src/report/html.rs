@@ -199,7 +199,7 @@ pub fn render(snap: &Snapshot, hidden: bool) -> String {
                     s(m, "Type"),
                     opt_num(m.f("SpeedMTs"), " MT/s").unwrap_or_default(),
                     opt_num(m.f("ConfiguredMTs"), " MT/s").unwrap_or_default(),
-                    s(m, "Maker"),
+                    crate::rules::upgrades::stick_maker(m),
                     s(m, "Part"),
                 ]
             })

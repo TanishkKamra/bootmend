@@ -36,7 +36,10 @@ fn memory(s: &Snapshot, f: &mut Vec<Finding>) {
                 .why("This PC has a single memory stick, but it can use two at once. A matching pair can move up to twice as much data, which helps games and integrated graphics most.")
                 .step(format!("Add a second stick matching the first: {} GB {} at {} MT/s.", st.f("SizeGB").unwrap_or(0.0), st.s("Type").unwrap_or_else(|| "memory".into()), st.i("SpeedMTs").unwrap_or(0)))
                 .detail(format!("{} of {} slots used, as the board reports it", sticks.len(), m.i("Slots").unwrap_or(0)))
-                .details(st.s("Part").map(|p| format!("Current stick: {} {p}", st.s("Maker").unwrap_or_default())))
+                .details(st.s("Part").map(|p| match super::upgrades::stick_maker(st) {
+                    m if m.is_empty() => format!("Current stick: {p}"),
+                    m => format!("Current stick: {m} {p}"),
+                }))
                 .act(Action::Goto(Page::ThisPc)),
         );
     }

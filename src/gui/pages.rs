@@ -1633,7 +1633,7 @@ fn this_pc(ui: &mut Ui, snap: &Snapshot) {
                     s(m, "Type"),
                     num(m.f("SpeedMTs"), " MT/s").unwrap_or_default(),
                     num(m.f("ConfiguredMTs"), " MT/s").unwrap_or_default(),
-                    format!("{} {}", s(m, "Maker"), s(m, "Part")),
+                    format!("{} {}", crate::rules::upgrades::stick_maker(m), s(m, "Part")).trim().to_string(),
                 ]
             })
             .collect();

@@ -293,10 +293,13 @@ mod tests {
     #[test]
     fn single_memory_stick_is_noticed() {
         let mut s = base();
-        s.system["memory"] = json!({"TotalGB": 16, "Slots": 4, "Sticks": [{"SizeGB": 16, "SpeedMTs": 3200, "ConfiguredMTs": 2133}]});
+        s.system["memory"] = json!({"TotalGB": 16, "Slots": 4, "Sticks": [
+            {"SizeGB": 16, "SpeedMTs": 3200, "ConfiguredMTs": 2133, "Maker": "Unknown", "Part": "CMK16GX4M1E3200C16"}
+        ]});
         s.system["device"]["ChassisTypes"] = json!([3]);
         let f = evaluate(&s);
-        assert!(f.iter().any(|x| x.id == "ram-single-channel"));
+        let one = f.iter().find(|x| x.id == "ram-single-channel").expect("one stick noticed");
+        assert!(one.details.contains(&"Current stick: Corsair CMK16GX4M1E3200C16".to_string()), "the maker comes from the part number: {:?}", one.details);
         assert!(f.iter().any(|x| x.id == "ram-slow"));
     }
 
