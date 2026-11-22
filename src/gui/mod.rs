@@ -384,6 +384,9 @@ pub struct UiState {
     /// Where the logo goes this frame, and who asked for it.
     pub mark_slot: Option<(Slot, egui::Rect)>,
     pub expanded: HashSet<String>,
+    /// The boxes on Home the person ticked or unticked, away from how they started. A new check
+    /// starts them afresh.
+    pub picks: HashMap<String, bool>,
     pub search: String,
     pub hide_personal: bool,
     pub banner_closed: bool,
@@ -659,6 +662,7 @@ impl App {
 
     fn set_snapshot(&mut self, s: Snapshot) {
         self.findings = rules::evaluate(&s);
+        self.ui.picks.clear();
         match snapshot::previous(&s.host, &s.id) {
             Some(prev) => {
                 self.changes = diff::diff(&prev, &s);

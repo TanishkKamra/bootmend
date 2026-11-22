@@ -8,7 +8,7 @@ use crate::fixes::Fix;
 use crate::rules::{plural, Action, Area, Finding, Level};
 use crate::snapshot::Snapshot;
 use eframe::egui::{self, CornerRadius, Margin, RichText, Sense, Stroke, Ui};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// How far through the plan the person is.
@@ -156,6 +156,7 @@ impl App {
         self.settings.ignored.insert(f.id.clone());
         self.save_settings();
         self.ui.expanded.remove(&f.id);
+        self.ui.picks.remove(&f.id);
         self.toast("Ignored. You'll find it at the end of Home.", true);
     }
 
@@ -176,24 +177,6 @@ impl App {
         self.leftovers().filter(|l| !l.done).map(|l| run::Item::clean(l.ids, l.todo.title))
     }
 
-    /// The safe work Bootmend can do by itself, in the plan's order: each open to-do that one
-    /// fix settles, and the leftover files.
-    fn safe_queue(&self, plan: &Plan) -> Vec<run::Item> {
-        plan.todos
-            .iter()
-            .filter(|(_, done)| !done)
-            .filter_map(|(f, _)| {
-                if f.id == LEFTOVERS {
-                    return plan.leftovers.as_ref().map(|l| run::Item::clean(l.ids.clone(), f.title.clone()));
-                }
-                match fixes_of(f).as_slice() {
-                    [fx] if fx.safe() => Some(run::Item::fix((*fx).clone(), f.title.clone(), f.area)),
-                    _ => None,
-                }
-            })
-            .collect()
-    }
-
     pub(super) fn home(&mut self, ui: &mut Ui, snap: &Arc<Snapshot>) {
         let p = pal(ui.ctx());
         // Measuring leftovers only reads folder sizes; clearing waits for a press.
@@ -201,9 +184,10 @@ impl App {
             self.start_cleanup_look(&ui.ctx().clone());
         }
         let plan = self.plan();
-        let queue = self.safe_queue(&plan);
-        let safe: Vec<&'static str> = plan.leftovers.as_ref().filter(|l| !l.done).map(|l| l.ids.clone()).unwrap_or_default();
-        self.hero(ui, snap, plan.prog, queue);
+        let picks = pickable(&plan.todos);
+        let (on, changed) = ticked(&picks, &self.ui.picks);
+        let queue = on.iter().filter_map(|f| queue_item(&plan, f)).collect();
+        self.hero(ui, snap, plan.prog, queue, picks.len(), changed);
         if !snap.errors.is_empty() {
             ui.add_space(S5);
             widgets::note(ui, p.amber, p.amber_bg, icon::WARN, |ui| {
@@ -217,13 +201,13 @@ impl App {
         }
         self.update_note(ui);
         ui.add_space(S6);
-        self.plan_list(ui, &plan.todos, &plan.ignored, &safe);
+        self.plan_list(ui, &plan.todos, &plan.ignored, &picks);
         self.schedule_offer(ui);
     }
 
     /// The verdict as the page title beside the Keystone, the progress line and the one button
-    /// that opens the safe work as a queue.
-    fn hero(&mut self, ui: &mut Ui, snap: &Snapshot, prog: Progress, queue: Vec<run::Item>) {
+    /// that opens the ticked to-dos as a queue. `offered` is how many have a box at all.
+    fn hero(&mut self, ui: &mut Ui, snap: &Snapshot, prog: Progress, queue: Vec<run::Item>, offered: usize, changed: bool) {
         let p = pal(ui.ctx());
         let (title, lede) = verdict(prog);
         let avail = ui.available_width();
@@ -251,15 +235,14 @@ impl App {
                     small(ui, format!("{} of {} done", prog.done, prog.total()));
                 });
             }
-            if n > 0 {
+            if offered > 0 {
                 ui.add_space(S2);
                 ui.horizontal(|ui| {
                     if cleaning {
                         ui.add(egui::Spinner::new().color(p.accent));
                         widgets::muted(ui, "Clearing leftover files");
                     } else {
-                        let label = if n == 1 { "Fix the safe one for me".to_string() } else { format!("Fix the {n} safe ones for me") };
-                        *fix = widgets::primary(ui, &label).clicked();
+                        *fix = widgets::primary_enabled(ui, &fix_label(n, changed), n > 0).clicked();
                     }
                 });
             }
@@ -298,7 +281,7 @@ impl App {
 
     /// One card holding the whole plan, grouped by level, then what was checked and found fine,
     /// then what the person ignored.
-    fn plan_list(&mut self, ui: &mut Ui, todos: &[(Finding, bool)], ignored: &[Finding], safe_ids: &[&'static str]) {
+    fn plan_list(&mut self, ui: &mut Ui, todos: &[(Finding, bool)], ignored: &[Finding], picks: &[(&Finding, bool)]) {
         let p = pal(ui.ctx());
         let fine: Vec<Finding> = self.findings.iter().filter(|f| f.level == Level::AllGood && !f.id.ends_with("-clear")).cloned().collect();
         if todos.is_empty() && fine.is_empty() && ignored.is_empty() {
@@ -326,7 +309,8 @@ impl App {
                         if i > 0 {
                             rule(ui);
                         }
-                        self.todo_row(ui, f, *done, safe_ids);
+                        let start = picks.iter().find(|(p, _)| p.id == f.id).map(|(_, s)| *s);
+                        self.todo_row(ui, f, *done, start);
                     }
                 }
                 if !fine.is_empty() {
@@ -423,11 +407,15 @@ impl App {
         }
     }
 
-    /// One to-do: its area's icon (a tick once it's done), what it is, and one button. "Fix it for me"
-    /// when one change does it; "Walk me through it" opens the steps in place.
-    fn todo_row(&mut self, ui: &mut Ui, f: &Finding, done: bool, safe_ids: &[&'static str]) {
+    /// One to-do: a box to tick when Bootmend can fix it by itself (`start` is how the box
+    /// starts), else its area's icon, a tick once it's done; then what it is and its button.
+    /// "Walk me through it" opens the steps in place.
+    fn todo_row(&mut self, ui: &mut Ui, f: &Finding, done: bool, start: Option<bool>) {
         let fixes = fixes_of(f);
         let leftovers = f.id == LEFTOVERS;
+        // While the leftovers clear, their row shows that instead of a box.
+        let mut on = start.filter(|_| !done && !(leftovers && self.busy.contains("cleanup"))).map(|s| self.ui.picks.get(&f.id).copied().unwrap_or(s));
+        let mut flipped = false;
         let copy = fixes.is_empty() && f.actions.contains(&Action::CopyFiles);
         let one_fix = leftovers || fixes.len() == 1 || copy;
         let more = !f.steps.is_empty() || !f.details.is_empty() || f.actions.len() > usize::from(fixes.len() == 1 || copy);
@@ -442,11 +430,17 @@ impl App {
         let text_w = if compact { avail - indent } else { (avail - indent - action_w).max(160.0) };
         let (title, summary, h) = row_text(ui, f, text_w);
         let mut toggle = false;
-        let mut clear = false;
         let mut ignore = false;
         let chevron = more && (one_fix || done);
         let text = |ui: &mut Ui| {
-            mark(ui, f.area, f.level, done);
+            match on.as_mut() {
+                Some(on) => {
+                    let r = widgets::tick_box(ui, on, &f.title);
+                    let r = if let [fx] = fixes.as_slice() { r.on_hover_text(fx.label()) } else { r };
+                    flipped = r.changed();
+                }
+                None => mark(ui, f.area, f.level, done),
+            }
             ui.add_space(S4);
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
@@ -462,7 +456,7 @@ impl App {
             ui.add_space(S2);
             ui.horizontal(|ui| {
                 ui.add_space(indent);
-                (toggle, clear) = self.todo_action(ui, f, &fixes, done, open, false);
+                toggle = self.todo_action(ui, f, done, open, false);
                 if chevron {
                     ui.add_space(S1);
                     toggle |= widgets::chevron(ui, open).clicked();
@@ -479,9 +473,7 @@ impl App {
                     toggle = widgets::chevron(ui, open).clicked();
                     ui.add_space(S1);
                 }
-                let (t, c) = self.todo_action(ui, f, &fixes, done, open, true);
-                toggle |= t;
-                clear = c;
+                toggle |= self.todo_action(ui, f, done, open, true);
                 if !done {
                     ui.add_space(S1);
                     ignore = ignore_button(ui, &f.title);
@@ -497,8 +489,12 @@ impl App {
                 self.ui.expanded.insert(f.id.clone());
             }
         }
-        if clear {
-            self.open_fixes(vec![run::Item::clean(safe_ids.to_vec(), f.title.clone())], Page::Home);
+        if let (Some(on), Some(start), true) = (on, start, flipped) {
+            if on == start {
+                self.ui.picks.remove(&f.id);
+            } else {
+                self.ui.picks.insert(f.id.clone(), on);
+            }
         }
         if ignore {
             self.ignore(f);
@@ -528,12 +524,13 @@ impl App {
 }
 
 impl App {
-    /// A to-do's one button, or what stands in for it: "Done", or a spinner while it works.
-    /// `rtl` is true when the row is filled from the right. Returns whether the steps were asked
-    /// for, and whether to clear the leftover files.
-    fn todo_action(&mut self, ui: &mut Ui, f: &Finding, fixes: &[&Fix], done: bool, open: bool, rtl: bool) -> (bool, bool) {
+    /// A to-do's one button, or what stands in for it: "Done", or a spinner while it works. A
+    /// to-do with a box has none: the top button fixes it. `rtl` is true when the row is filled
+    /// from the right. Returns whether the steps were asked for.
+    fn todo_action(&mut self, ui: &mut Ui, f: &Finding, done: bool, open: bool, rtl: bool) -> bool {
         let p = pal(ui.ctx());
-        let (mut toggle, mut clear) = (false, false);
+        let fixes = fixes_of(f);
+        let mut toggle = false;
         let spinner = |ui: &mut Ui| {
             ui.add(egui::Spinner::new().color(p.accent));
         };
@@ -553,21 +550,65 @@ impl App {
                 status(ui, rtl, spinner, |ui| {
                     widgets::muted(ui, "Clearing");
                 });
-            } else {
-                clear = widgets::secondary(ui, "Fix it for me").clicked();
-            }
-        } else if let [fx] = fixes {
-            if widgets::secondary(ui, "Fix it for me").on_hover_text(fx.label()).clicked() {
-                self.open_fixes(vec![run::Item::fix((*fx).clone(), f.title.clone(), f.area)], Page::Home);
             }
         } else if fixes.is_empty() && f.actions.contains(&Action::CopyFiles) {
             if widgets::secondary(ui, "Copy my files").on_hover_text("Copy your Documents, Desktop and Pictures to a USB drive").clicked() {
                 self.open_copy(&ui.ctx().clone());
             }
-        } else {
+        } else if fixes.len() != 1 {
             toggle = widgets::secondary(ui, if open { "Hide the steps" } else { "Walk me through it" }).clicked();
         }
-        (toggle, clear)
+        toggle
+    }
+}
+
+/// Whether a fix's box starts ticked: it's safe and quick. The half-hour Windows file repair
+/// and going back to an older driver wait to be asked for.
+fn starts_ticked(fx: &Fix) -> bool {
+    fx.safe() && fx.up_to_minutes().is_none()
+}
+
+/// Every open to-do Bootmend can fix by itself, in the plan's order, and whether its box starts
+/// ticked: each one a single fix settles, and the leftover files.
+fn pickable(todos: &[(Finding, bool)]) -> Vec<(&Finding, bool)> {
+    todos
+        .iter()
+        .filter(|(_, done)| !done)
+        .filter_map(|(f, _)| match fixes_of(f).as_slice() {
+            _ if f.id == LEFTOVERS => Some((f, true)),
+            [fx] => Some((f, starts_ticked(fx))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The ticked to-dos, in order, and whether any box differs from how it started. `choices`
+/// holds the boxes the person changed.
+fn ticked<'a>(picks: &[(&'a Finding, bool)], choices: &HashMap<String, bool>) -> (Vec<&'a Finding>, bool) {
+    let now = |(f, start): &(&Finding, bool)| choices.get(&f.id).copied().unwrap_or(*start);
+    let on = picks.iter().filter(|p| now(p)).map(|(f, _)| *f).collect();
+    (on, picks.iter().any(|p| now(p) != p.1))
+}
+
+/// The top button's words: the safe ones until the person changes a box, then what they picked.
+fn fix_label(n: usize, changed: bool) -> String {
+    match (n, changed) {
+        (0, _) => "Pick something to fix".into(),
+        (1, false) => "Fix the safe one for me".into(),
+        (1, true) => "Fix the one I picked".into(),
+        (n, false) => format!("Fix the {n} safe ones for me"),
+        (n, true) => format!("Fix the {n} I picked"),
+    }
+}
+
+/// The queue's box for a ticked to-do.
+fn queue_item(plan: &Plan, f: &Finding) -> Option<run::Item> {
+    if f.id == LEFTOVERS {
+        return plan.leftovers.as_ref().map(|l| run::Item::clean(l.ids.clone(), f.title.clone()));
+    }
+    match fixes_of(f).as_slice() {
+        [fx] => Some(run::Item::fix((*fx).clone(), f.title.clone(), f.area)),
+        _ => None,
     }
 }
 
@@ -660,6 +701,7 @@ fn mark(ui: &mut Ui, area: Area, level: Level, done: bool) {
 mod tests {
     use super::*;
     use crate::rules::Area;
+    use std::collections::HashMap;
 
     fn p(do_first: usize, worth: usize, nice: usize, done: usize) -> Progress {
         Progress { do_first, worth, nice, done }
@@ -719,6 +761,51 @@ mod tests {
         for x in [p(2, 0, 0, 0), p(0, 1, 1, 0), p(0, 0, 1, 0)] {
             assert!(verdict(x).1.ends_with("Nothing changes until you press a button."), "{x:?}");
         }
+    }
+
+    #[test]
+    fn only_to_dos_bootmend_can_fix_alone_get_a_box_and_the_quick_safe_ones_start_ticked() {
+        let fix = |id: &str, fx: Fix| (Finding::new(id, Area::Security, Level::WorthDoing, id).act(Action::Fix(fx)), false);
+        let driver = Fix::RollBackDriver { device: "pci-1".into(), name: "Graphics".into() };
+        let todos = vec![
+            fix("pua", Fix::EnablePua),
+            fix("repair", Fix::RepairWindowsFiles),
+            fix("driver", driver),
+            (Finding::new("walk", Area::Security, Level::DoFirst, "walk").step("Open Settings"), false),
+            (Finding::new("two", Area::Security, Level::WorthDoing, "two").act(Action::Fix(Fix::EnablePua)).act(Action::Fix(Fix::DisableSmb1)), false),
+            (fix("done", Fix::DisableSmb1).0, true),
+            (Finding::new("copy", Area::Stability, Level::DoFirst, "copy").act(Action::CopyFiles), false),
+            todo(LEFTOVERS, Level::NiceToHave),
+        ];
+        let got: Vec<(&str, bool)> = pickable(&todos).into_iter().map(|(f, on)| (f.id.as_str(), on)).collect();
+        // The half-hour repair and going back to an older driver wait to be asked for.
+        assert_eq!(got, [("pua", true), ("repair", false), ("driver", false), (LEFTOVERS, true)]);
+    }
+
+    #[test]
+    fn a_box_keeps_the_persons_choice_and_otherwise_how_it_started() {
+        let todos = [todo("a", Level::DoFirst), todo("b", Level::WorthDoing), todo("c", Level::WorthDoing)];
+        let picks: Vec<(&Finding, bool)> = todos.iter().map(|(f, _)| (f, f.id != "b")).collect();
+        let ids = |choices: &[(&str, bool)]| {
+            let choices: HashMap<String, bool> = choices.iter().map(|(id, on)| (id.to_string(), *on)).collect();
+            let (on, changed) = ticked(&picks, &choices);
+            (on.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), changed)
+        };
+        assert_eq!(ids(&[]), (vec!["a", "c"], false));
+        assert_eq!(ids(&[("b", true)]), (vec!["a", "b", "c"], true));
+        assert_eq!(ids(&[("a", false)]), (vec!["c"], true));
+        // A choice that matches how the box started, or one for a to-do that's gone, changes nothing.
+        assert_eq!(ids(&[("a", true), ("gone", true)]), (vec!["a", "c"], false));
+    }
+
+    #[test]
+    fn the_top_button_offers_the_safe_ones_until_a_box_changes() {
+        assert_eq!(fix_label(3, false), "Fix the 3 safe ones for me");
+        assert_eq!(fix_label(1, false), "Fix the safe one for me");
+        assert_eq!(fix_label(4, true), "Fix the 4 I picked");
+        assert_eq!(fix_label(1, true), "Fix the one I picked");
+        assert_eq!(fix_label(0, false), "Pick something to fix");
+        assert_eq!(fix_label(0, true), "Pick something to fix");
     }
 
     #[test]

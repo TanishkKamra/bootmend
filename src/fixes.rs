@@ -258,8 +258,8 @@ impl Fix {
         !matches!(self, Fix::RepairWindowsFiles | Fix::RollBackDriver { .. })
     }
 
-    /// Whether "Fix the safe ones for me" may include it. Going back to an older driver is a
-    /// judgement call that can't be undone, so it's only offered on its own to-do.
+    /// Whether its box on Home may start ticked. Going back to an older driver is a judgement
+    /// call that can't be undone, so it waits for the person to tick it.
     pub fn safe(&self) -> bool {
         !matches!(self, Fix::RollBackDriver { .. })
     }
