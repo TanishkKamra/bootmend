@@ -407,6 +407,11 @@ impl Run {
         self.stage == Stage::Running || self.clock < self.settle || (self.shown - self.p).abs() > 0.001 || self.items.iter().any(|i| (i.y - i.goal).abs() > 0.3)
     }
 
+    /// The whole percentage the bar shows.
+    pub fn percent(&self) -> u32 {
+        (self.shown * 100.0).floor().clamp(0.0, 100.0) as u32
+    }
+
     fn bump(&mut self, until: f32) {
         self.settle = self.settle.max(until);
     }
@@ -542,6 +547,10 @@ impl Run {
             }
         }
         self.shown = if self.reduced { self.p } else { self.shown + (self.p - self.shown) * (1.0 - (-dt / 260.0).exp()) };
+        // The easing never quite arrives, and drawing stops this close, so land the rest of the way.
+        if (self.p - self.shown).abs() <= 0.001 {
+            self.shown = self.p;
+        }
         if now >= self.hop_at + 170.0 {
             self.below = self.details;
         }
@@ -1012,7 +1021,7 @@ impl Run {
             }
         }
         let bar = Rect::from_min_max(pos2(panel.left() + PANEL_R, bar_y - 4.0), pos2(panel.right() - PANEL_R, bar_y + 4.0));
-        let pct = (self.shown * 100.0).floor().clamp(0.0, 100.0) as u32;
+        let pct = self.percent();
         ui.interact(bar, ui.id().with("run-progress"), Sense::hover()).widget_info(|| {
             let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, "Progress");
             info.value = Some(f64::from(pct));
@@ -1366,6 +1375,28 @@ mod tests {
         one.ticked_now();
         assert_eq!(one.heads().0, "Fixed");
         assert!(!one.heads().1.contains("undo"), "{:?}", one.heads());
+    }
+
+    /// The app stops drawing once nothing moves, so the bar has to read 100% by then.
+    #[test]
+    fn the_percentage_reaches_100_before_the_screen_stops() {
+        let mut r = fixes(2);
+        r.start();
+        for _ in 0..20000 {
+            if !r.moving() {
+                break;
+            }
+            for i in 0..r.items.len() {
+                if r.items[i].state == State::Now && r.items[i].took.is_none() {
+                    r.on_result(i, Ok(()), 10.0);
+                }
+            }
+            if r.step(16.0).is_some() {
+                r.ticked_now();
+            }
+        }
+        assert!(!r.moving(), "the screen settled");
+        assert_eq!(r.percent(), 100);
     }
 
     #[test]
