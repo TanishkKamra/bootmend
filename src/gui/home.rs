@@ -295,16 +295,12 @@ impl App {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let mut first = true;
-                for level in [Level::DoFirst, Level::WorthDoing, Level::NiceToHave] {
-                    let rows: Vec<&(Finding, bool)> = todos.iter().filter(|(f, _)| f.level == level).collect();
-                    if rows.is_empty() {
-                        continue;
-                    }
+                for (name, rows) in groups(todos) {
                     if !first {
                         rule(ui);
                     }
                     first = false;
-                    group_head(ui, level.name(), rows.len(), None);
+                    group_head(ui, name, rows.len(), None);
                     for (i, (f, done)) in rows.into_iter().enumerate() {
                         if i > 0 {
                             rule(ui);
@@ -571,15 +567,32 @@ fn starts_ticked(fx: &Fix) -> bool {
 /// Every open to-do Bootmend can fix by itself, in the plan's order, and whether its box starts
 /// ticked: each one a single fix settles, and the leftover files.
 fn pickable(todos: &[(Finding, bool)]) -> Vec<(&Finding, bool)> {
-    todos
-        .iter()
-        .filter(|(_, done)| !done)
-        .filter_map(|(f, _)| match fixes_of(f).as_slice() {
-            _ if f.id == LEFTOVERS => Some((f, true)),
-            [fx] => Some((f, starts_ticked(fx))),
-            _ => None,
-        })
-        .collect()
+    todos.iter().filter(|(_, done)| !done).filter_map(|(f, _)| can_fix(f).map(|on| (f, on))).collect()
+}
+
+/// Whether Bootmend can fix the to-do by itself, and if so whether its box starts ticked.
+fn can_fix(f: &Finding) -> Option<bool> {
+    match fixes_of(f).as_slice() {
+        _ if f.id == LEFTOVERS => Some(true),
+        [fx] => Some(starts_ticked(fx)),
+        _ => None,
+    }
+}
+
+/// The heading of the group that holds every to-do with a box, first on Home.
+const CAN_FIX: &str = "Bootmend can fix these";
+
+/// Home's groups in order, leaving out empty ones: the to-dos Bootmend can fix by itself first,
+/// right under the button that fixes them, then the rest by how much they matter. A to-do it has
+/// fixed stays in the first group, so nothing jumps between groups.
+fn groups(todos: &[(Finding, bool)]) -> Vec<(&'static str, Vec<&(Finding, bool)>)> {
+    let (fix, rest): (Vec<_>, Vec<_>) = todos.iter().partition(|(f, _)| can_fix(f).is_some());
+    let mut out = vec![(CAN_FIX, fix)];
+    for level in [Level::DoFirst, Level::WorthDoing, Level::NiceToHave] {
+        out.push((level.name(), rest.iter().copied().filter(|(f, _)| f.level == level).collect()));
+    }
+    out.retain(|(_, rows)| !rows.is_empty());
+    out
 }
 
 /// The ticked to-dos, in order, and whether any box differs from how it started. `choices`
@@ -780,6 +793,34 @@ mod tests {
         let got: Vec<(&str, bool)> = pickable(&todos).into_iter().map(|(f, on)| (f.id.as_str(), on)).collect();
         // The half-hour repair and going back to an older driver wait to be asked for.
         assert_eq!(got, [("pua", true), ("repair", false), ("driver", false), (LEFTOVERS, true)]);
+    }
+
+    #[test]
+    fn to_dos_bootmend_can_fix_alone_come_first_in_a_group_of_their_own() {
+        let fix = |id: &str, level, fx: Fix| (Finding::new(id, Area::Security, level, id).act(Action::Fix(fx)), false);
+        let two = Finding::new("two", Area::Security, Level::WorthDoing, "two").act(Action::Fix(Fix::EnablePua)).act(Action::Fix(Fix::DisableSmb1));
+        let todos = vec![
+            todo("walk", Level::DoFirst),
+            fix("pua", Level::WorthDoing, Fix::EnablePua),
+            todo("later", Level::NiceToHave),
+            (fix("smb", Level::DoFirst, Fix::DisableSmb1).0, true),
+            (two, false),
+            todo(LEFTOVERS, Level::NiceToHave),
+        ];
+        let names = |todos: &[(Finding, bool)]| -> Vec<(&'static str, Vec<String>)> {
+            groups(todos).into_iter().map(|(name, rows)| (name, rows.iter().map(|(f, _)| f.id.clone()).collect())).collect()
+        };
+        // A fixed one keeps its place, so nothing jumps between groups after a fix.
+        assert_eq!(
+            names(&todos),
+            [
+                (CAN_FIX, vec!["pua".to_string(), "smb".into(), LEFTOVERS.into()]),
+                (Level::DoFirst.name(), vec!["walk".into()]),
+                (Level::WorthDoing.name(), vec!["two".into()]),
+                (Level::NiceToHave.name(), vec!["later".into()]),
+            ]
+        );
+        assert_eq!(names(&[todo("walk", Level::DoFirst)]), [(Level::DoFirst.name(), vec!["walk".to_string()])], "no empty groups");
     }
 
     #[test]
