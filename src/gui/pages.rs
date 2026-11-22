@@ -1617,12 +1617,18 @@ fn this_pc(ui: &mut Ui, snap: &Snapshot) {
                 ("Most the board supports", num(mem.f("MaxSupportedGB"), " GB")),
             ],
         );
+        if mem.i("Slots").is_some() || mem.f("MaxSupportedGB").is_some() {
+            ui.add_space(S1);
+            small(ui, crate::rules::upgrades::MEMORY_SOURCE);
+        }
         ui.add_space(S2);
+        let slots = crate::rules::upgrades::slot_names(&sticks);
         let rows: Vec<Vec<String>> = sticks
             .iter()
-            .map(|m| {
+            .zip(slots)
+            .map(|(m, slot)| {
                 vec![
-                    s(m, "Slot"),
+                    slot,
                     num(m.f("SizeGB"), " GB").unwrap_or_default(),
                     s(m, "Type"),
                     num(m.f("SpeedMTs"), " MT/s").unwrap_or_default(),
